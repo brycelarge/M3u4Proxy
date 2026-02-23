@@ -84,6 +84,37 @@ m3u4prox:
 
 ---
 
+## Built-in OpenVPN Support
+
+M3u4Prox includes built-in OpenVPN support to bypass ISP restrictions on IPTV content. The application can route traffic through VPN tunnels to access geo-blocked IPTV sources and avoid ISP throttling.
+
+### Supported VPN Providers
+
+- **Custom** - Use your own OpenVPN configuration files
+- **PIA** (Private Internet Access)
+- **Surfshark**
+- **IPVanish**
+- **NordVPN**
+- **VyprVPN**
+- **ProtonVPN**
+
+### VPN Configuration
+
+The OpenVPN integration is built using [openvpn-buildtools](https://github.com/brycelarge/openvpn-buildtools) which provides automated setup and configuration management. VPN configurations are automatically downloaded and configured when you specify a provider.
+
+### VPN Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `VPN_ENABLED` | `false` | Enable/disable VPN routing |
+| `OPENVPN_PROVIDER` | `CUSTOM` | VPN provider (see list above) |
+| `OPENVPN_CONFIG` | - | Specific config file (optional) |
+| `OPENVPN_USERNAME` | - | VPN username |
+| `OPENVPN_PASSWORD` | - | VPN password |
+| `LOCAL_NETWORK` | - | CIDRs to route outside VPN (optional) |
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
