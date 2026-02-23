@@ -60,6 +60,7 @@ RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
 RUN addgroup --system m3u4prox && \
     adduser --disabled-password --home /app --ingroup m3u4prox --no-create-home --system m3u4prox && \
     mkdir -p /data/db /data/epg /data/epg-sites /data/logs/m3u4prox /data/logos /data/playlists /data/config && \
+    ln -sf /data/epg /epg && \
     chown -R m3u4prox:m3u4prox /data && \
     chmod -R 755 /data
 
