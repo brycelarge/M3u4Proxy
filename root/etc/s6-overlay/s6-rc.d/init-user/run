@@ -1,0 +1,45 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+set -euo pipefail
+
+puid="${PUID:-99}"
+pgid="${PGID:-100}"
+
+# Normalize umask but do not enforce here; longrun sets it before exec.
+_umask="${UMASK:-022}"
+
+if ! getent group m3u4prox >/dev/null 2>&1; then
+    addgroup --system m3u4prox >/dev/null 2>&1 || true
+fi
+
+if ! getent passwd m3u4prox >/dev/null 2>&1; then
+    adduser \
+        --disabled-password \
+        --home /app \
+        --ingroup m3u4prox \
+        --no-create-home \
+        --system \
+        m3u4prox >/dev/null 2>&1 || true
+fi
+
+# Adjust group ID if needed
+current_gid="$(getent group m3u4prox | cut -d: -f3 || true)"
+if [ -n "${current_gid}" ] && [ "${current_gid}" != "${pgid}" ]; then
+    if ! getent group "${pgid}" >/dev/null 2>&1; then
+        groupmod -g "${pgid}" m3u4prox
+    fi
+fi
+
+# Adjust user ID and primary group if needed
+current_uid="$(getent passwd m3u4prox | cut -d: -f3 || true)"
+if [ -n "${current_uid}" ] && [ "${current_uid}" != "${puid}" ]; then
+    usermod -u "${puid}" m3u4prox
+fi
+
+# Ensure primary group is correct (either by name or gid)
+usermod -g "${pgid}" m3u4prox 2>/dev/null || usermod -g m3u4prox m3u4prox
+
+# Ensure app dirs exist and have correct ownership
+mkdir -p /data
+chown -R m3u4prox:m3u4prox /data
