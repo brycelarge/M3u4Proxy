@@ -47,6 +47,8 @@ COPY --from=builder /app/dist ./dist
 
 COPY root/ /
 
+# can we not create directories and set permissions here?
+
 RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
     find /etc/openvpn -name 'map.sh'    -exec chmod +x {} + && \
     find /etc/openvpn -name 'up.sh'     -exec chmod +x {} + && \
@@ -54,11 +56,14 @@ RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
     find /etc/s6-overlay/s6-rc.d -name 'up'  -exec chmod +x {} + && \
     chmod +x /scripts/*.sh
 
+# Ensure data directories exist with correct ownership
+RUN mkdir -p /data/db /epg-sites && \
+    chown -R m3u4prox:m3u4prox /data /epg-sites && \
+    chmod -R 755 /data /epg-sites
+
 # Create symlinks to node_modules in epg-sites subdirectories so config files can require() dependencies
 # This is needed because epg-grabber config files use require() but run in isolation
-RUN mkdir -p /epg-sites && \
-    chmod 777 /epg-sites && \
-    for dir in /epg-sites/*/; do \
+RUN for dir in /epg-sites/*/; do \
         if [ -d "$dir" ]; then \
             ln -sf /app/node_modules "$dir/node_modules"; \
         fi; \
