@@ -1,0 +1,10 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+set -euo pipefail
+
+mkdir -p /data/logs/m3u-manager
+
+echo "[m3u-manager] starting on port ${PORT:-3005}"
+
+exec node /app/server/index.js

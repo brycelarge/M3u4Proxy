@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+/* ── Dark theme (default) ───────────────────────────────────────────────────── */
+:root {
+  --bg-base:    #0f1117;
+  --bg-surface: #1a1d27;
+  --bg-surface2:#22263a;
+  --bg-surface3:#13151f;
+  --border:     #2e3250;
+  --border2:    #3a3f5c;
+  --text-primary:   #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted:     #64748b;
+  --text-faint:     #334155;
+  --scrollbar:  #2e3250;
+}
+
+/* ── Light theme ────────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg-base:    #f1f5f9;
+  --bg-surface: #ffffff;
+  --bg-surface2:#f8fafc;
+  --bg-surface3:#f1f5f9;
+  --border:     #e2e8f0;
+  --border2:    #cbd5e1;
+  --text-primary:   #0f172a;
+  --text-secondary: #475569;
+  --text-muted:     #94a3b8;
+  --text-faint:     #cbd5e1;
+  --scrollbar:  #cbd5e1;
+}
+
+/* ── Map hardcoded Tailwind arbitrary colors to CSS vars ────────────────────── */
+/* This lets [bg-[#0f1117]] etc. pick up the theme without touching every file */
+[data-theme="light"] {
+  /* backgrounds */
+  .bg-\[\#0f1117\]  { background-color: var(--bg-base) !important; }
+  .bg-\[\#1a1d27\]  { background-color: var(--bg-surface) !important; }
+  .bg-\[\#22263a\]  { background-color: var(--bg-surface2) !important; }
+  .bg-\[\#13151f\]  { background-color: var(--bg-surface3) !important; }
+
+  /* borders */
+  .border-\[\#2e3250\] { border-color: var(--border) !important; }
+  .border-\[\#3a3f5c\] { border-color: var(--border2) !important; }
+
+  /* text */
+  .text-slate-100 { color: #0f172a !important; }
+  .text-slate-200 { color: #1e293b !important; }
+  .text-slate-300 { color: #334155 !important; }
+  .text-slate-400 { color: #475569 !important; }
+  .text-slate-500 { color: #64748b !important; }
+  .text-slate-600 { color: #94a3b8 !important; }
+  .text-slate-700 { color: #cbd5e1 !important; }
+
+  /* hover backgrounds */
+  .hover\:bg-\[\#22263a\]:hover { background-color: var(--bg-surface2) !important; }
+  .hover\:bg-\[\#22263a\]\/50:hover { background-color: color-mix(in srgb, var(--bg-surface2) 50%, transparent) !important; }
+}
+
+@theme {
+  --color-surface: #1a1d27;
+  --color-surface2: #22263a;
+  --color-border: #2e3250;
+  --color-accent: #6c63ff;
+  --color-muted: #64748b;
+}
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  transition: background-color 0.2s, color 0.2s;
+}
+
+* { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #64748b; }

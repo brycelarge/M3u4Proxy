@@ -1,0 +1,306 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 780" width="1100" height="780" font-family="'Inter', 'Segoe UI', sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f1117"/>
+      <stop offset="100%" stop-color="#13151f"/>
+    </linearGradient>
+    <linearGradient id="sourceGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e3a5f"/>
+      <stop offset="100%" stop-color="#162d4a"/>
+    </linearGradient>
+    <linearGradient id="epgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2d1f4a"/>
+      <stop offset="100%" stop-color="#221740"/>
+    </linearGradient>
+    <linearGradient id="browserGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a3040"/>
+      <stop offset="100%" stop-color="#122030"/>
+    </linearGradient>
+    <linearGradient id="liveGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f3320"/>
+      <stop offset="100%" stop-color="#0a2518"/>
+    </linearGradient>
+    <linearGradient id="vodGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2d1a40"/>
+      <stop offset="100%" stop-color="#221230"/>
+    </linearGradient>
+    <linearGradient id="reviewGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1a2a40"/>
+      <stop offset="100%" stop-color="#121e30"/>
+    </linearGradient>
+    <linearGradient id="epgmapGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2d2a10"/>
+      <stop offset="100%" stop-color="#201e08"/>
+    </linearGradient>
+    <linearGradient id="hdhrGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f2a3a"/>
+      <stop offset="100%" stop-color="#081e2a"/>
+    </linearGradient>
+    <linearGradient id="xtreamGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2a1a0f"/>
+      <stop offset="100%" stop-color="#1e1208"/>
+    </linearGradient>
+    <linearGradient id="m3uGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f2a1a"/>
+      <stop offset="100%" stop-color="#081e12"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#4a5568"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#4299e1"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#48bb78"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#9f7aea"/>
+    </marker>
+    <marker id="arrowYellow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#ecc94b"/>
+    </marker>
+    <marker id="arrowCyan" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#4fd1c5"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="780" fill="url(#bgGrad)" rx="12"/>
+
+  <!-- Title -->
+  <text x="550" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#e2e8f0" letter-spacing="0.5">M3u4Proxy — Data Flow Architecture</text>
+  <text x="550" y="54" text-anchor="middle" font-size="11" fill="#4a5568">From sources to final output</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- COLUMN 1: INPUTS (Sources + EPG) -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Sources box -->
+  <rect x="30" y="80" width="180" height="160" rx="10" fill="url(#sourceGrad)" stroke="#2b6cb0" stroke-width="1.5"/>
+  <rect x="30" y="80" width="180" height="32" rx="10" fill="#2b6cb0" opacity="0.6"/>
+  <rect x="30" y="100" width="180" height="12" rx="0" fill="#2b6cb0" opacity="0.6"/>
+  <text x="120" y="101" text-anchor="middle" font-size="11" font-weight="700" fill="#90cdf4" letter-spacing="0.5">📡  SOURCES</text>
+  <text x="50" y="128" font-size="10" fill="#63b3ed">• M3U URLs</text>
+  <text x="50" y="144" font-size="10" fill="#63b3ed">• Xtream Codes API</text>
+  <text x="50" y="160" font-size="10" fill="#63b3ed">• Local M3U files</text>
+  <text x="50" y="176" font-size="10" fill="#4a90d9">Auto-refresh schedules</text>
+  <text x="50" y="192" font-size="10" fill="#4a90d9">Multi-source support</text>
+  <text x="50" y="208" font-size="10" fill="#4a90d9">Group detection</text>
+  <text x="50" y="228" font-size="9" fill="#2b6cb0">source_channels table</text>
+
+  <!-- EPG Sources box -->
+  <rect x="30" y="260" width="180" height="150" rx="10" fill="url(#epgGrad)" stroke="#6b46c1" stroke-width="1.5"/>
+  <rect x="30" y="260" width="180" height="32" rx="10" fill="#6b46c1" opacity="0.6"/>
+  <rect x="30" y="280" width="180" height="12" rx="0" fill="#6b46c1" opacity="0.6"/>
+  <text x="120" y="281" text-anchor="middle" font-size="11" font-weight="700" fill="#d6bcfa" letter-spacing="0.5">📺  EPG SOURCES</text>
+  <text x="50" y="308" font-size="10" fill="#b794f4">• XMLTV URLs</text>
+  <text x="50" y="324" font-size="10" fill="#b794f4">• iptv-org/epg sites</text>
+  <text x="50" y="340" font-size="10" fill="#b794f4">• Custom guide.xml</text>
+  <text x="50" y="356" font-size="10" fill="#9f7aea">Auto-grab cron job</text>
+  <text x="50" y="372" font-size="10" fill="#9f7aea">Channel name matching</text>
+  <text x="50" y="392" font-size="9" fill="#6b46c1">epg_site_channels table</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- COLUMN 2: CHANNEL BROWSER -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <rect x="270" y="80" width="190" height="200" rx="10" fill="url(#browserGrad)" stroke="#3182ce" stroke-width="1.5"/>
+  <rect x="270" y="80" width="190" height="32" rx="10" fill="#3182ce" opacity="0.5"/>
+  <rect x="270" y="100" width="190" height="12" rx="0" fill="#3182ce" opacity="0.5"/>
+  <text x="365" y="101" text-anchor="middle" font-size="11" font-weight="700" fill="#bee3f8" letter-spacing="0.5">🔍  CHANNEL BROWSER</text>
+  <text x="290" y="128" font-size="10" fill="#90cdf4">Browse all source channels</text>
+  <text x="290" y="144" font-size="10" fill="#90cdf4">Filter by group / type</text>
+  <text x="290" y="160" font-size="10" fill="#90cdf4">Live / Series / Movies</text>
+  <text x="290" y="176" font-size="10" fill="#63b3ed">Select channels per group</text>
+  <text x="290" y="192" font-size="10" fill="#63b3ed">Custom names &amp; EPG IDs</text>
+  <text x="290" y="208" font-size="10" fill="#63b3ed">Channel number ordering</text>
+  <text x="290" y="228" font-size="9" fill="#2b6cb0">Saves to playlist_channels</text>
+  <text x="290" y="244" font-size="9" fill="#2b6cb0">via group selections</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- COLUMN 3: PLAYLISTS (Live + VOD) -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Live Playlist -->
+  <rect x="530" y="80" width="170" height="150" rx="10" fill="url(#liveGrad)" stroke="#276749" stroke-width="1.5"/>
+  <rect x="530" y="80" width="170" height="32" rx="10" fill="#276749" opacity="0.7"/>
+  <rect x="530" y="100" width="170" height="12" rx="0" fill="#276749" opacity="0.7"/>
+  <text x="615" y="101" text-anchor="middle" font-size="11" font-weight="700" fill="#9ae6b4" letter-spacing="0.5">📡  LIVE PLAYLIST</text>
+  <text x="548" y="128" font-size="10" fill="#68d391">Live TV channels</text>
+  <text x="548" y="144" font-size="10" fill="#68d391">Custom group ordering</text>
+  <text x="548" y="160" font-size="10" fill="#68d391">EPG ID overrides</text>
+  <text x="548" y="176" font-size="10" fill="#48bb78">Review &amp; regroup</text>
+  <text x="548" y="192" font-size="10" fill="#48bb78">Sort order control</text>
+  <text x="548" y="218" font-size="9" fill="#276749">playlist_type = live</text>
+
+  <!-- VOD Playlist -->
+  <rect x="530" y="250" width="170" height="150" rx="10" fill="url(#vodGrad)" stroke="#6b46c1" stroke-width="1.5"/>
+  <rect x="530" y="250" width="170" height="32" rx="10" fill="#6b46c1" opacity="0.6"/>
+  <rect x="530" y="270" width="170" height="12" rx="0" fill="#6b46c1" opacity="0.6"/>
+  <text x="615" y="271" text-anchor="middle" font-size="11" font-weight="700" fill="#d6bcfa" letter-spacing="0.5">🎬  VOD PLAYLIST</text>
+  <text x="548" y="298" font-size="10" fill="#b794f4">Movies &amp; Series</text>
+  <text x="548" y="314" font-size="10" fill="#b794f4">475k+ channels</text>
+  <text x="548" y="330" font-size="10" fill="#b794f4">Category grouping</text>
+  <text x="548" y="346" font-size="10" fill="#9f7aea">Xtream API only</text>
+  <text x="548" y="362" font-size="10" fill="#9f7aea">Not served as M3U</text>
+  <text x="548" y="388" font-size="9" fill="#6b46c1">playlist_type = vod</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- COLUMN 4: REVIEW & EPG MAPPING -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Review & Groups -->
+  <rect x="770" y="80" width="170" height="150" rx="10" fill="url(#reviewGrad)" stroke="#2c5282" stroke-width="1.5"/>
+  <rect x="770" y="80" width="170" height="32" rx="10" fill="#2c5282" opacity="0.7"/>
+  <rect x="770" y="100" width="170" height="12" rx="0" fill="#2c5282" opacity="0.7"/>
+  <text x="855" y="101" text-anchor="middle" font-size="11" font-weight="700" fill="#bee3f8" letter-spacing="0.5">✏️  REVIEW &amp; GROUPS</text>
+  <text x="788" y="128" font-size="10" fill="#90cdf4">Rename channels</text>
+  <text x="788" y="144" font-size="10" fill="#90cdf4">Reassign groups</text>
+  <text x="788" y="160" font-size="10" fill="#90cdf4">Set channel numbers</text>
+  <text x="788" y="176" font-size="10" fill="#63b3ed">Reorder groups</text>
+  <text x="788" y="192" font-size="10" fill="#63b3ed">Live playlists only</text>
+  <text x="788" y="218" font-size="9" fill="#2c5282">Writes to playlist_channels</text>
+
+  <!-- EPG Mapping -->
+  <rect x="770" y="250" width="170" height="150" rx="10" fill="url(#epgmapGrad)" stroke="#975a16" stroke-width="1.5"/>
+  <rect x="770" y="250" width="170" height="32" rx="10" fill="#975a16" opacity="0.7"/>
+  <rect x="770" y="270" width="170" height="12" rx="0" fill="#975a16" opacity="0.7"/>
+  <text x="855" y="271" text-anchor="middle" font-size="11" font-weight="700" fill="#fefcbf" letter-spacing="0.5">🗺️  EPG MAPPING</text>
+  <text x="788" y="298" font-size="10" fill="#faf089">Auto-match by name</text>
+  <text x="788" y="314" font-size="10" fill="#faf089">Manual overrides</text>
+  <text x="788" y="330" font-size="10" fill="#faf089">tvg-id → xmltv-id</text>
+  <text x="788" y="346" font-size="10" fill="#ecc94b">Dice similarity scoring</text>
+  <text x="788" y="362" font-size="10" fill="#ecc94b">Per-channel EPG source</text>
+  <text x="788" y="388" font-size="9" fill="#975a16">epg_mappings table</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- COLUMN 5: OUTPUTS -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- HDHomeRun -->
+  <rect x="30" y="490" width="220" height="130" rx="10" fill="url(#hdhrGrad)" stroke="#2c7a7b" stroke-width="1.5"/>
+  <rect x="30" y="490" width="220" height="32" rx="10" fill="#2c7a7b" opacity="0.7"/>
+  <rect x="30" y="510" width="220" height="12" rx="0" fill="#2c7a7b" opacity="0.7"/>
+  <text x="140" y="511" text-anchor="middle" font-size="11" font-weight="700" fill="#b2f5ea" letter-spacing="0.5">📡  HDHOMERUN TUNER</text>
+  <text x="50" y="538" font-size="10" fill="#81e6d9">Virtual tuner device</text>
+  <text x="50" y="554" font-size="10" fill="#81e6d9">Plex / Emby / Jellyfin</text>
+  <text x="50" y="570" font-size="10" fill="#4fd1c5">Port 5004 (per device)</text>
+  <text x="50" y="586" font-size="10" fill="#4fd1c5">EpgChannelId in lineup</text>
+  <text x="50" y="608" font-size="9" fill="#2c7a7b">/discover.json  /lineup.json</text>
+
+  <!-- Xtream Codes API -->
+  <rect x="290" y="490" width="220" height="130" rx="10" fill="url(#xtreamGrad)" stroke="#c05621" stroke-width="1.5"/>
+  <rect x="290" y="490" width="220" height="32" rx="10" fill="#c05621" opacity="0.7"/>
+  <rect x="290" y="510" width="220" height="12" rx="0" fill="#c05621" opacity="0.7"/>
+  <text x="400" y="511" text-anchor="middle" font-size="11" font-weight="700" fill="#feebc8" letter-spacing="0.5">📺  XTREAM CODES API</text>
+  <text x="310" y="538" font-size="10" fill="#fbd38d">Live + VOD + Series</text>
+  <text x="310" y="554" font-size="10" fill="#fbd38d">TiviMate / Smarters</text>
+  <text x="310" y="570" font-size="10" fill="#f6ad55">Per-user credentials</text>
+  <text x="310" y="586" font-size="10" fill="#f6ad55">Max connections enforced</text>
+  <text x="310" y="608" font-size="9" fill="#c05621">/xtream/player_api.php</text>
+
+  <!-- M3U Output -->
+  <rect x="550" y="490" width="220" height="130" rx="10" fill="url(#m3uGrad)" stroke="#276749" stroke-width="1.5"/>
+  <rect x="550" y="490" width="220" height="32" rx="10" fill="#276749" opacity="0.7"/>
+  <rect x="550" y="510" width="220" height="12" rx="0" fill="#276749" opacity="0.7"/>
+  <text x="660" y="511" text-anchor="middle" font-size="11" font-weight="700" fill="#c6f6d5" letter-spacing="0.5">📄  M3U + XMLTV</text>
+  <text x="570" y="538" font-size="10" fill="#9ae6b4">M3U playlist file</text>
+  <text x="570" y="554" font-size="10" fill="#9ae6b4">XMLTV EPG guide</text>
+  <text x="570" y="570" font-size="10" fill="#68d391">Tuliprox compatible</text>
+  <text x="570" y="586" font-size="10" fill="#68d391">Live playlists only</text>
+  <text x="570" y="608" font-size="9" fill="#276749">/api/playlists/:id/m3u  .xmltv</text>
+
+  <!-- Stream Proxy -->
+  <rect x="810" y="490" width="220" height="130" rx="10" fill="#13151f" stroke="#4a5568" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <rect x="810" y="490" width="220" height="32" rx="10" fill="#2d3748" opacity="0.7"/>
+  <rect x="810" y="510" width="220" height="12" rx="0" fill="#2d3748" opacity="0.7"/>
+  <text x="920" y="511" text-anchor="middle" font-size="11" font-weight="700" fill="#e2e8f0" letter-spacing="0.5">🔀  STREAM PROXY</text>
+  <text x="830" y="538" font-size="10" fill="#a0aec0">All streams proxied</text>
+  <text x="830" y="554" font-size="10" fill="#a0aec0">VPN applied to traffic</text>
+  <text x="830" y="570" font-size="10" fill="#718096">Connection limits</text>
+  <text x="830" y="586" font-size="10" fill="#718096">Dead channel tracking</text>
+  <text x="830" y="608" font-size="9" fill="#4a5568">/stream/:channelId</text>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- ARROWS -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+
+  <!-- Sources → Channel Browser -->
+  <path d="M210,160 L270,160" stroke="#4299e1" stroke-width="1.5" fill="none" marker-end="url(#arrowBlue)"/>
+
+  <!-- EPG Sources → EPG Mapping -->
+  <path d="M210,335 Q490,335 770,335" stroke="#9f7aea" stroke-width="1.5" fill="none" stroke-dasharray="6,3" marker-end="url(#arrowPurple)"/>
+
+  <!-- Channel Browser → Live Playlist -->
+  <path d="M460,140 L530,140" stroke="#48bb78" stroke-width="1.5" fill="none" marker-end="url(#arrowGreen)"/>
+
+  <!-- Channel Browser → VOD Playlist -->
+  <path d="M460,220 Q495,220 495,325 L530,325" stroke="#9f7aea" stroke-width="1.5" fill="none" marker-end="url(#arrowPurple)"/>
+
+  <!-- Live Playlist → Review & Groups -->
+  <path d="M700,155 L770,155" stroke="#63b3ed" stroke-width="1.5" fill="none" marker-end="url(#arrowBlue)"/>
+
+  <!-- Live Playlist → EPG Mapping -->
+  <path d="M700,190 Q735,190 735,325 L770,325" stroke="#ecc94b" stroke-width="1.5" fill="none" stroke-dasharray="6,3" marker-end="url(#arrowYellow)"/>
+
+  <!-- Review & Groups → HDHomeRun (down-left) -->
+  <path d="M855,230 L855,440 Q855,470 810,470 Q600,470 250,470 Q180,470 140,490" stroke="#4fd1c5" stroke-width="1.5" fill="none" marker-end="url(#arrowCyan)"/>
+
+  <!-- EPG Mapping → HDHomeRun -->
+  <path d="M855,400 L855,440" stroke="#ecc94b" stroke-width="1.2" fill="none" stroke-dasharray="4,3"/>
+
+  <!-- Review & Groups → M3U -->
+  <path d="M940,230 Q940,460 660,460 L660,490" stroke="#48bb78" stroke-width="1.5" fill="none" marker-end="url(#arrowGreen)"/>
+
+  <!-- EPG Mapping → M3U -->
+  <path d="M940,400 Q940,450 660,450" stroke="#ecc94b" stroke-width="1.2" fill="none" stroke-dasharray="4,3"/>
+
+  <!-- Live Playlist → Xtream Codes -->
+  <path d="M615,230 Q615,460 400,460 L400,490" stroke="#f6ad55" stroke-width="1.5" fill="none" marker-end="url(#arrowYellow)"/>
+
+  <!-- VOD Playlist → Xtream Codes -->
+  <path d="M615,400 Q615,450 400,450" stroke="#9f7aea" stroke-width="1.5" fill="none" marker-end="url(#arrowPurple)"/>
+
+  <!-- All outputs → Stream Proxy -->
+  <path d="M250,555 Q270,555 810,555" stroke="#718096" stroke-width="1" fill="none" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- LEGEND -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <rect x="30" y="660" width="1040" height="100" rx="8" fill="#0d0f18" stroke="#2d3748" stroke-width="1"/>
+  <text x="50" y="682" font-size="10" font-weight="700" fill="#718096" letter-spacing="1">LEGEND</text>
+
+  <!-- Legend items -->
+  <line x1="50" y1="700" x2="80" y2="700" stroke="#4299e1" stroke-width="1.5"/>
+  <text x="86" y="704" font-size="10" fill="#718096">Source data flow</text>
+
+  <line x1="200" y1="700" x2="230" y2="700" stroke="#9f7aea" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="236" y="704" font-size="10" fill="#718096">EPG data flow</text>
+
+  <line x1="350" y1="700" x2="380" y2="700" stroke="#48bb78" stroke-width="1.5"/>
+  <text x="386" y="704" font-size="10" fill="#718096">Live playlist flow</text>
+
+  <line x1="510" y1="700" x2="540" y2="700" stroke="#f6ad55" stroke-width="1.5"/>
+  <text x="546" y="704" font-size="10" fill="#718096">Xtream API flow</text>
+
+  <line x1="660" y1="700" x2="690" y2="700" stroke="#4fd1c5" stroke-width="1.5"/>
+  <text x="696" y="704" font-size="10" fill="#718096">HDHomeRun flow</text>
+
+  <line x1="810" y1="700" x2="840" y2="700" stroke="#718096" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="846" y="704" font-size="10" fill="#718096">Stream proxy (all outputs)</text>
+
+  <!-- Bottom note -->
+  <text x="550" y="740" text-anchor="middle" font-size="10" fill="#4a5568">All stream URLs proxied through /stream/:channelId — VPN (OpenVPN tun0) applied to all outbound traffic from container</text>
+
+  <!-- Step labels -->
+  <text x="120" y="72" text-anchor="middle" font-size="9" font-weight="700" fill="#4a5568" letter-spacing="1">STEP 1</text>
+  <text x="365" y="72" text-anchor="middle" font-size="9" font-weight="700" fill="#4a5568" letter-spacing="1">STEP 2</text>
+  <text x="615" y="72" text-anchor="middle" font-size="9" font-weight="700" fill="#4a5568" letter-spacing="1">STEP 3</text>
+  <text x="855" y="72" text-anchor="middle" font-size="9" font-weight="700" fill="#4a5568" letter-spacing="1">STEP 4</text>
+  <text x="550" y="482" text-anchor="middle" font-size="9" font-weight="700" fill="#4a5568" letter-spacing="1">OUTPUTS</text>
+
+</svg>
