@@ -22,8 +22,41 @@ diskDb.pragma('foreign_keys = ON')
 function syncToDisk() {
   try {
     const start = Date.now()
-    // better-sqlite3 backup is synchronous
-    memoryDb.backup(diskDb)
+
+    // Manual backup - get all tables and copy data
+    diskDb.exec('PRAGMA foreign_keys = OFF;')
+    diskDb.exec('BEGIN TRANSACTION;')
+
+    // Get all tables
+    const tables = memoryDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';").all()
+
+    // Clear and repopulate each table
+    for (const table of tables) {
+      // Delete existing data
+      try {
+        diskDb.exec(`DELETE FROM ${table.name};`)
+
+        // Get data from memory DB
+        const rows = memoryDb.prepare(`SELECT * FROM ${table.name}`).all()
+
+        // Insert into disk DB
+        if (rows.length > 0) {
+          const columns = Object.keys(rows[0]).join(',')
+          const placeholders = Object.keys(rows[0]).map(() => '?').join(',')
+
+          const stmt = diskDb.prepare(`INSERT INTO ${table.name} (${columns}) VALUES (${placeholders})`)
+          for (const row of rows) {
+            stmt.run(Object.values(row))
+          }
+        }
+      } catch (tableErr) {
+        console.error(`[DB] Error syncing table ${table.name}:`, tableErr.message)
+      }
+    }
+
+    diskDb.exec('COMMIT;')
+    diskDb.exec('PRAGMA foreign_keys = ON;')
+
     const elapsed = Date.now() - start
     console.log(`[DB] Memory database synced to disk in ${elapsed}ms`)
   } catch (err) {
@@ -34,11 +67,46 @@ function syncToDisk() {
 // Load initial data from disk to memory
 function loadFromDisk() {
   try {
-    const tables = diskDb.prepare("SELECT name FROM sqlite_master WHERE type='table';").all()
+    const tables = diskDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';").all()
     if (tables.length > 0) {
       console.log('[DB] Loading data from disk to memory...')
       const start = Date.now()
-      diskDb.backup(memoryDb)
+
+      // Manual load - get all tables and copy data
+      memoryDb.exec('PRAGMA foreign_keys = OFF;')
+      memoryDb.exec('BEGIN TRANSACTION;')
+
+      // Copy each table's data
+      for (const table of tables) {
+        try {
+          // Get schema from disk DB
+          const createStmt = diskDb.prepare(`SELECT sql FROM sqlite_master WHERE name = ?`).get(table.name).sql
+
+          // Create table in memory if it doesn't exist
+          try { memoryDb.exec(`DROP TABLE IF EXISTS ${table.name};`) } catch (e) {}
+          memoryDb.exec(createStmt)
+
+          // Get data from disk DB
+          const rows = diskDb.prepare(`SELECT * FROM ${table.name}`).all()
+
+          // Insert into memory DB
+          if (rows.length > 0) {
+            const columns = Object.keys(rows[0]).join(',')
+            const placeholders = Object.keys(rows[0]).map(() => '?').join(',')
+
+            const stmt = memoryDb.prepare(`INSERT INTO ${table.name} (${columns}) VALUES (${placeholders})`)
+            for (const row of rows) {
+              stmt.run(Object.values(row))
+            }
+          }
+        } catch (tableErr) {
+          console.error(`[DB] Error loading table ${table.name}:`, tableErr.message)
+        }
+      }
+
+      memoryDb.exec('COMMIT;')
+      memoryDb.exec('PRAGMA foreign_keys = ON;')
+
       const elapsed = Date.now() - start
       console.log(`[DB] Database loaded into memory in ${elapsed}ms`)
       return true
