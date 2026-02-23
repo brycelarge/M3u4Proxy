@@ -59,20 +59,16 @@ RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
 # Create m3u4prox user and group during build
 RUN addgroup --system m3u4prox && \
     adduser --disabled-password --home /app --ingroup m3u4prox --no-create-home --system m3u4prox && \
-    mkdir -p /data/db /data/epg /data/epg-sites /data/logs/m3u4prox /data/logos /data/playlists /data/config && \
+    mkdir -p /data/db /data/epg/tmp /data/epg-sites /data/logs/m3u4prox /data/logos /data/playlists /data/config && \
     ln -sf /data/epg /epg && \
+    ln -sf /data/epg-sites /epg-sites && \
     chown -R m3u4prox:m3u4prox /data && \
     chmod -R 755 /data
 
-# Create symlinks to node_modules in epg-sites subdirectories so config files can require() dependencies
-# This is needed because epg-grabber config files use require() but run in isolation
-# Create directory if it doesn't exist
+# Create symlink to node_modules in epg-sites so config files can import dependencies
+# This is needed because epg-grabber config files use import statements
 RUN mkdir -p /data/epg-sites && \
-    for dir in /data/epg-sites/*/; do \
-        if [ -d "$dir" ]; then \
-            ln -sf /app/node_modules "$dir/node_modules"; \
-        fi; \
-    done
+    ln -sf /app/node_modules /data/epg-sites/node_modules
 
 VOLUME ["/data"]
 

@@ -3,6 +3,22 @@
 
 set -euo pipefail
 
+# Ensure EPG directories exist and have correct permissions
+mkdir -p /data/epg/tmp /data/epg-sites
+
+# Ensure symbolic links exist
+if [ ! -L /epg ]; then
+  ln -sf /data/epg /epg
+fi
+
+if [ ! -L /epg-sites ]; then
+  ln -sf /data/epg-sites /epg-sites
+fi
+
+# Set proper ownership - do this EVERY time to fix any root-owned subdirectories
+chown -R m3u4prox:m3u4prox /data
+chmod -R u+w /data/epg-sites
+
 echo "[m3u4prox] starting on port ${PORT:-3005}"
 
 exec s6-setuidgid m3u4prox node /app/server/index.js

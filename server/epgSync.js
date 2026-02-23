@@ -10,10 +10,12 @@
 
 import { writeFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
+import { processConfigFile } from './epgConfigConverter.js'
 
 const ZIP_URL = 'https://codeload.github.com/iptv-org/epg/zip/refs/heads/master'
 
-export const SITES_DIR = path.join(process.cwd(), 'data', 'epg-sites')
+const DATA_DIR = process.env.DATA_DIR || '/data'
+export const SITES_DIR = path.join(DATA_DIR, 'epg-sites')
 
 // ── Minimal ZIP parser ────────────────────────────────────────────────────────
 // We implement a streaming ZIP parser to avoid loading the whole file in memory.
@@ -193,9 +195,23 @@ export async function syncEpgSites(db, { onProgress } = {}) {
         } else if (filename.endsWith('.config.js')) {
           // Write config.js to disk so epg-grabber can import it
           const siteDir = path.join(SITES_DIR, siteName)
-          mkdirSync(siteDir, { recursive: true })
-          writeFileSync(path.join(siteDir, filename), fileBuf)
-          configCount++
+          try {
+            // Create directory with proper permissions
+            mkdirSync(siteDir, { recursive: true, mode: 0o755 })
+          } catch (err) {
+            console.error(`[epg-sync] Failed to create directory ${siteDir}: ${err.message}`)
+            continue
+          }
+
+          const configPath = path.join(siteDir, filename)
+          try {
+            writeFileSync(configPath, fileBuf, { mode: 0o644 })
+            // Convert CommonJS config to ES Module format
+            processConfigFile(configPath)
+            configCount++
+          } catch (writeErr) {
+            console.error(`[epg-sync] Failed to write ${configPath}: ${writeErr.message}`)
+          }
         }
       } catch (e) {
         console.warn(`[epg-sync] Failed to process ${fname}: ${e.message}`)

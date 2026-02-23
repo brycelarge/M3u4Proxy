@@ -251,13 +251,18 @@ function autoXmltvId(ch) {
 }
 
 function buildXml() {
-  if (!selectedChannels.value.length) return '<channels>\n</channels>'
-  const lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<channels>']
+  if (!selectedChannels.value.length) return '<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n</tv>'
+  const lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<tv>']
   for (const ch of selectedChannels.value) {
     const xmltv_id = autoXmltvId(ch)
-    lines.push(`  <channel site="${ch.site}" site_id="${ch.site_id}" lang="${ch.lang}" xmltv_id="${xmltv_id}">${ch.name}</channel>`)
+    lines.push(`  <channel>`)
+    lines.push(`    <site>${ch.site}</site>`)
+    lines.push(`    <site_id>${ch.site_id}</site_id>`)
+    lines.push(`    <display-name>${ch.name}</display-name>`)
+    if (ch.logo) lines.push(`    <logo>${ch.logo}</logo>`)
+    lines.push(`  </channel>`)
   }
-  lines.push('</channels>')
+  lines.push('</tv>')
   return lines.join('\n')
 }
 
