@@ -57,6 +57,7 @@ RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
 # Create symlinks to node_modules in epg-sites subdirectories so config files can require() dependencies
 # This is needed because epg-grabber config files use require() but run in isolation
 RUN mkdir -p /epg-sites && \
+    chmod 777 /epg-sites && \
     for dir in /epg-sites/*/; do \
         if [ -d "$dir" ]; then \
             ln -sf /app/node_modules "$dir/node_modules"; \
