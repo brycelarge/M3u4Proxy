@@ -130,7 +130,6 @@ app.post('/api/sources', (req, res) => {
   const result = db.prepare(
     'INSERT INTO sources (name, type, url, username, password, refresh_cron, category, max_streams) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0)
-  db.sync() // Ensure data is persisted to disk
   res.json(db.prepare('SELECT * FROM sources WHERE id = ?').get(result.lastInsertRowid))
 })
 
@@ -141,13 +140,11 @@ app.put('/api/sources/:id', (req, res) => {
   db.prepare(
     'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=? WHERE id=?'
   ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json(db.prepare('SELECT * FROM sources WHERE id = ?').get(req.params.id))
 })
 
 app.delete('/api/sources/:id', (req, res) => {
   db.prepare('DELETE FROM sources WHERE id = ?').run(req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
@@ -434,7 +431,6 @@ app.post('/api/playlists', (req, res) => {
   const result = db.prepare(
     'INSERT INTO playlists (name, source_id, output_path, schedule, playlist_type) VALUES (?, ?, ?, ?, ?)'
   ).run(name, source_id || null, output_path || null, schedule || '0 */6 * * *', playlist_type || 'live')
-  db.sync() // Ensure data is persisted to disk
   res.json(db.prepare('SELECT * FROM playlists WHERE id = ?').get(result.lastInsertRowid))
 })
 
@@ -443,7 +439,6 @@ app.put('/api/playlists/:id', (req, res) => {
   db.prepare(
     'UPDATE playlists SET name=?, source_id=?, output_path=?, schedule=?, playlist_type=? WHERE id=?'
   ).run(name, source_id || null, output_path || null, schedule || '0 */6 * * *', playlist_type || 'live', req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json(db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id))
 })
 
@@ -487,7 +482,6 @@ app.get('/api/sources/:id/vod-channels', (req, res) => {
 
 app.delete('/api/playlists/:id', (req, res) => {
   db.prepare('DELETE FROM playlists WHERE id = ?').run(req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
@@ -496,7 +490,6 @@ app.patch('/api/playlists/:id/schedule', (req, res) => {
   const { schedule } = req.body
   if (schedule && !cron.validate(schedule)) return res.status(400).json({ error: 'Invalid cron expression' })
   db.prepare('UPDATE playlists SET schedule = ? WHERE id = ?').run(schedule || null, req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
@@ -899,13 +892,11 @@ app.post('/api/epg-mappings', (req, res) => {
   const result = db.prepare(
     'INSERT OR REPLACE INTO epg_mappings (source_tvg_id, target_tvg_id, note) VALUES (?, ?, ?)'
   ).run(source_tvg_id, target_tvg_id, note || null)
-  db.sync() // Ensure data is persisted to disk
   res.json(db.prepare('SELECT * FROM epg_mappings WHERE id = ?').get(result.lastInsertRowid))
 })
 
 app.delete('/api/epg-mappings/:id', (req, res) => {
   db.prepare('DELETE FROM epg_mappings WHERE id = ?').run(req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
@@ -1138,7 +1129,6 @@ app.patch('/api/playlist-channels/:id/custom-logo', (req, res) => {
   const { custom_logo } = req.body
   if (custom_logo === undefined) return res.status(400).json({ error: 'custom_logo required' })
   db.prepare('UPDATE playlist_channels SET custom_logo = ? WHERE id = ?').run(custom_logo || null, req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
@@ -1147,7 +1137,6 @@ app.patch('/api/playlist-channels/:id/custom-tvg-id', (req, res) => {
   const { custom_tvg_id } = req.body
   if (custom_tvg_id === undefined) return res.status(400).json({ error: 'custom_tvg_id required' })
   db.prepare('UPDATE playlist_channels SET custom_tvg_id = ? WHERE id = ?').run(custom_tvg_id || '', req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
@@ -1159,7 +1148,6 @@ app.post('/api/epg-mappings/bulk', (req, res) => {
   const valid = mappings.filter(r => r.source_tvg_id && r.source_tvg_id.trim())
   const insertAll = db.transaction((rows) => { for (const r of rows) insert.run(r.source_tvg_id, r.target_tvg_id, r.note || 'auto-matched') })
   insertAll(valid)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true, count: valid.length })
 })
 
@@ -1792,7 +1780,6 @@ app.put('/api/settings', (req, res) => {
     for (const [k, v] of Object.entries(obj)) upsert.run(k, String(v))
   })
   save(req.body)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
@@ -2143,7 +2130,6 @@ app.post('/api/users', async (req, res) => {
       active === false ? 0 : 1,
       notes || null
     )
-    db.sync() // Ensure data is persisted to disk
     res.json({ ok: true, id: result.lastInsertRowid })
   } catch (e) {
     if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Username already exists' })
@@ -2182,7 +2168,6 @@ app.put('/api/users/:id', async (req, res) => {
 
 app.delete('/api/users/:id', (req, res) => {
   db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id)
-  db.sync() // Ensure data is persisted to disk
   res.json({ ok: true })
 })
 
