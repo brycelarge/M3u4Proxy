@@ -1152,8 +1152,8 @@ app.post('/api/epg-mappings/bulk', (req, res) => {
 })
 
 // ── EPG Scraper ───────────────────────────────────────────────────────────────
-const EPG_DIR        = process.env.EPG_DIR        || path.join(process.cwd(), 'data', 'epg')
-const CHANNELS_XML   = process.env.CHANNELS_XML   || path.join(EPG_DIR, 'channels.xml')
+const EPG_DIR        = path.join(process.cwd(), 'data', 'epg')
+const CHANNELS_XML   = path.join(EPG_DIR, 'channels.xml')
 const GUIDE_XML_URL  = process.env.GUIDE_XML_URL  || `http://127.0.0.1:${process.env.PORT || 3005}/guide.xml`
 
 // Track in-progress sync so we don't double-run
@@ -2183,8 +2183,8 @@ app.get('/api/backup', (req, res) => {
   }
 
   // Include channels.xml, guide.xml, and .env as base64
-  const EPG_DIR_PATH = process.env.EPG_DIR || path.join(process.cwd(), 'data', 'epg')
-  const channelsXmlPath = process.env.CHANNELS_XML || path.join(EPG_DIR_PATH, 'channels.xml')
+  const EPG_DIR_PATH = path.join(process.cwd(), 'data', 'epg')
+  const channelsXmlPath = path.join(EPG_DIR_PATH, 'channels.xml')
   if (existsSync(channelsXmlPath)) bundle.files['channels.xml'] = readFileSync(channelsXmlPath, 'base64')
   if (existsSync(GUIDE_XML))       bundle.files['guide.xml']    = readFileSync(GUIDE_XML, 'base64')
   const envPath = path.join(process.cwd(), '.env')
@@ -2223,10 +2223,10 @@ app.post('/api/restore', express.raw({ type: 'application/gzip', limit: '500mb' 
     db.exec('PRAGMA foreign_keys = ON')
 
     // Restore files
-    const EPG_DIR_PATH = process.env.EPG_DIR || path.join(process.cwd(), 'data', 'epg')
+    const EPG_DIR_PATH = path.join(process.cwd(), 'data', 'epg')
     mkdirSync(EPG_DIR_PATH, { recursive: true })
     if (bundle.files?.['channels.xml']) {
-      const p = process.env.CHANNELS_XML || path.join(EPG_DIR_PATH, 'channels.xml')
+      const p = path.join(EPG_DIR_PATH, 'channels.xml')
       writeFileSync(p, Buffer.from(bundle.files['channels.xml'], 'base64'))
     }
     if (bundle.files?.['guide.xml']) {

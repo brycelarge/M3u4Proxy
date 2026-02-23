@@ -3,10 +3,6 @@
 
 set -euo pipefail
 
-mkdir -p /data/logs/m3u4prox /data/logos /data/db /data/playlists /data/epg /data/config
-chmod -R 777 /epg-sites
-chown -R m3u4prox:m3u4prox /data
-
 echo "[m3u4prox] starting on port ${PORT:-3005}"
 
 exec s6-setuidgid m3u4prox node /app/server/index.js

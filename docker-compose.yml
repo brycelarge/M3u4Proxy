@@ -20,16 +20,11 @@ services:
     environment:
       - PORT=3005
       - DATA_DIR=/data
-      - EPG_DIR=/epg
-      - CHANNELS_XML=/epg/channels.xml
-      - EPG_SITES_DIR=/epg-sites
       - EPG_GRAB_DAYS=${EPG_GRAB_DAYS:-3}
       - EPG_GRAB_DELAY=${EPG_GRAB_DELAY:-500}
       - EPG_GRAB_TIMEOUT=${EPG_GRAB_TIMEOUT:-15000}
       - EPG_GRAB_CONNECTIONS=${EPG_GRAB_CONNECTIONS:-4}
       - DNS_SERVERS=${DNS_SERVERS:-1.1.1.1,8.8.8.8}
-      - EPG_GRAB_CRON=${EPG_GRAB_CRON:-0 4 * * *}
-      - EPG_SYNC_CRON=${EPG_SYNC_CRON:-0 3 * * 0}
       - HOST_IP=${HOST_IP:-}
 
       # ── VPN ──────────────────────────────────────────────────────────────────

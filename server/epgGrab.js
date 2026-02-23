@@ -19,9 +19,9 @@ import { enrichGuide } from './epgEnrich.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-export const EPG_DIR   = process.env.EPG_DIR      || path.join(process.cwd(), 'data', 'epg')
+export const EPG_DIR   = path.join(process.cwd(), 'data', 'epg')
 export const GUIDE_XML = path.join(EPG_DIR, 'guide.xml')
-const CHANNELS_XML     = process.env.CHANNELS_XML || path.join(EPG_DIR, 'channels.xml')
+const CHANNELS_XML     = path.join(EPG_DIR, 'channels.xml')
 const GRAB_DAYS        = parseInt(process.env.EPG_GRAB_DAYS        || '3')
 const GRAB_DELAY       = parseInt(process.env.EPG_GRAB_DELAY       || '500')
 const GRAB_TIMEOUT     = parseInt(process.env.EPG_GRAB_TIMEOUT     || '15000')
