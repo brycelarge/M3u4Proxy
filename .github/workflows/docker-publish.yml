@@ -14,7 +14,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: brycelarge/m3u-manager
+  IMAGE_NAME: brycelarge/m3u4prox
 
 jobs:
   build-and-push:

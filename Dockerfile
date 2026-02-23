@@ -63,7 +63,6 @@ RUN mkdir -p /epg-sites && \
         fi; \
     done
 
-
 VOLUME ["/data"]
 
 EXPOSE 3005

@@ -48,7 +48,7 @@ const distPath = path.join(__dirname, '../dist')
 app.use(express.static(distPath))
 
 // ── Logo proxy / cache ────────────────────────────────────────────────────────
-const LOGO_CACHE_DIR = process.env.LOGO_CACHE_DIR || path.join(process.cwd(), 'data', 'logos')
+const LOGO_CACHE_DIR = process.env.LOGO_CACHE_DIR || '/data/logos'
 mkdirSync(LOGO_CACHE_DIR, { recursive: true })
 
 app.get('/api/logo', async (req, res) => {

@@ -42,4 +42,4 @@ usermod -g "${pgid}" m3u4prox 2>/dev/null || usermod -g m3u4prox m3u4prox
 
 # Ensure app dirs exist and have correct ownership
 mkdir -p /data
-chown -R m3u4prox:m3u4prox /data
+chown m3u4prox:m3u4prox /data 2>/dev/null || true
