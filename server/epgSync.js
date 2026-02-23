@@ -13,7 +13,7 @@ import path from 'node:path'
 
 const ZIP_URL = 'https://codeload.github.com/iptv-org/epg/zip/refs/heads/master'
 
-export const SITES_DIR = process.env.EPG_SITES_DIR || path.join(process.cwd(), 'data', 'epg-sites')
+export const SITES_DIR = path.join(process.cwd(), 'data', 'epg-sites')
 
 // ── Minimal ZIP parser ────────────────────────────────────────────────────────
 // We implement a streaming ZIP parser to avoid loading the whole file in memory.
