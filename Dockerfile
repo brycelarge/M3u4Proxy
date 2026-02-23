@@ -63,7 +63,8 @@ RUN mkdir -p /epg-sites && \
         fi; \
     done
 
-VOLUME ["/data", "/output", "/epg", "/epg-sites"]
+
+VOLUME ["/data"]
 
 EXPOSE 3005
 EXPOSE 8118/tcp
