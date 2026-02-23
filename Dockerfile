@@ -56,8 +56,10 @@ RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
     find /etc/s6-overlay/s6-rc.d -name 'up'  -exec chmod +x {} + && \
     chmod +x /scripts/*.sh
 
-# Ensure data directories exist with correct ownership
-RUN mkdir -p /data/db /epg-sites && \
+# Create m3u4prox user and group during build
+RUN addgroup --system m3u4prox && \
+    adduser --disabled-password --home /app --ingroup m3u4prox --no-create-home --system m3u4prox && \
+    mkdir -p /data/db /epg-sites && \
     chown -R m3u4prox:m3u4prox /data /epg-sites && \
     chmod -R 755 /data /epg-sites
 

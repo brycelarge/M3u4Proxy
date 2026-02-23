@@ -9,20 +9,6 @@ pgid="${PGID:-100}"
 # Normalize umask but do not enforce here; longrun sets it before exec.
 _umask="${UMASK:-022}"
 
-if ! getent group m3u4prox >/dev/null 2>&1; then
-    addgroup --system m3u4prox >/dev/null 2>&1 || true
-fi
-
-if ! getent passwd m3u4prox >/dev/null 2>&1; then
-    adduser \
-        --disabled-password \
-        --home /app \
-        --ingroup m3u4prox \
-        --no-create-home \
-        --system \
-        m3u4prox >/dev/null 2>&1 || true
-fi
-
 # Adjust group ID if needed
 current_gid="$(getent group m3u4prox | cut -d: -f3 || true)"
 if [ -n "${current_gid}" ] && [ "${current_gid}" != "${pgid}" ]; then
