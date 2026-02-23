@@ -1,12 +1,12 @@
 services:
-  m3u-manager:
+  m3u4prox:
     build:
       context: .
       dockerfile: Dockerfile
       args:
         - BUILDPLATFORM=linux/amd64
     platform: linux/amd64
-    container_name: m3u-manager
+    container_name: m3u4prox
     cap_add:
       - NET_ADMIN
     devices:
