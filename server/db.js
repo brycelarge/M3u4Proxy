@@ -1,17 +1,116 @@
 import Database from 'better-sqlite3'
 import path from 'node:path'
+import fs from 'node:fs'
 import { mkdirSync } from 'node:fs'
 import { setInterval } from 'node:timers'
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data')
 mkdirSync(DATA_DIR, { recursive: true })
 
-const DISK_DB_PATH = path.join(DATA_DIR, 'm3u-manager.db')
+// Create db directory
+const DB_DIR = path.join(DATA_DIR, 'db')
+mkdirSync(DB_DIR, { recursive: true })
+
+// Set permissions
+try {
+  fs.chmodSync(DATA_DIR, 0o777)
+  fs.chmodSync(DB_DIR, 0o777)
+} catch (err) {
+  console.error('Failed to set permissions:', err)
+}
+
+const DISK_DB_PATH = path.join(DB_DIR, 'm3u-manager.db')
 const SYNC_INTERVAL = process.env.DB_SYNC_INTERVAL || 60000 // 1 minute by default
 
 // Initialize the in-memory database
 const memoryDb = new Database(':memory:')
 memoryDb.pragma('foreign_keys = ON')
+
+// Create the same schema in memory
+memoryDb.exec(`
+  CREATE TABLE IF NOT EXISTS sources (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    type        TEXT NOT NULL DEFAULT 'm3u',
+    url         TEXT NOT NULL,
+    username    TEXT,
+    password    TEXT,
+    refresh_cron TEXT DEFAULT '0 */6 * * *',
+    last_fetched TEXT,
+    created_at  TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS playlists (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    source_id   INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+    output_path TEXT,
+    schedule    TEXT DEFAULT '0 */6 * * *',
+    last_built  TEXT,
+    created_at  TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS playlist_channels (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id   INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    tvg_id        TEXT,
+    tvg_name      TEXT NOT NULL,
+    tvg_logo      TEXT,
+    group_title   TEXT,
+    url           TEXT NOT NULL,
+    raw_extinf    TEXT,
+    custom_tvg_id TEXT,
+    sort_order    INTEGER DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS epg_mappings (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_tvg_id  TEXT NOT NULL UNIQUE,
+    target_tvg_id  TEXT NOT NULL,
+    note           TEXT,
+    created_at     TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS source_channels (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    tvg_id      TEXT    DEFAULT '',
+    tvg_name    TEXT    NOT NULL,
+    tvg_logo    TEXT    DEFAULT '',
+    group_title TEXT    DEFAULT '',
+    url         TEXT    NOT NULL,
+    raw_extinf  TEXT    DEFAULT ''
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_source_channels_source_id ON source_channels(source_id);
+  CREATE INDEX IF NOT EXISTS idx_source_channels_group ON source_channels(source_id, group_title);
+
+  CREATE TABLE IF NOT EXISTS epg_site_channels (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    site     TEXT NOT NULL,
+    name     TEXT NOT NULL,
+    site_id  TEXT NOT NULL,
+    xmltv_id TEXT NOT NULL,
+    lang     TEXT NOT NULL DEFAULT 'en',
+    file     TEXT NOT NULL DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_epg_site_channels_site     ON epg_site_channels(site);
+  CREATE INDEX IF NOT EXISTS idx_epg_site_channels_xmltv_id ON epg_site_channels(xmltv_id);
+  CREATE INDEX IF NOT EXISTS idx_epg_site_channels_name     ON epg_site_channels(name COLLATE NOCASE);
+
+  CREATE TABLE IF NOT EXISTS epg_cache (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id   INTEGER NOT NULL UNIQUE REFERENCES sources(id) ON DELETE CASCADE,
+    content     TEXT,
+    channel_count INTEGER DEFAULT 0,
+    last_fetched  TEXT
+  );
+`)
 
 // Initialize the disk database
 const diskDb = new Database(DISK_DB_PATH)
