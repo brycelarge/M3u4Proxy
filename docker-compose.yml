@@ -16,12 +16,7 @@ services:
       - "${HDHR_PORT:-5004}:5004"      # HDHomeRun virtual tuner (Plex/Emby/Jellyfin)
       - "${PRIVOXY_PORT:-8118}:8118"   # Privoxy (only needed if PRIVOXY_ENABLED=true)
     volumes:
-      - ./data/db:/data                   # SQLite DB + app data
-      - ./data/output:/output             # Generated M3U files (point tuliprox here)
-      - ./data/epg:/epg                   # channels.xml + guide.xml
-      - ./data/epg-sites:/epg-sites       # Extracted iptv-org/epg site configs (auto-populated)
-      - ./data/logos:/data/logos          # Cached channel logos
-      - ./data/config/openvpn:/data/config/openvpn   # OpenVPN configs + credentials
+      - ./data:/data                      # All application data (DB, output, EPG, configs, etc.)
     environment:
       - PORT=3005
       - DATA_DIR=/data

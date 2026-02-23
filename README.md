@@ -79,30 +79,8 @@ m3u4prox:
   ports:
     - "3005:3005"
   volumes:
-    - ./data:/data      # SQLite DB
-    - ./output:/output  # Generated M3U files
-    - ./epg:/epg        # EPG directory (channels.xml + guide.xml)
+    - ./data:/data      # All application data (DB, output, EPG, configs, etc.)
 ```
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| GET/POST | `/api/sources` | List / create sources |
-| PUT/DELETE | `/api/sources/:id` | Update / delete source |
-| GET/POST | `/api/playlists` | List / create playlists |
-| PUT/DELETE | `/api/playlists/:id` | Update / delete playlist |
-| POST | `/api/playlists/:id/build` | Manually trigger M3U rebuild |
-| GET/POST | `/api/epg-mappings` | List / create EPG ID overrides |
-| DELETE | `/api/epg-mappings/:id` | Delete mapping |
-| GET | `/api/epg/channels-xml` | Read current `channels.xml` |
-| PUT | `/api/epg/channels-xml` | Save `channels.xml` |
-| GET | `/api/epg/channels` | Parse guide.xml, return channel list |
-| GET | `/api/epg/search?q=` | Search guide channels by name/ID |
-| GET/PUT | `/api/settings` | App settings key/value store |
-| GET | `/api/proxy?url=` | CORS proxy for M3U fetching |
 
 ---
 
@@ -110,9 +88,7 @@ m3u4prox:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `3005` | HTTP port |
-| `DATA_DIR` | `./data` | SQLite DB location |
-| `DB_SYNC_INTERVAL` | `60000` | In-memory DB sync interval (ms) |
-| `EPG_DIR` | `./data/epg` | EPG files directory |
-| `CHANNELS_XML` | `$EPG_DIR/channels.xml` | Path to channels.xml |
-| `GUIDE_XML_URL` | `http://127.0.0.1:3002/guide.xml` | EPG guide URL |
+| `DATA_DIR` | `./data` | Directory for all application data (DB, playlists, EPG) |
+| `ADMIN_PASSWORD` | `admin` | Admin login password |
+| `TMDB_API_KEY` | - | TMDB API key for EPG enrichment (optional) |
+| `HOST_IP` | - | Host IP for HDHomeRun discovery (optional) |
