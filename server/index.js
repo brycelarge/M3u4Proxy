@@ -199,18 +199,58 @@ async function refreshSourceCache(sourceId) {
   }
 
   const insert = db.prepare(
-    'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const replace = db.transaction((sid, chs) => {
     db.prepare('DELETE FROM source_channels WHERE source_id = ?').run(sid)
     for (const ch of chs) {
-      insert.run(sid, ch.tvg_id || '', ch.tvg_name || '', ch.tvg_logo || '', ch.group_title || 'Ungrouped', ch.url, ch.raw_extinf || '')
+      // Extract quality and clean the channel name
+      const { cleanedName, quality } = extractQuality(ch.tvg_name || '')
+      insert.run(
+        sid,
+        ch.tvg_id || '',
+        cleanedName,
+        ch.tvg_logo || '',
+        ch.group_title || 'Ungrouped',
+        ch.url,
+        ch.raw_extinf || '',
+        quality
+      )
     }
     db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(sid)
   })
   replace(source.id, channels)
   console.log(`[source] Refreshed "${source.name}" — ${channels.length} channels`)
   return channels.length
+}
+
+/**
+ * Extract quality from channel name and return cleaned name + quality
+ * Detects: HD, FHD, UHD, 4K, SD, 720p, 1080p, 2160p, etc.
+ */
+function extractQuality(name) {
+  const qualityPatterns = [
+    { regex: /\b(UHD|4K|2160p)\b/i, quality: 'UHD' },
+    { regex: /\b(FHD|1080p)\b/i, quality: 'FHD' },
+    { regex: /\b(HD|720p)\b/i, quality: 'HD' },
+    { regex: /\bSD\b/i, quality: 'SD' },
+  ]
+
+  let quality = ''
+  let cleanedName = name
+
+  for (const { regex, quality: q } of qualityPatterns) {
+    if (regex.test(name)) {
+      quality = q
+      // Remove the quality tag from the name
+      cleanedName = name.replace(regex, '').trim()
+      // Clean up multiple spaces and trim
+      cleanedName = cleanedName.replace(/\s+/g, ' ').trim()
+      break
+    }
+  }
+
+  return { cleanedName, quality }
 }
 
 // Refresh a source — fetch live, store to DB cache

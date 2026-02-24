@@ -101,7 +101,8 @@ db.exec(`
     tvg_logo    TEXT    DEFAULT '',
     group_title TEXT    DEFAULT '',
     url         TEXT    NOT NULL,
-    raw_extinf  TEXT    DEFAULT ''
+    raw_extinf  TEXT    DEFAULT '',
+    quality     TEXT    DEFAULT ''
   );
 
   CREATE TABLE IF NOT EXISTS epg_site_channels (
