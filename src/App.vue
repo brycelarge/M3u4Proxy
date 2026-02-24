@@ -25,9 +25,9 @@ function applyTheme(t) {
 function toggleTheme() { applyTheme(theme.value === 'dark' ? 'light' : 'dark') }
 
 const NAV = [
-  { id: 'sources',      label: 'Sources',          icon: '�' },
-  { id: 'browser',      label: 'Channel Browser',  icon: '�' },
-  { id: 'playlists',    label: 'Playlists',        icon: '�' },
+  { id: 'sources',      label: 'Sources',          icon: '📡' },
+  { id: 'browser',      label: 'Channel Browser',  icon: '📺' },
+  { id: 'playlists',    label: 'Playlists',        icon: '📝' },
   { id: 'epg-mappings', label: 'EPG Mappings',     icon: '🗺️' },
   { id: 'users',        label: 'Users',            icon: '👤' },
   { id: 'settings',     label: 'Settings',         icon: '⚙️' },

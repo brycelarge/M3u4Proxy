@@ -28,6 +28,9 @@ const {
 
 const allSources   = ref([])
 const allPlaylists = ref([])
+const showPlaylistModal = ref(false)
+const playlistForm = ref({ name: '', type: 'live' })
+const isEditingPlaylist = ref(false)
 
 async function loadMeta() {
   try {
@@ -46,43 +49,45 @@ async function switchPlaylist(p) {
   await loadPlaylistSelection(p.id, p.name)
 }
 
-async function createPlaylist() {
-  const name = prompt('Enter new playlist name:')
-  if (!name) return
+function openCreatePlaylistModal() {
+  playlistForm.value = { name: '', type: 'live' }
+  isEditingPlaylist.value = false
+  showPlaylistModal.value = true
+}
 
-  const type = prompt('Playlist type (live or vod):', 'live')
-  if (!type || !['live', 'vod'].includes(type.toLowerCase())) {
-    alert('Invalid playlist type. Must be "live" or "vod".')
-    return
-  }
+async function createPlaylist() {
+  if (!playlistForm.value.name.trim()) return
 
   try {
     const playlist = await api.createPlaylist({
-      name,
-      playlist_type: type.toLowerCase(),
+      name: playlistForm.value.name,
+      playlist_type: playlistForm.value.type,
     })
     allPlaylists.value.push(playlist)
+    showPlaylistModal.value = false
     await switchPlaylist(playlist)
   } catch (e) {
-    alert(`Error creating playlist: ${e.message}`)
+    error.value = `Error creating playlist: ${e.message}`
   }
 }
 
 async function editPlaylist() {
-  if (!activePlaylistId.value) return
-
-  const playlist = allPlaylists.value.find(p => p.id === activePlaylistId.value)
-  if (!playlist) return
-
-  const name = prompt('Enter new playlist name:', playlist.name)
-  if (!name || name === playlist.name) return
+  if (!playlistForm.value.name.trim()) return
 
   try {
-    await api.updatePlaylist(playlist.id, { name })
-    playlist.name = name
-    activePlaylistName.value = name
+    await api.updatePlaylist(activePlaylistId.value, {
+      name: playlistForm.value.name,
+      playlist_type: playlistForm.value.type
+    })
+    const playlist = allPlaylists.value.find(p => p.id === activePlaylistId.value)
+    if (playlist) {
+      playlist.name = playlistForm.value.name
+      playlist.playlist_type = playlistForm.value.type
+    }
+    activePlaylistName.value = playlistForm.value.name
+    showPlaylistModal.value = false
   } catch (e) {
-    alert(`Error updating playlist: ${e.message}`)
+    error.value = `Error updating playlist: ${e.message}`
   }
 }
 
@@ -208,8 +213,8 @@ function onSetName(payload) {
         @close="sidebarOpen = false"
         @switch-source="switchSource"
         @switch-playlist="switchPlaylist"
-        @create-playlist="createPlaylist"
-        @edit-playlist="editPlaylist"
+        @create-playlist="openCreatePlaylistModal"
+        @edit-playlist="openEditPlaylistModal"
         @delete-playlist="deletePlaylist"
       />
 
@@ -382,5 +387,69 @@ function onSetName(payload) {
 
       </div>
     </div>
+
+    <!-- Playlist Form Modal -->
+    <Teleport to="body">
+      <div v-if="showPlaylistModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showPlaylistModal = false">
+        <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl w-full max-w-md p-6 shadow-2xl">
+          <h2 class="text-base font-bold mb-5">{{ isEditingPlaylist ? 'Edit Playlist' : 'New Playlist' }}</h2>
+
+          <div class="space-y-4">
+            <div>
+              <label class="block text-xs text-slate-500 mb-1.5">Playlist Name</label>
+              <input
+                v-model="playlistForm.name"
+                type="text"
+                placeholder="e.g. Live TV, Movies, etc."
+                class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500"
+                @keyup.enter="isEditingPlaylist ? editPlaylist() : createPlaylist()"
+              />
+            </div>
+
+            <div>
+              <label class="block text-xs text-slate-500 mb-1.5">Playlist Type</label>
+              <div class="flex gap-2">
+                <button
+                  @click="playlistForm.type = 'live'"
+                  :class="['flex-1 px-4 py-2.5 text-sm rounded-xl transition-colors font-medium',
+                    playlistForm.type === 'live'
+                      ? 'bg-indigo-500 text-white'
+                      : 'bg-[#22263a] text-slate-400 hover:text-slate-200 border border-[#2e3250]']"
+                >
+                  📺 Live
+                </button>
+                <button
+                  @click="playlistForm.type = 'vod'"
+                  :class="['flex-1 px-4 py-2.5 text-sm rounded-xl transition-colors font-medium',
+                    playlistForm.type === 'vod'
+                      ? 'bg-indigo-500 text-white'
+                      : 'bg-[#22263a] text-slate-400 hover:text-slate-200 border border-[#2e3250]']"
+                >
+                  🎬 VOD
+                </button>
+              </div>
+              <p class="text-xs text-slate-600 mt-1.5">Live for TV channels, VOD for movies/series</p>
+            </div>
+          </div>
+
+          <div class="flex gap-3 mt-6">
+            <button
+              @click="showPlaylistModal = false"
+              class="flex-1 py-2.5 text-sm bg-[#22263a] border border-[#2e3250] rounded-xl text-slate-300 hover:border-slate-500 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              @click="isEditingPlaylist ? editPlaylist() : createPlaylist()"
+              :disabled="!playlistForm.name.trim()"
+              class="flex-1 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors"
+            >
+              {{ isEditingPlaylist ? 'Save' : 'Create' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
   </div>
 </template>
