@@ -17,7 +17,7 @@ const {
   activePlaylistId, activePlaylistName, saving, building, saveError, loadingSelection,
   selectGroup, loadMoreChannels, loadSourceFromCache,
   loadPlaylistSelection, saveToPlaylist, buildPlaylist,
-  toggleChannel, selectAll, selectNone, toggleGroup,
+  toggleChannel, selectAll, selectNone, toggleGroup, toggleSection,
   exportM3U, copyM3U, copyPlaylistUrl, openInWebPlayer,
   setGroupOverride, getAllSelectedChannels, groupOverrides,
   setChannelNumbers, channelNumbers,

@@ -472,36 +472,23 @@ export function useBrowser() {
   }
 
   function toggleSection(groupNames) {
-    console.log('[toggleSection] Called with groups:', groupNames)
-    console.log('[toggleSection] Current selectionMap:', JSON.stringify(selectionMap.value))
-
-    // Check if all groups in section are selected
-    const allSelected = groupNames.every(g => {
+    const allFullySelected = groupNames.every(g => {
       const state = selectionMap.value[g]
-      if (state === '__all__') return true
-      if (state instanceof Set) return state.size > 0
-      return false
+      return state === '__all__'
     })
-
-    console.log('[toggleSection] allSelected:', allSelected)
 
     const next = { ...selectionMap.value }
 
-    if (allSelected) {
-      // Deselect all groups in section
-      console.log('[toggleSection] Deselecting all groups')
+    if (allFullySelected) {
       for (const g of groupNames) {
         next[g] = new Set()
       }
     } else {
-      // Select all groups in section
-      console.log('[toggleSection] Selecting all groups')
       for (const g of groupNames) {
         next[g] = '__all__'
       }
     }
 
-    console.log('[toggleSection] New selectionMap:', JSON.stringify(next))
     selectionMap.value = next
   }
 

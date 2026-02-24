@@ -232,13 +232,12 @@ function toggleSection(section) {
       <!-- Sectioned groups -->
       <template v-for="sec in filteredSections" :key="sec.section || '__flat__'">
         <!-- Section header -->
-        <div v-if="sec.section" class="flex items-center gap-2 px-3 pt-3 pb-1">
+        <div v-if="sec.section" class="flex items-center gap-2 px-3 pt-3 pb-1 cursor-pointer" @click="toggleSection(sec)">
           <input
             type="checkbox"
             :checked="getSectionState(sec) === 'all'"
             :indeterminate="getSectionState(sec) === 'partial'"
-            @change="toggleSection(sec)"
-            class="accent-blue-500 cursor-pointer shrink-0 w-3.5 h-3.5"
+            class="accent-blue-500 pointer-events-none shrink-0 w-3.5 h-3.5"
           />
           <span class="text-xs font-medium uppercase text-slate-500">{{ sec.section }}</span>
         </div>
