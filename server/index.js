@@ -1577,6 +1577,8 @@ app.get('/api/epg/guide-grid', (req, res) => {
     id: ch.epg_id,
     name: ch.tvg_name || ch.name || 'Unknown',
     icon: ch.tvg_logo || ch.custom_logo || null,
+    url: ch.url || null,
+    channelId: ch.id,
     programmes: []
   }))
 
@@ -2069,6 +2071,172 @@ app.get('/api/hdhr/status', (req, res) => {
     lineupUrl:   `${base}/lineup.json`,
     deviceId:    row?.value || null,
   })
+})
+
+// ── Player page ───────────────────────────────────────────────────────────────
+// GET /player/:channelId  — simple HTML5 video player
+app.get('/player/:channelId', (req, res) => {
+  const { channelId } = req.params
+  const channelName = req.query.name || 'Live Stream'
+  const streamUrl = `/stream/${channelId}`
+
+  res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${channelName}</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      font-family: system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+    }
+    .header {
+      background: #1a1d27;
+      border-bottom: 1px solid #2e3250;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .back-btn {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      font-size: 20px;
+      cursor: pointer;
+      padding: 4px 8px;
+    }
+    .back-btn:hover { color: #e2e8f0; }
+    .title {
+      color: #f1f5f9;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .player-container {
+      width: 100vw;
+      height: calc(100vh - 49px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+    .error {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #ef4444;
+      background: rgba(0,0,0,0.8);
+      padding: 20px;
+      border-radius: 8px;
+      text-align: center;
+      max-width: 400px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <button class="back-btn" onclick="window.close()">←</button>
+    <div class="title">${channelName}</div>
+  </div>
+  <div class="player-container">
+    <video id="video" controls></video>
+    <div id="error" class="error" style="display:none;"></div>
+  </div>
+  <script>
+    const streamUrl = '${streamUrl}';
+    const errorDiv = document.getElementById('error');
+    const video = document.getElementById('video');
+    let player = null;
+
+    function playStream() {
+      // Try HLS.js first (most common for IPTV)
+      if (Hls.isSupported()) {
+        player = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+          backBufferLength: 90
+        });
+
+        player.loadSource(streamUrl);
+        player.attachMedia(video);
+
+        player.on(Hls.Events.MANIFEST_PARSED, () => {
+          video.play().catch(err => {
+            console.error('Autoplay failed:', err);
+          });
+        });
+
+        player.on(Hls.Events.ERROR, (event, data) => {
+          console.error('HLS error:', data);
+          if (data.fatal) {
+            // If HLS fails, try mpegts.js
+            console.log('HLS failed, trying mpegts.js');
+            player.destroy();
+            tryMpegts();
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS support (Safari/iOS)
+        video.src = streamUrl;
+        video.play().catch(err => {
+          console.error('Autoplay failed:', err);
+        });
+      } else {
+        // Fallback to mpegts.js
+        tryMpegts();
+      }
+    }
+
+    function tryMpegts() {
+      if (mpegts.getFeatureList().mseLivePlayback) {
+        player = mpegts.createPlayer({
+          type: 'mpegts',
+          isLive: true,
+          url: streamUrl
+        }, {
+          enableWorker: true,
+          enableStashBuffer: true,
+          stashInitialSize: 128
+        });
+
+        player.attachMediaElement(video);
+        player.load();
+
+        player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+          errorDiv.textContent = 'Stream error: ' + errorType + ' - ' + errorDetail;
+          errorDiv.style.display = 'block';
+          console.error('mpegts.js error:', errorType, errorDetail, errorInfo);
+        });
+
+        video.addEventListener('loadedmetadata', () => {
+          video.play().catch(e => {
+            console.error('Autoplay failed:', e);
+          });
+        });
+      } else {
+        errorDiv.textContent = 'Your browser does not support streaming';
+        errorDiv.style.display = 'block';
+      }
+    }
+
+    playStream();
+  </script>
+</body>
+</html>
+  `)
 })
 
 // ── Stream proxy ──────────────────────────────────────────────────────────────

@@ -25,18 +25,15 @@ function applyTheme(t) {
 function toggleTheme() { applyTheme(theme.value === 'dark' ? 'light' : 'dark') }
 
 const NAV = [
-  { id: 'browser',      label: 'Channel Browser', icon: '📺' },
-  { id: 'playlists',    label: 'Playlists',        icon: '📝' },
-  { id: 'sources',      label: 'Sources',          icon: '📡' },
-  { id: 'streams',      label: 'Streams',          icon: '🔴' },
-  { id: 'epg-scraper',  label: 'EPG Scraper',      icon: '🗓️' },
+  { id: 'sources',      label: 'Sources',          icon: '�' },
+  { id: 'browser',      label: 'Channel Browser',  icon: '�' },
+  { id: 'playlists',    label: 'Playlists',        icon: '�' },
   { id: 'epg-mappings', label: 'EPG Mappings',     icon: '🗺️' },
-  { id: 'epg-guide',    label: 'EPG Guide',        icon: '📺' },
   { id: 'users',        label: 'Users',            icon: '👤' },
   { id: 'settings',     label: 'Settings',         icon: '⚙️' },
 ]
 
-const VALID_PAGES = new Set(NAV.map(n => n.id))
+const VALID_PAGES = new Set([...NAV.map(n => n.id), 'streams', 'epg-scraper', 'epg-guide'])
 
 function navigate(id) {
   page.value = id
@@ -50,7 +47,24 @@ onMounted(async () => {
   const saved = localStorage.getItem('m3u_theme') || 'dark'
   applyTheme(saved)
   const hash = location.hash.slice(1)
-  if (hash && VALID_PAGES.has(hash)) page.value = hash
+  // Redirect old EPG Scraper page to Sources page
+  if (hash === 'epg-scraper') {
+    page.value = 'sources'
+    location.hash = 'sources'
+  } else if (hash && VALID_PAGES.has(hash)) {
+    page.value = hash
+  } else {
+    // Default page: Channel Browser if sources exist, otherwise Sources
+    try {
+      const sources = await api.getSources()
+      if (sources && sources.length > 0) {
+        page.value = 'browser'
+        location.hash = 'browser'
+      }
+    } catch (e) {
+      // If API fails, stay on default (sources)
+    }
+  }
 })
 </script>
 
@@ -83,8 +97,25 @@ onMounted(async () => {
 
       <!-- Mobile: current page label -->
       <span class="md:hidden flex-1 text-xs text-slate-400 truncate">
-        {{ NAV.find(n => n.id === page)?.icon }} {{ NAV.find(n => n.id === page)?.label }}
+        {{ NAV.find(n => n.id === page)?.icon || (page === 'streams' ? '🔴' : page === 'epg-guide' ? '📺' : '') }}
+        {{ NAV.find(n => n.id === page)?.label || (page === 'streams' ? 'Streams' : page === 'epg-guide' ? 'EPG Guide' : '') }}
       </span>
+
+      <!-- EPG Guide button -->
+      <button
+        @click="navigate('epg-guide')"
+        :title="'EPG Guide'"
+        :class="['flex items-center justify-center w-8 h-8 rounded-lg transition-colors text-base shrink-0',
+          page === 'epg-guide' ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/40' : 'text-slate-400 hover:text-slate-200 hover:bg-[#22263a]']"
+      >📺</button>
+
+      <!-- Streams button -->
+      <button
+        @click="navigate('streams')"
+        :title="'View active streams'"
+        :class="['flex items-center justify-center w-8 h-8 rounded-lg transition-colors text-base shrink-0',
+          page === 'streams' ? 'bg-red-500/20 text-red-400 border border-red-500/40' : 'text-slate-400 hover:text-slate-200 hover:bg-[#22263a]']"
+      >🔴</button>
 
       <!-- Theme toggle -->
       <button
@@ -118,12 +149,32 @@ onMounted(async () => {
       <button
         v-for="n in NAV" :key="n.id"
         @click="navigate(n.id)"
-        :class="['w-full flex items-center gap-3 px-4 py-3 text-sm transition-colors border-b border-[#2e3250]/50 last:border-0',
+        :class="['w-full flex items-center gap-3 px-4 py-3 text-sm transition-colors border-b border-[#2e3250]/50',
           page === n.id ? 'bg-indigo-500/15 text-indigo-300' : 'text-slate-300 hover:bg-[#22263a]']"
       >
         <span class="text-base w-6 text-center shrink-0">{{ n.icon }}</span>
         {{ n.label }}
         <span v-if="page === n.id" class="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+      </button>
+      <!-- EPG Guide in mobile menu -->
+      <button
+        @click="navigate('epg-guide')"
+        :class="['w-full flex items-center gap-3 px-4 py-3 text-sm transition-colors border-b border-[#2e3250]/50',
+          page === 'epg-guide' ? 'bg-indigo-500/15 text-indigo-300' : 'text-slate-300 hover:bg-[#22263a]']"
+      >
+        <span class="text-base w-6 text-center shrink-0">📺</span>
+        EPG Guide
+        <span v-if="page === 'epg-guide'" class="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+      </button>
+      <!-- Streams in mobile menu -->
+      <button
+        @click="navigate('streams')"
+        :class="['w-full flex items-center gap-3 px-4 py-3 text-sm transition-colors border-b border-[#2e3250]/50 last:border-0',
+          page === 'streams' ? 'bg-indigo-500/15 text-indigo-300' : 'text-slate-300 hover:bg-[#22263a]']"
+      >
+        <span class="text-base w-6 text-center shrink-0">🔴</span>
+        Streams
+        <span v-if="page === 'streams'" class="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
       </button>
     </div>
 

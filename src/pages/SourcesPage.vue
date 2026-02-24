@@ -1,6 +1,10 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../composables/useApi.js'
+import EpgScraperPage from './EpgScraperPage.vue'
+
+// ── Tab state ─────────────────────────────────────────────────────────────────
+const activeTab = ref('sources') // 'sources' | 'scraper'
 
 const sources      = ref([])
 const loading      = ref(false)
@@ -87,14 +91,24 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
 </script>
 
 <template>
-  <div class="p-6 max-w-6xl mx-auto space-y-8">
+  <div class="flex flex-col h-full overflow-hidden">
 
-    <div>
-      <h1 class="text-lg font-bold text-slate-100">Sources</h1>
-      <p class="text-xs text-slate-500 mt-0.5">Manage playlist and EPG feed sources</p>
+    <!-- Page header with tabs -->
+    <div class="flex items-center gap-4 px-6 py-3 bg-[#1a1d27] border-b border-[#2e3250] shrink-0">
+      <div class="flex-1">
+        <h1 class="text-sm font-bold text-slate-100">Sources</h1>
+        <p class="text-xs text-slate-500">Manage playlist and EPG feed sources</p>
+      </div>
+      <div class="flex border border-[#2e3250] rounded-lg overflow-hidden">
+        <button @click="activeTab = 'sources'" :class="['px-4 py-2 text-xs font-medium transition-colors', activeTab === 'sources' ? 'bg-indigo-500 text-white' : 'bg-[#22263a] text-slate-400 hover:text-slate-200']">📋 Playlist Sources</button>
+        <button @click="activeTab = 'scraper'" :class="['px-4 py-2 text-xs font-medium transition-colors border-l border-[#2e3250]', activeTab === 'scraper' ? 'bg-indigo-500 text-white' : 'bg-[#22263a] text-slate-400 hover:text-slate-200']">🌐 EPG Scraper</button>
+      </div>
     </div>
 
-    <p v-if="error" class="text-xs text-red-400">⚠ {{ error }}</p>
+    <p v-if="error && activeTab === 'sources'" class="mx-6 mt-3 text-xs text-red-400">⚠ {{ error }}</p>
+
+    <!-- Playlist Sources Tab -->
+    <div v-if="activeTab === 'sources'" class="flex-1 overflow-auto p-6 space-y-8">
 
     <!-- ── Playlist Sources ──────────────────────────────────────────────── -->
     <section>
@@ -289,5 +303,11 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
         </div>
       </div>
     </Teleport>
+
+    </div>
+
+    <!-- EPG Scraper Tab -->
+    <EpgScraperPage v-if="activeTab === 'scraper'" />
+
   </div>
 </template>

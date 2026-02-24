@@ -38,15 +38,6 @@ async function load() {
     const d = await r.json()
     if (!r.ok) throw new Error(d.error)
 
-    // Debug logs
-    console.log('API Response:', {
-      from: d.from,
-      to: d.to,
-      totalChannels: d.channels.length,
-      channelsWithProgs: d.channels.filter(ch => ch.programmes?.length > 0).length,
-      sampleChannel: d.channels.find(ch => ch.programmes?.length > 0)
-    })
-
     channels.value = d.channels
     from.value     = new Date(d.from)
     to.value       = new Date(d.to)
@@ -64,7 +55,7 @@ const progW = computed(() => {
   return mins * PX_PER_MIN
 })
 // Total grid width = channel col + programme area
-const gridW = computed(() => CHAN_W + progW.value)
+const gridW = computed(() => (isMobile.value ? CHAN_W : CHAN_W_DESKTOP) + progW.value)
 
 // Time slot markers every 30 min
 const timeSlots = computed(() => {
@@ -133,6 +124,13 @@ function progProgress(prog) {
   return Math.round(((now - s) / (e - s)) * 100)
 }
 
+function playStream() {
+  if (!selected.value?.channelId) return
+  const channelName = encodeURIComponent(selected.value.channelName)
+  const url = `/player/${selected.value.channelId}?name=${channelName}`
+  window.open(url, '_blank', 'width=1280,height=720,menubar=no,toolbar=no,location=no,status=no')
+}
+
 onMounted(() => {
   load()
   clockTimer = setInterval(() => { currentTime.value = new Date() }, 30000)
@@ -198,7 +196,7 @@ onUnmounted(() => {
         <div class="sticky top-0 z-30 flex bg-[#13151f] border-b border-[#2e3250]" style="height:36px">
           <!-- Corner -->
           <div class="shrink-0 border-r border-[#2e3250] bg-[#13151f]"
-            :style="{ width: CHAN_W + 'px', position: 'sticky', left: 0, zIndex: 40 }">
+            :style="{ width: (isMobile ? CHAN_W : CHAN_W_DESKTOP) + 'px', position: 'sticky', left: 0, zIndex: 40 }">
           </div>
           <!-- Time labels -->
           <div class="relative shrink-0" :style="{ width: progW + 'px' }">
@@ -245,7 +243,7 @@ onUnmounted(() => {
             </div>
             <!-- Programme blocks -->
             <button v-for="prog in ch.programmes" :key="prog.start"
-              @click="selected = { ...prog, channelName: ch.name, channelIcon: ch.icon }"
+              @click="selected = { ...prog, channelName: ch.name, channelIcon: ch.icon, channelUrl: ch.url, channelId: ch.channelId }"
               class="absolute top-1 bottom-1 rounded overflow-hidden flex items-center text-left transition-all group/prog cursor-pointer"
               :class="isNow(prog)
                 ? 'bg-indigo-600/30 border border-indigo-500/60 hover:bg-indigo-600/40'
@@ -318,8 +316,16 @@ onUnmounted(() => {
                 <p v-if="selected.episode" class="text-[10px] font-mono text-slate-600 mt-2">{{ selected.episode }}</p>
               </div>
             </div>
-            <div v-if="selected.desc" class="px-5 pb-5">
+            <div v-if="selected.desc" class="px-5 pb-4">
               <p class="text-sm text-slate-400 leading-relaxed">{{ selected.desc }}</p>
+            </div>
+            <div v-if="selected.channelId" class="px-5 pb-5 pt-2 border-t border-[#2e3250]">
+              <button
+                @click="playStream"
+                class="w-full px-4 py-2.5 text-sm font-semibold rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white transition-colors flex items-center justify-center gap-2">
+                <span class="text-base">▶</span>
+                <span>Play {{ selected.channelName }}</span>
+              </button>
             </div>
           </div>
         </div>

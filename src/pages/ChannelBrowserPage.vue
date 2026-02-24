@@ -50,10 +50,16 @@ async function createPlaylist() {
   const name = prompt('Enter new playlist name:')
   if (!name) return
 
+  const type = prompt('Playlist type (live or vod):', 'live')
+  if (!type || !['live', 'vod'].includes(type.toLowerCase())) {
+    alert('Invalid playlist type. Must be "live" or "vod".')
+    return
+  }
+
   try {
     const playlist = await api.createPlaylist({
       name,
-      playlist_type: 'live',
+      playlist_type: type.toLowerCase(),
     })
     allPlaylists.value.push(playlist)
     await switchPlaylist(playlist)
