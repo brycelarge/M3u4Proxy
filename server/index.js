@@ -186,8 +186,7 @@ async function refreshSourceCache(sourceId) {
     `).run(source.id, content, channelCount)
     db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(source.id)
     console.log(`[source] Refreshed EPG "${source.name}" — ${channelCount} channels`)
-    // Run enrichment after every EPG source refresh so tmdb_enrichment stays current
-    enrichGuide(null).catch(e => console.error('[epg-enrich] Post-refresh error:', e.message))
+    // Note: Enrichment is now only run manually or after cron grab completes (not after every source refresh)
     return channelCount
   }
 
@@ -1861,6 +1860,9 @@ if (cron.validate(EPG_GRAB_CRON)) {
               console.error(`[cron] Auto-refresh "${s.name}":`, e.message)
             }
           }
+          // Run enrichment once after all sources are refreshed
+          console.log('[cron] Running TMDB enrichment after EPG refresh...')
+          await enrichGuide(null).catch(e => console.error('[cron] Enrichment error:', e.message))
         })()
       })
       .catch(e => console.error('[cron] EPG grab error:', e.message))

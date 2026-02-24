@@ -53,33 +53,27 @@ function addLog(msg) {
 function parseChannelsXml(xml) {
   const channels = []
 
-  // Try new format first: <channel><site>...</site><site_id>...</site_id><display-name>...</display-name></channel>
-  const newFormatRe = /<channel>([\s\S]*?)<\/channel>/g
+  // Parse epg-grabber format: <channels site="..."><channel site_id="..." xmltv_id="...">Name</channel></channels>
+  const siteMatch = xml.match(/<channels\s+site="([^"]+)"/)
+  const site = siteMatch ? siteMatch[1] : ''
+
+  const channelRe = /<channel\s([^>]*)>([^<]*)<\/channel>/g
   let m
-  while ((m = newFormatRe.exec(xml)) !== null) {
-    const content = m[1]
-    const getTag = (tag) => {
-      const r = new RegExp(`<${tag}>([^<]*)<\/${tag}>`)
-      return (content.match(r) || [])[1] || ''
-    }
-    const site = getTag('site')
-    const site_id = getTag('site_id')
-    const name = getTag('display-name')
-    const logo = getTag('logo')
+  while ((m = channelRe.exec(xml)) !== null) {
+    const attrs = m[1]
+    const name  = m[2].trim()
+    const get   = (a) => { const r = new RegExp(`${a}="([^"]*)"`) ; return (attrs.match(r) || [])[1] || '' }
 
-    if (site && site_id && name) {
-      channels.push({ name, site, site_id, xmltv_id: '', lang: 'en', logo: logo || '' })
-    }
-  }
-
-  // If no channels found, try old format: <channel site="..." site_id="..." ...>name</channel>
-  if (channels.length === 0) {
-    const oldFormatRe = /<channel\s([^>]*)>([^<]*)<\/channel>/g
-    while ((m = oldFormatRe.exec(xml)) !== null) {
-      const attrs = m[1]
-      const name  = m[2].trim()
-      const get   = (a) => { const r = new RegExp(`${a}="([^"]*)"`) ; return (attrs.match(r) || [])[1] || '' }
-      channels.push({ name, site: get('site'), site_id: get('site_id'), xmltv_id: get('xmltv_id'), lang: get('lang') || 'en', logo: get('logo') || '' })
+    const site_id = get('site_id')
+    if (site_id && name) {
+      channels.push({
+        name,
+        site: site || get('site'),
+        site_id,
+        xmltv_id: get('xmltv_id') || '',
+        lang: get('lang') || 'en',
+        logo: get('logo') || ''
+      })
     }
   }
 
@@ -88,15 +82,16 @@ function parseChannelsXml(xml) {
 
 // ── Build per-site channels.xml fragment ──────────────────────────────────────
 function buildSiteChannelsXml(channels) {
+  if (!channels.length) return '<?xml version="1.0" encoding="UTF-8"?>\n<channels>\n</channels>\n'
+
+  const site = channels[0].site
   const lines = channels.map(ch => {
-    const logo = ch.logo ? `\n    <logo>${ch.logo}</logo>` : ''
-    return `  <channel>
-    <site>${ch.site}</site>
-    <site_id>${ch.site_id}</site_id>
-    <display-name>${ch.name}</display-name>${logo}
-  </channel>`
+    const attrs = [`site_id="${ch.site_id}"`]
+    if (ch.xmltv_id) attrs.push(`xmltv_id="${ch.xmltv_id}"`)
+    if (ch.lang) attrs.push(`lang="${ch.lang}"`)
+    return `  <channel ${attrs.join(' ')}>${ch.name}</channel>`
   })
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n${lines.join('\n')}\n</tv>\n`
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<channels site="${site}">\n${lines.join('\n')}\n</channels>\n`
 }
 
 // ── Spawn epg-grabber CLI for one site ────────────────────────────────────────

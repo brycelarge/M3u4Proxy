@@ -251,18 +251,29 @@ function autoXmltvId(ch) {
 }
 
 function buildXml() {
-  if (!selectedChannels.value.length) return '<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n</tv>'
-  const lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<tv>']
+  if (!selectedChannels.value.length) return '<?xml version="1.0" encoding="UTF-8"?>\n<channels>\n</channels>'
+
+  // Group channels by site
+  const bySite = {}
   for (const ch of selectedChannels.value) {
-    const xmltv_id = autoXmltvId(ch)
-    lines.push(`  <channel>`)
-    lines.push(`    <site>${ch.site}</site>`)
-    lines.push(`    <site_id>${ch.site_id}</site_id>`)
-    lines.push(`    <display-name>${ch.name}</display-name>`)
-    if (ch.logo) lines.push(`    <logo>${ch.logo}</logo>`)
-    lines.push(`  </channel>`)
+    if (!bySite[ch.site]) bySite[ch.site] = []
+    bySite[ch.site].push(ch)
   }
-  lines.push('</tv>')
+
+  const lines = ['<?xml version="1.0" encoding="UTF-8"?>']
+
+  // Generate separate <channels site="..."> block for each site
+  for (const [site, channels] of Object.entries(bySite)) {
+    lines.push(`<channels site="${site}">`)
+    for (const ch of channels) {
+      const xmltv_id = autoXmltvId(ch)
+      const attrs = [`site_id="${ch.site_id}"`, `xmltv_id="${xmltv_id}"`]
+      if (ch.lang) attrs.push(`lang="${ch.lang}"`)
+      lines.push(`  <channel ${attrs.join(' ')}>${ch.name}</channel>`)
+    }
+    lines.push('</channels>')
+  }
+
   return lines.join('\n')
 }
 
