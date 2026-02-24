@@ -13,9 +13,9 @@ const MAX_RECONNECTS    = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY   = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
 
 // Buffer N seconds of stream data before sending to clients.
-// 0 = disabled (default). Helps absorb network jitter / slow client startup.
+// Default 3 seconds helps absorb network jitter and connection drops.
 export function getBufferSeconds() {
-  return parseFloat(process.env.PROXY_BUFFER_SECONDS || '0')
+  return parseFloat(process.env.PROXY_BUFFER_SECONDS || '3')
 }
 
 // ── Session store ─────────────────────────────────────────────────────────────
@@ -100,7 +100,11 @@ async function pump(session) {
     try {
       const upstream = await fetch(session.upstreamUrl, {
         signal: session.abortCtrl.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; M3UManager/1.0)' },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; M3UManager/1.0)',
+          'Connection': 'keep-alive',
+          'Accept': '*/*',
+        },
       })
 
       if (!upstream.ok) {
@@ -111,9 +115,20 @@ async function pump(session) {
       session.reconnects > 0 && console.log(`[stream] Reconnected to "${session.channelName}" (attempt ${session.reconnects})`)
 
       const reader = upstream.body.getReader()
+      let lastDataTime = Date.now()
+      const STALL_TIMEOUT = 30000 // 30 seconds without data = stalled
+
       while (true) {
-        const { done, value } = await reader.read()
+        // Add timeout to detect stalled streams
+        const readPromise = reader.read()
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Stream stalled - no data received')), STALL_TIMEOUT)
+        )
+
+        const { done, value } = await Promise.race([readPromise, timeoutPromise])
         if (done || session.dead) break
+
+        lastDataTime = Date.now()
         session.bytesIn += value.length
         const now = Date.now()
         const elapsed = (now - session._lastTick) / 1000
@@ -191,17 +206,18 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
     return
   }
 
-  // Set streaming headers
-  res.setHeader('Content-Type', 'video/mp2t')
-  res.setHeader('Cache-Control', 'no-cache')
-  res.setHeader('X-Accel-Buffering', 'no')
-  res.setHeader('Connection', 'keep-alive')
-  res.flushHeaders()
-
   // Reuse existing session
   if (sessions.has(channelId)) {
     const session = sessions.get(channelId)
     console.log(`[stream] Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
+
+    // Set streaming headers
+    res.setHeader('Content-Type', 'video/mp2t')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.setHeader('Connection', 'keep-alive')
+    res.flushHeaders()
+
     session.addClient(res)
     // Flush pre-buffer so the joining client starts with data immediately
     if (session._preBuffer?.length) {
@@ -239,11 +255,43 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
     return
   }
 
-  // New session
+  // New session - validate upstream first
+  console.log(`[stream] Opening "${channelName}" → ${upstreamUrl}`)
+
+  // Test upstream connection before creating session
+  const testAbort = new AbortController()
+  const testTimeout = setTimeout(() => testAbort.abort(), 5000)
+
+  try {
+    const testResponse = await fetch(upstreamUrl, {
+      signal: testAbort.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; M3UManager/1.0)' },
+    })
+    clearTimeout(testTimeout)
+
+    if (!testResponse.ok) {
+      throw new Error(`Upstream returned ${testResponse.status}`)
+    }
+
+    // Abort the test request - we just needed to verify it works
+    testAbort.abort()
+  } catch (e) {
+    clearTimeout(testTimeout)
+    throw new Error(`Failed to connect to upstream: ${e.message}`)
+  }
+
+  // Upstream is valid, create session
   const session = new Session(channelId, upstreamUrl, channelName, sourceId, username)
   sessions.set(channelId, session)
+
+  // Set streaming headers
+  res.setHeader('Content-Type', 'video/mp2t')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders()
+
   session.addClient(res)
-  console.log(`[stream] Opening "${channelName}" → ${upstreamUrl}`)
   pump(session)
 }
 

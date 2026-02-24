@@ -20,7 +20,7 @@ export function buildM3U(channels, epgMap = new Map(), opts = {}) {
   const { baseUrl, catchupSrc, catchupDays = 7 } = opts
   const lines = ['#EXTM3U url-tvg="' + (opts.epgUrl || '') + '"']
   for (const ch of channels) {
-    const tvgId  = epgMap.get(ch.tvg_id) || ch.custom_tvg_id || ch.tvg_id || ''
+    const tvgId  = ch.custom_tvg_id || epgMap.get(ch.tvg_id) || ch.tvg_id || ''
     const rawLogo = ch.custom_logo || ch.tvg_logo || ''
     const logo   = rawLogo ? ` tvg-logo="${baseUrl ? `${baseUrl}/api/logo?url=${encodeURIComponent(rawLogo)}` : rawLogo}"` : ''
     const group  = ch.group_title ? ` group-title="${ch.group_title}"` : ''

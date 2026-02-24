@@ -582,6 +582,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
                 Channel <span class="text-slate-600">{{ sortCol === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}</span>
               </th>
               <th class="px-3 py-2.5 text-left text-slate-400 font-medium w-36">Source tvg-id</th>
+              <th class="px-3 py-2.5 text-left text-slate-400 font-medium w-32 hidden lg:table-cell">Variants</th>
               <th @click="setSort('score')" class="px-3 py-2.5 text-center text-slate-400 font-medium w-16 cursor-pointer hover:text-slate-200 select-none">
                 Match % <span class="text-slate-600">{{ sortCol === 'score' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}</span>
               </th>
@@ -633,6 +634,23 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
               </td>
 
               <td class="px-3 py-2 font-mono text-slate-500 text-[10px] truncate max-w-36">{{ m.tvg_id || '—' }}</td>
+
+              <!-- Variants (quality versions) -->
+              <td class="px-3 py-2 hidden lg:table-cell">
+                <div v-if="m.variants && m.variants.length > 0" class="flex flex-wrap gap-1">
+                  <span v-for="(v, idx) in m.variants" :key="idx"
+                    :title="`${v.source_name}: ${v.tvg_name}`"
+                    :class="['text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap',
+                      v.quality === 'UHD' ? 'bg-purple-500/15 border-purple-500/30 text-purple-400' :
+                      v.quality === 'FHD' ? 'bg-blue-500/15 border-blue-500/30 text-blue-400' :
+                      v.quality === 'HD' ? 'bg-green-500/15 border-green-500/30 text-green-400' :
+                      v.quality === 'SD' ? 'bg-yellow-500/15 border-yellow-500/30 text-yellow-400' :
+                      'bg-slate-500/15 border-slate-500/30 text-slate-400']">
+                    {{ v.quality || '?' }}
+                  </span>
+                </div>
+                <span v-else class="text-slate-700 text-[10px]">—</span>
+              </td>
 
               <td class="px-3 py-2 text-center">
                 <span v-if="m.exact_match"

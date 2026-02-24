@@ -1125,6 +1125,42 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
         .map(r => [r.source_tvg_id, r.target_tvg_id])
     )
 
+    // Bulk fetch all variants for all playlist channels at once
+    const channelIds = playlistChannels.map(ch => ch.id)
+    const allVariants = db.prepare(`
+      SELECT
+        pc.id as channel_id,
+        sc.tvg_name,
+        sc.quality,
+        sc.url,
+        s.name as source_name,
+        sc.normalized_name
+      FROM playlist_channels pc
+      JOIN source_channels sc_lookup ON pc.url = sc_lookup.url
+      JOIN source_channels sc ON sc.normalized_name = sc_lookup.normalized_name
+      JOIN sources s ON sc.source_id = s.id
+      WHERE pc.id IN (${channelIds.map(() => '?').join(',')})
+      ORDER BY pc.id, CASE sc.quality
+        WHEN 'UHD' THEN 1
+        WHEN 'FHD' THEN 2
+        WHEN 'HD' THEN 3
+        WHEN 'SD' THEN 4
+        ELSE 5
+      END
+    `).all(...channelIds)
+
+    // Build variants lookup map
+    const variantsMap = new Map()
+    for (const v of allVariants) {
+      if (!variantsMap.has(v.channel_id)) variantsMap.set(v.channel_id, [])
+      variantsMap.get(v.channel_id).push({
+        tvg_name: v.tvg_name,
+        quality: v.quality,
+        url: v.url,
+        source_name: v.source_name
+      })
+    }
+
     const matches = []
     for (const ch of playlistChannels) {
       const effectiveId    = ch.custom_tvg_id || ch.tvg_id || ''
@@ -1150,6 +1186,9 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
           .slice(0, 3)
       }
 
+      // Get variants from pre-fetched map
+      const variants = variantsMap.get(ch.id) || []
+
       matches.push({
         channel_id:    ch.id,
         tvg_id:        effectiveId,
@@ -1160,6 +1199,7 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
         exact_match:   exactMatch || null,
         suggestions:   scored,
         epg_source_id: ch.epg_source_id || null,
+        variants:      variants || [],
       })
     }
 
@@ -2334,6 +2374,36 @@ function getChannelVariants(channelId) {
 }
 
 /**
+ * Track failed stream in database for dead channel reporting
+ */
+function trackFailedStream(channelId, playlistId, tvgName, groupTitle, url, error, httpStatus = null) {
+  try {
+    // Check if this channel+url combo already exists
+    const existing = db.prepare('SELECT id, fail_count FROM failed_streams WHERE channel_id = ? AND url = ?').get(channelId, url)
+
+    if (existing) {
+      // Increment fail count and update last_failed timestamp
+      db.prepare(`
+        UPDATE failed_streams
+        SET fail_count = fail_count + 1,
+            last_failed = datetime('now'),
+            error = ?,
+            http_status = ?
+        WHERE id = ?
+      `).run(error, httpStatus, existing.id)
+    } else {
+      // Insert new failed stream record
+      db.prepare(`
+        INSERT INTO failed_streams (channel_id, playlist_id, tvg_name, group_title, url, error, http_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(channelId, playlistId, tvgName, groupTitle, url, error, httpStatus)
+    }
+  } catch (e) {
+    console.error('[stream] Failed to track dead channel:', e.message)
+  }
+}
+
+/**
  * Try to connect to a stream with timeout
  */
 async function tryConnectWithTimeout(channelId, url, name, res, sourceId, username, timeoutMs = 5000) {
@@ -2386,6 +2456,8 @@ app.get('/stream/:channelId', async (req, res) => {
 
   // Try each variant in order until one succeeds
   let lastError = null
+  let httpStatus = null
+
   for (let i = 0; i < variants.length; i++) {
     const variant = variants[i]
     const qualityLabel = variant.quality ? ` (${variant.quality})` : ''
@@ -2398,6 +2470,14 @@ app.get('/stream/:channelId', async (req, res) => {
     } catch (e) {
       lastError = e
       console.log(`[stream] Variant ${i + 1} failed: ${e.message}`)
+
+      // Extract HTTP status from error message if present
+      const statusMatch = e.message.match(/returned (\d+)/)
+      if (statusMatch) httpStatus = parseInt(statusMatch[1])
+
+      // Track failed stream in database
+      trackFailedStream(channelId, row.playlist_id, row.tvg_name, row.group_title, variant.url, e.message, httpStatus)
+
       // Continue to next variant
     }
   }
