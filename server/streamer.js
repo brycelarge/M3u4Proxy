@@ -172,7 +172,7 @@ async function pump(session) {
             }
 
             session._bufferStarted = true
-            session.preBuffer = [] // Clear memory
+            session._preBuffer = [] // Clear memory
           }
           // Don't write current chunk yet - it's in the buffer
         } else {
