@@ -98,37 +98,7 @@ async function doRestore() {
   }
 }
 
-// Xtream Codes
-const xtreamDevices  = ref([])
-const xtreamEdits    = ref({})  // { [id]: { username, password } }
-const xtreamSaving   = ref(null)
-const xtreamSaved    = ref(null)
-
-async function loadXtream() {
-  try {
-    const d = await fetch('/api/xtream/devices').then(r => r.json()).catch(() => [])
-    xtreamDevices.value = d
-    const edits = {}
-    for (const dev of d) edits[dev.playlist_id] = { username: dev.username, password: dev.password }
-    xtreamEdits.value = edits
-  } catch {}
-}
-
-async function saveXtreamCreds(id) {
-  xtreamSaving.value = id
-  try {
-    await fetch(`/api/xtream/${id}/credentials`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(xtreamEdits.value[id]),
-    })
-    xtreamSaved.value = id
-    setTimeout(() => { xtreamSaved.value = null }, 2000)
-    await loadXtream()
-  } catch {} finally {
-    xtreamSaving.value = null
-  }
-}
+// Xtream Codes - managed via Users page, not here
 
 // Scheduler
 const schedules      = ref([])   // [{ id, name, schedule, last_built, channel_count, schedule_valid }]
@@ -136,11 +106,18 @@ const scheduleEdits  = ref({})   // { [id]: string }
 const scheduleSaving = ref(null) // id currently saving
 const scheduleError  = ref({})   // { [id]: string }
 
+// EPG Scheduler
+const epgGrabSchedule = ref('0 23 * * *')
+const epgEnrichSchedule = ref('0 2 * * *')
+const epgScheduleSaving = ref(false)
+
 const CRON_PRESETS = [
   { label: 'Every 6h',   value: '0 */6 * * *' },
   { label: 'Every 12h',  value: '0 */12 * * *' },
+  { label: 'Daily 2am',  value: '0 2 * * *' },
   { label: 'Daily 3am',  value: '0 3 * * *' },
   { label: 'Daily 4am',  value: '0 4 * * *' },
+  { label: 'Daily 11pm', value: '0 23 * * *' },
   { label: 'Weekly',     value: '0 4 * * 0' },
   { label: 'Disabled',   value: '' },
 ]
@@ -165,11 +142,14 @@ async function load() {
     hdhrStatus.value  = h
     hdhrDevices.value = d
     schedules.value   = sc
-    await Promise.all([loadXtream(), loadVirtualDevices()])
+    await loadVirtualDevices()
     // Init edits from current schedule values
     const edits = {}
     for (const pl of sc) edits[pl.id] = pl.schedule || ''
     scheduleEdits.value = edits
+    // Load EPG schedules
+    epgGrabSchedule.value = s.epg_grab_schedule || '0 23 * * *'
+    epgEnrichSchedule.value = s.epg_enrich_schedule || '0 2 * * *'
     form.value = {
       hdhr_device_name: s.hdhr_device_name || 'M3u4Prox',
       hdhr_tuner_count: s.hdhr_tuner_count || '4',
@@ -198,6 +178,30 @@ function scheduleChanged(id) {
   return (scheduleEdits.value[id] || '') !== (pl?.schedule || '')
 }
 
+async function saveAllSchedules() {
+  epgScheduleSaving.value = true
+  try {
+    // Save EPG schedules
+    await api.saveSettings({
+      epg_grab_schedule: epgGrabSchedule.value || '',
+      epg_enrich_schedule: epgEnrichSchedule.value || ''
+    })
+
+    // Save all playlist schedules
+    for (const pl of schedules.value) {
+      if (scheduleChanged(pl.id)) {
+        await api.saveSchedule(pl.id, scheduleEdits.value[pl.id] || null)
+      }
+    }
+
+    await load()
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    epgScheduleSaving.value = false
+  }
+}
+
 async function save() {
   saving.value = true
   error.value  = ''
@@ -220,7 +224,6 @@ function copyUrl(url, key) {
 
 const TABS = [
   { id: 'hdhr',        label: 'HDHomeRun',   icon: '📡' },
-  { id: 'xtream',      label: 'Xtream Codes', icon: '📺' },
   { id: 'scheduler',   label: 'Scheduler',    icon: '🕐' },
   { id: 'proxy',       label: 'Proxy',        icon: '⚡' },
   { id: 'backup',      label: 'Backup',       icon: '💾' },
@@ -467,71 +470,82 @@ onMounted(async () => { await load(); await loadProxySettings() })
     </div>
     </template> <!-- end hdhr tab -->
 
-    <!-- ── Xtream Codes Tab ── -->
-    <template v-if="tab === 'xtream'">
-    <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6">
+
+    <!-- Scheduler Tab -->
+    <template v-if="tab === 'scheduler'">
+
+    <!-- EPG Scheduler -->
+    <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6 mb-6">
       <div class="flex items-center gap-3 mb-5">
-        <div class="w-9 h-9 rounded-xl bg-orange-500/20 text-orange-400 flex items-center justify-center text-lg shrink-0">📡</div>
+        <div class="w-9 h-9 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-lg shrink-0">📺</div>
         <div>
-          <h2 class="text-sm font-bold text-slate-100">Xtream Codes API</h2>
-          <p class="text-xs text-slate-500">One Xtream endpoint per playlist — compatible with TiviMate, IPTV Smarters, GSE IPTV, Perfect Player</p>
+          <h2 class="text-sm font-bold text-slate-100">EPG Scheduler</h2>
+          <p class="text-xs text-slate-500">Configure when EPG data is grabbed and enriched with TMDB metadata</p>
         </div>
       </div>
 
       <div class="space-y-4">
-        <div v-for="dev in xtreamDevices" :key="dev.playlist_id"
-          class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
-
-          <div class="flex items-center gap-3 mb-3">
-            <span class="text-sm font-semibold text-slate-100 flex-1">{{ dev.playlist_name }}</span>
-            <span v-if="xtreamSaved === dev.playlist_id" class="text-[10px] text-green-400">✓ Saved</span>
+        <!-- EPG Grab Schedule -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-sm font-semibold text-slate-100">EPG Grab</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
+              Fetches EPG data from selected sites
+            </span>
           </div>
 
-          <!-- Credentials editor -->
-          <div class="flex items-center gap-2 mb-3 flex-wrap">
-            <div class="flex items-center gap-1.5">
-              <label class="text-[10px] text-slate-500 shrink-0">Username</label>
-              <input v-model="xtreamEdits[dev.playlist_id].username"
-                class="w-28 bg-[#22263a] border border-[#2e3250] focus:border-orange-500 rounded-lg px-2 py-1.5 text-xs text-slate-200 font-mono outline-none" />
+          <div class="flex items-center gap-2 flex-wrap">
+            <div class="flex gap-1 flex-wrap">
+              <button
+                v-for="p in CRON_PRESETS" :key="'grab-' + p.label"
+                @click="epgGrabSchedule = p.value"
+                :class="['text-[10px] px-2 py-1 rounded border transition-colors',
+                  epgGrabSchedule === p.value
+                    ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                    : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
+              >{{ p.label }}</button>
             </div>
-            <div class="flex items-center gap-1.5">
-              <label class="text-[10px] text-slate-500 shrink-0">Password</label>
-              <input v-model="xtreamEdits[dev.playlist_id].password"
-                class="w-28 bg-[#22263a] border border-[#2e3250] focus:border-orange-500 rounded-lg px-2 py-1.5 text-xs text-slate-200 font-mono outline-none" />
-            </div>
-            <button @click="saveXtreamCreds(dev.playlist_id)" :disabled="xtreamSaving === dev.playlist_id"
-              class="px-3 py-1.5 text-xs bg-orange-500 hover:bg-orange-400 disabled:opacity-40 text-white font-semibold rounded-lg transition-colors shrink-0">
-              {{ xtreamSaving === dev.playlist_id ? 'Saving…' : 'Save Creds' }}
-            </button>
+
+            <input
+              v-model="epgGrabSchedule"
+              placeholder="cron expression or leave blank to disable"
+              class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
+            />
+          </div>
+        </div>
+
+        <!-- TMDB Enrichment Schedule -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-sm font-semibold text-slate-100">TMDB Enrichment</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/20">
+              Adds movie/show metadata to EPG
+            </span>
           </div>
 
-          <!-- URLs -->
-          <div class="space-y-1.5">
-            <div v-for="(url, label) in { 'Player API': dev.player_api, 'M3U (get.php)': dev.get_php, 'XMLTV': dev.xmltv }" :key="label"
-              class="flex items-center gap-2 bg-[#22263a] rounded-lg px-3 py-2">
-              <span class="text-[10px] uppercase tracking-widest text-slate-500 w-24 shrink-0">{{ label }}</span>
-              <span class="flex-1 font-mono text-xs text-slate-300 truncate">{{ url }}</span>
-              <button @click="copyUrl(url, dev.playlist_id + label)"
-                :class="['text-[10px] px-2 py-0.5 rounded border transition-colors shrink-0',
-                  copied === dev.playlist_id + label
-                    ? 'bg-green-500/20 border-green-500/30 text-green-400'
-                    : 'border-[#3a3f5c] text-slate-500 hover:text-slate-200 hover:border-slate-500']">
-                {{ copied === dev.playlist_id + label ? '✓' : 'Copy' }}
-              </button>
+          <div class="flex items-center gap-2 flex-wrap">
+            <div class="flex gap-1 flex-wrap">
+              <button
+                v-for="p in CRON_PRESETS" :key="'enrich-' + p.label"
+                @click="epgEnrichSchedule = p.value"
+                :class="['text-[10px] px-2 py-1 rounded border transition-colors',
+                  epgEnrichSchedule === p.value
+                    ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                    : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
+              >{{ p.label }}</button>
             </div>
-          </div>
 
-          <p class="text-[10px] text-slate-600 mt-2">
-            In TiviMate: Add Playlist → Xtream Codes → enter the server URL <code class="text-slate-400">{{ dev.player_api.split('/player_api')[0] }}</code>, username and password above.
-          </p>
+            <input
+              v-model="epgEnrichSchedule"
+              placeholder="cron expression or leave blank to disable"
+              class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
+            />
+          </div>
         </div>
       </div>
     </div>
 
-    </template> <!-- end xtream tab -->
-
-    <!-- Scheduler Tab -->
-    <template v-if="tab === 'scheduler'">
+    <!-- Playlist Scheduler -->
     <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6">
       <div class="flex items-center gap-3 mb-5">
         <div class="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-lg shrink-0">🕐</div>
@@ -554,13 +568,10 @@ onMounted(async () => { await load(); await loadProxySettings() })
             <span class="text-sm font-semibold text-slate-100 flex-1 truncate">{{ pl.name }}</span>
             <span class="text-[10px] text-slate-600">{{ (pl.channel_count || 0).toLocaleString() }} ch</span>
             <!-- Status badge -->
-            <span v-if="!pl.output_path" class="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/20">
-              No output path
-            </span>
-            <span v-else-if="pl.schedule && pl.schedule_valid" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+            <span v-if="pl.schedule && pl.schedule_valid" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
               ● Scheduled
             </span>
-            <span v-else class="text-[10px] px-2 py-0.5 rounded-full bg-slate-500/15 text-slate-500 border border-slate-500/20">
+            <span v-else-if="pl.schedule" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-500/15 text-slate-500 border border-slate-500/20">
               Manual only
             </span>
           </div>
@@ -597,25 +608,23 @@ onMounted(async () => { await load(); await loadProxySettings() })
                   ? 'border-red-500/50 text-red-300 focus:border-red-500'
                   : 'border-[#2e3250] text-slate-200 focus:border-indigo-500']"
             />
-
-            <!-- Save button -->
-            <button
-              @click="saveSchedule(pl.id)"
-              :disabled="scheduleSaving === pl.id || !scheduleChanged(pl.id) || !pl.output_path"
-              :class="['px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors shrink-0',
-                scheduleChanged(pl.id) && pl.output_path
-                  ? 'bg-indigo-500 hover:bg-indigo-400 text-white'
-                  : 'bg-[#22263a] border border-[#2e3250] text-slate-600 cursor-not-allowed']"
-            >
-              <span v-if="scheduleSaving === pl.id" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin inline-block"></span>
-              <span v-else>Save</span>
-            </button>
           </div>
 
           <p v-if="scheduleError[pl.id]" class="text-[10px] text-red-400 mt-1.5">⚠ {{ scheduleError[pl.id] }}</p>
-          <p v-if="!pl.output_path" class="text-[10px] text-amber-500/70 mt-1.5">Set an output path in the playlist settings to enable scheduling.</p>
         </div>
       </div>
+    </div>
+
+    <!-- Save All Schedules Button -->
+    <div class="flex justify-end mt-6">
+      <button
+        @click="saveAllSchedules"
+        :disabled="epgScheduleSaving"
+        class="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white transition-colors disabled:opacity-50"
+      >
+        <span v-if="epgScheduleSaving" class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin inline-block mr-2"></span>
+        <span>Save Schedules</span>
+      </button>
     </div>
 
     </template> <!-- end scheduler tab -->

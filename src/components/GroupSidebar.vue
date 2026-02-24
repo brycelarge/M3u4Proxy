@@ -22,7 +22,8 @@ const props = defineProps({
 })
 const emit = defineEmits([
   'update:groupSearch', 'select-group', 'toggle-group', 'set-active', 'close',
-  'switch-source', 'switch-playlist', 'create-playlist', 'edit-playlist', 'delete-playlist'
+  'switch-source', 'switch-playlist', 'create-playlist', 'edit-playlist', 'delete-playlist',
+  'toggle-section'
 ])
 
 const showSelectedOnly = ref(false)
@@ -53,6 +54,20 @@ const filteredSections = computed(() => {
     }))
     .filter(sec => sec.groups.length > 0)
 })
+
+function getSectionState(section) {
+  const groups = section.groups
+  if (!groups.length) return 'none'
+  const allSelected = groups.every(g => props.groupState[g.name] === 'all')
+  const noneSelected = groups.every(g => !props.groupState[g.name] || props.groupState[g.name] === 'none')
+  if (allSelected) return 'all'
+  if (noneSelected) return 'none'
+  return 'partial'
+}
+
+function toggleSection(section) {
+  emit('toggle-section', section.groups.map(g => g.name))
+}
 </script>
 
 <template>
@@ -218,6 +233,13 @@ const filteredSections = computed(() => {
       <template v-for="sec in filteredSections" :key="sec.section || '__flat__'">
         <!-- Section header -->
         <div v-if="sec.section" class="flex items-center gap-2 px-3 pt-3 pb-1">
+          <input
+            type="checkbox"
+            :checked="getSectionState(sec) === 'all'"
+            :indeterminate="getSectionState(sec) === 'partial'"
+            @change="toggleSection(sec)"
+            class="accent-blue-500 cursor-pointer shrink-0 w-3.5 h-3.5"
+          />
           <span class="text-xs font-medium uppercase text-slate-500">{{ sec.section }}</span>
         </div>
         <!-- Group rows -->

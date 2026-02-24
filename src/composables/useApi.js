@@ -51,6 +51,13 @@ export function logoUrl(url) {
 }
 
 export const api = {
+  // Generic methods
+  get:                 (path)       => request('GET',    path),
+  post:                (path, data) => request('POST',   path, data),
+  put:                 (path, data) => request('PUT',    path, data),
+  patch:               (path, data) => request('PATCH',  path, data),
+  delete:              (path)       => request('DELETE', path),
+
   // Sources
   getSources:          ()           => request('GET',    '/sources'),
   createSource:        (data)       => request('POST',   '/sources', data),
@@ -105,7 +112,7 @@ export const api = {
 
   // EPG Scraper — channels.xml management
   getChannelsXml:      ()           => request('GET',    '/epg/channels-xml'),
-  saveChannelsXml:     (content)    => request('PUT',    '/epg/channels-xml', { content }),
+  saveChannelsXml:     (content, channels)    => request('PUT',    '/epg/channels-xml', { content, channels }),
 
   // EPG Scraper — iptv-org/epg site browser (DB-backed)
   getEpgSites:         ()           => request('GET',    '/epg/sites'),

@@ -291,9 +291,9 @@ export async function runGrab({ onProgress } = {}) {
     const progCount = (merged.match(/<programme\b/g) || []).length
     log(`guide.xml: ${chanCount} channels, ${progCount} programmes.`)
 
-    // Re-enabled TMDB enrichment
-    log(`Running TMDB enrichment…`)
-    await enrichGuide(GUIDE_XML, log)
+    // TMDB enrichment disabled - only runs via cron schedule or manual trigger
+    // log(`Running TMDB enrichment…`)
+    // await enrichGuide(GUIDE_XML, log)
 
     grabState.lastFinished = new Date().toISOString()
     return { ok: true, channels: chanCount, programmes: progCount }

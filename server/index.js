@@ -227,38 +227,38 @@ app.post('/api/sources/:id/refresh', async (req, res) => {
 app.get('/api/sources/all/groups', (req, res) => {
   const playlistId = req.query.playlist_id ? parseInt(req.query.playlist_id) : null
 
-  // Determine which sources to include based on playlist type
-  let sources
+  // Determine category filter based on playlist type
+  let categoryFilter
   if (playlistId) {
     const playlist = db.prepare('SELECT playlist_type FROM playlists WHERE id = ?').get(playlistId)
     if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
-
-    // VOD playlists: no category filter (include all)
-    // Live playlists: only category='playlist' (exclude VOD sources)
-    sources = playlist.playlist_type === 'vod'
-      ? db.prepare("SELECT * FROM sources WHERE category != 'epg'").all()
-      : db.prepare("SELECT * FROM sources WHERE category = 'playlist'").all()
+    categoryFilter = playlist.playlist_type === 'vod' ? "category != 'epg'" : "category = 'playlist'"
   } else {
-    // Default: only live TV sources
-    sources = db.prepare("SELECT * FROM sources WHERE category = 'playlist'").all()
+    categoryFilter = "category = 'playlist'"
   }
 
-  const groups = []
-  for (const s of sources) {
-    const rows = db.prepare(
-      'SELECT group_title, COUNT(*) as count FROM source_channels WHERE source_id = ? GROUP BY group_title ORDER BY group_title'
-    ).all(s.id)
-    for (const r of rows) {
-      groups.push({
-        name:        `${s.name} › ${r.group_title}`,
-        display:     r.group_title,
-        source_id:   s.id,
-        source_name: s.name,
-        count:       r.count,
-      })
-    }
-  }
-  groups.sort((a, b) => a.name.localeCompare(b.name))
+  // Single optimized query with JOIN instead of loop
+  const rows = db.prepare(`
+    SELECT
+      s.id as source_id,
+      s.name as source_name,
+      sc.group_title,
+      COUNT(*) as count
+    FROM source_channels sc
+    JOIN sources s ON s.id = sc.source_id
+    WHERE s.${categoryFilter}
+    GROUP BY s.id, s.name, sc.group_title
+    ORDER BY s.name, sc.group_title
+  `).all()
+
+  const groups = rows.map(r => ({
+    name:        `${r.source_name} › ${r.group_title}`,
+    display:     r.group_title,
+    source_id:   r.source_id,
+    source_name: r.source_name,
+    count:       r.count,
+  }))
+
   const total = groups.reduce((s, g) => s + g.count, 0)
   res.json({ groups, total, cached: groups.length > 0 })
 })
@@ -1151,7 +1151,8 @@ app.post('/api/epg-mappings/bulk', (req, res) => {
 })
 
 // ── EPG Scraper ───────────────────────────────────────────────────────────────
-const EPG_DIR        = path.join(process.cwd(), 'data', 'epg')
+// Use EPG_DIR from epgGrab.js (imported as GRAB_EPG_DIR)
+const EPG_DIR        = GRAB_EPG_DIR
 const CHANNELS_XML   = path.join(EPG_DIR, 'channels.xml')
 const GUIDE_XML_URL  = process.env.GUIDE_XML_URL  || `http://127.0.0.1:${process.env.PORT || 3005}/guide.xml`
 
@@ -1287,9 +1288,28 @@ app.post('/api/epg/grab', async (req, res) => {
 
   runGrab({ onProgress: (msg) => {} })
     .finally(() => clearTimeout(safetyTimeout))
-    .then(() => {
-      // Auto-refresh all local EPG sources so last_fetched + channel_count update
-      const epgSources = db.prepare("SELECT * FROM sources WHERE category = 'epg'").all()
+    .then(async () => {
+      // Ensure guide.xml is registered as an EPG source
+      const proto = 'http'
+      const host = `127.0.0.1:${process.env.PORT || 3005}`
+      const guideUrl = `${proto}://${host}/guide.xml`
+
+      let guideSourceId = db.prepare('SELECT id FROM sources WHERE url = ? AND category = ?').get(guideUrl, 'epg')?.id
+      if (!guideSourceId) {
+        const result = db.prepare(
+          `INSERT INTO sources (name, type, url, category, refresh_cron) VALUES ('EPG Grabber (guide.xml)', 'epg', ?, 'epg', '0 4 * * *')`
+        ).run(guideUrl)
+        guideSourceId = result.lastInsertRowid
+        console.log('[epg-grab] Created EPG source for guide.xml')
+      }
+
+      // Cache the guide.xml content so it's searchable in EPG Mappings
+      if (guideSourceId) {
+        await refreshSourceCache(guideSourceId).catch(e => console.error(`[epg-grab] Failed to cache guide.xml:`, e.message))
+      }
+
+      // Auto-refresh all other EPG sources so last_fetched + channel_count update
+      const epgSources = db.prepare("SELECT * FROM sources WHERE category = 'epg' AND id != ?").all(guideSourceId || 0)
       for (const s of epgSources) {
         refreshSourceCache(s.id).catch(e => console.error(`[epg-grab] Auto-refresh "${s.name}":`, e.message))
       }
@@ -1805,6 +1825,17 @@ app.put('/api/settings', (req, res) => {
     for (const [k, v] of Object.entries(obj)) upsert.run(k, String(v))
   })
   save(req.body)
+
+  // Restart cron jobs if schedules changed
+  if ('epg_grab_schedule' in req.body) {
+    console.log('[settings] EPG grab schedule updated, restarting cron...')
+    startEpgGrabCron()
+  }
+  if ('epg_enrich_schedule' in req.body) {
+    console.log('[settings] TMDB enrichment schedule updated, restarting cron...')
+    startEnrichCron()
+  }
+
   res.json({ ok: true })
 })
 
@@ -1865,51 +1896,89 @@ if (epgCount === 0) {
   setTimeout(() => runSync().catch(e => console.error('[startup] EPG sync error:', e.message)), 3000)
 }
 
-// Daily EPG grab cron (default 11 PM)
-const EPG_GRAB_CRON = process.env.EPG_GRAB_CRON || '0 23 * * *'
-console.log(`[startup] Configuring EPG grab cron with schedule: ${EPG_GRAB_CRON}`)
-if (cron.validate(EPG_GRAB_CRON)) {
-  cron.schedule(EPG_GRAB_CRON, () => {
-    console.log(`[cron] Running daily EPG grab at ${new Date().toISOString()}…`)
-    runGrab({ onProgress: (msg) => console.log(`[cron-epg] ${msg}`) })
-      .then(() => {
-        console.log(`[cron] EPG grab completed successfully at ${new Date().toISOString()}`)
-        const epgSources = db.prepare("SELECT * FROM sources WHERE category = 'epg'").all()
-        // Refresh all EPG sources sequentially then enrich once
-        ;(async () => {
-          for (const s of epgSources) {
-            try {
-              console.log(`[cron] Refreshing EPG source "${s.name}"...`)
-              await refreshSourceCache(s.id)
-              console.log(`[cron] Successfully refreshed EPG source "${s.name}"`)
-            } catch (e) {
-              console.error(`[cron] Auto-refresh "${s.name}":`, e.message)
-            }
-          }
-          // Run enrichment once after all sources are refreshed
-          console.log('[cron] Running TMDB enrichment after EPG refresh...')
-          await enrichGuide(null).catch(e => console.error('[cron] Enrichment error:', e.message))
-        })()
-      })
-      .catch(e => console.error('[cron] EPG grab error:', e.message))
-  }, {
-    scheduled: true,
-    timezone: "Africa/Johannesburg"  // Use South Africa timezone
-  })
+// EPG grab and enrichment cron schedules from settings
+const getEpgGrabSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('epg_grab_schedule')?.value || '0 23 * * *'
+const getEnrichSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('epg_enrich_schedule')?.value || '0 2 * * *'
 
-  // Also run once at startup if it's been more than 12 hours since last run
-  setTimeout(() => {
-    const lastRun = grabState.lastFinished ? new Date(grabState.lastFinished) : null
-    const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000)
-    if (!lastRun || lastRun < twelveHoursAgo) {
-      console.log('[startup] Running EPG grab (more than 12h since last run)...')
-      runGrab({ onProgress: (msg) => console.log(`[startup-epg] ${msg}`) })
-        .catch(e => console.error('[startup] EPG grab error:', e.message))
-    } else {
-      console.log(`[startup] Skipping EPG grab (last run: ${lastRun.toISOString()})`)
-    }
-  }, 10000) // Wait 10 seconds after server start
+let epgGrabCronJob = null
+let enrichCronJob = null
+
+function startEpgGrabCron() {
+  if (epgGrabCronJob) epgGrabCronJob.stop()
+  const schedule = getEpgGrabSchedule()
+  if (!schedule) {
+    console.log('[startup] EPG grab schedule disabled')
+    return
+  }
+  console.log(`[startup] Configuring EPG grab cron with schedule: ${schedule}`)
+  if (cron.validate(schedule)) {
+    epgGrabCronJob = cron.schedule(schedule, () => {
+      console.log(`[cron] Running daily EPG grab at ${new Date().toISOString()}…`)
+      runGrab({ onProgress: (msg) => console.log(`[cron-epg] ${msg}`) })
+        .then(() => {
+          console.log(`[cron] EPG grab completed successfully at ${new Date().toISOString()}`)
+          const epgSources = db.prepare("SELECT * FROM sources WHERE category = 'epg'").all()
+          // Refresh all EPG sources sequentially
+          ;(async () => {
+            for (const s of epgSources) {
+              try {
+                console.log(`[cron] Refreshing EPG source "${s.name}"...`)
+                await refreshSourceCache(s.id)
+                console.log(`[cron] Successfully refreshed EPG source "${s.name}"`)
+              } catch (e) {
+                console.error(`[cron] Auto-refresh "${s.name}":`, e.message)
+              }
+            }
+          })()
+        })
+        .catch(e => console.error('[cron] EPG grab error:', e.message))
+    }, {
+      scheduled: true,
+      timezone: "Africa/Johannesburg"
+    })
+  } else {
+    console.error(`[startup] Invalid EPG grab cron schedule: ${schedule}`)
+  }
 }
+
+function startEnrichCron() {
+  if (enrichCronJob) enrichCronJob.stop()
+  const schedule = getEnrichSchedule()
+  if (!schedule) {
+    console.log('[startup] TMDB enrichment schedule disabled')
+    return
+  }
+  console.log(`[startup] Configuring TMDB enrichment cron with schedule: ${schedule}`)
+  if (cron.validate(schedule)) {
+    enrichCronJob = cron.schedule(schedule, () => {
+      console.log(`[cron] Running TMDB enrichment at ${new Date().toISOString()}…`)
+      enrichGuide(null)
+        .then(() => console.log(`[cron] TMDB enrichment completed at ${new Date().toISOString()}`))
+        .catch(e => console.error('[cron] Enrichment error:', e.message))
+    }, {
+      scheduled: true,
+      timezone: "Africa/Johannesburg"
+    })
+  } else {
+    console.error(`[startup] Invalid enrichment cron schedule: ${schedule}`)
+  }
+}
+
+startEpgGrabCron()
+startEnrichCron()
+
+// Startup EPG grab disabled - only runs via scheduler
+// setTimeout(() => {
+//   const lastRun = grabState.lastFinished ? new Date(grabState.lastFinished) : null
+//   const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000)
+//   if (!lastRun || lastRun < twelveHoursAgo) {
+//     console.log('[startup] Running EPG grab (more than 12h since last run)...')
+//     runGrab({ onProgress: (msg) => console.log(`[startup-epg] ${msg}`) })
+//       .catch(e => console.error('[startup] EPG grab error:', e.message))
+//   } else {
+//     console.log(`[startup] Skipping EPG grab (last run: ${lastRun.toISOString()})`)
+//   }
+// }, 10000) // Wait 10 seconds after server start
 
 // ── HDHomeRun simulation ───────────────────────────────────────────────────────
 registerHdhrRoutes(app)
@@ -2211,10 +2280,10 @@ app.get('/api/backup', (req, res) => {
   }
 
   // Include channels.xml, guide.xml, and .env as base64
-  const EPG_DIR_PATH = path.join(process.cwd(), 'data', 'epg')
-  const channelsXmlPath = path.join(EPG_DIR_PATH, 'channels.xml')
+  const channelsXmlPath = path.join(EPG_DIR, 'channels.xml')
+  const guideXmlPath = path.join(EPG_DIR, 'guide.xml')
   if (existsSync(channelsXmlPath)) bundle.files['channels.xml'] = readFileSync(channelsXmlPath, 'base64')
-  if (existsSync(GUIDE_XML))       bundle.files['guide.xml']    = readFileSync(GUIDE_XML, 'base64')
+  if (existsSync(guideXmlPath))    bundle.files['guide.xml']    = readFileSync(guideXmlPath, 'base64')
   const envPath = path.join(process.cwd(), '.env')
   if (existsSync(envPath))         bundle.files['.env']         = readFileSync(envPath, 'base64')
 
@@ -2251,14 +2320,16 @@ app.post('/api/restore', express.raw({ type: 'application/gzip', limit: '500mb' 
     db.exec('PRAGMA foreign_keys = ON')
 
     // Restore files
-    const EPG_DIR_PATH = path.join(process.cwd(), 'data', 'epg')
+    const DATA_DIR = process.env.DATA_DIR || '/data'
+    const EPG_DIR_PATH = path.join(DATA_DIR, 'epg')
     mkdirSync(EPG_DIR_PATH, { recursive: true })
     if (bundle.files?.['channels.xml']) {
       const p = path.join(EPG_DIR_PATH, 'channels.xml')
       writeFileSync(p, Buffer.from(bundle.files['channels.xml'], 'base64'))
     }
     if (bundle.files?.['guide.xml']) {
-      writeFileSync(GUIDE_XML, Buffer.from(bundle.files['guide.xml'], 'base64'))
+      const guideXmlPath = path.join(EPG_DIR_PATH, 'guide.xml')
+      writeFileSync(guideXmlPath, Buffer.from(bundle.files['guide.xml'], 'base64'))
     }
     // Restore .env — only write keys not already present in the running environment
     // to avoid clobbering host-specific overrides (e.g. HOST_IP on Unraid)

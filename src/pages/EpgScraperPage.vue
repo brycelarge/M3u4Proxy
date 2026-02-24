@@ -42,6 +42,7 @@ async function triggerSync() {
 // ── Site browser ──────────────────────────────────────────────────────────────
 const sites        = ref([])
 const siteSearch   = ref('')
+const countryFilter = ref('') // Filter sites by country code
 const activeSite   = ref(null)
 const siteFiles    = ref([])   // [{ file, count }] — country variants for active site
 const activeFile   = ref(null) // e.g. 'dstv.com_za.channels.xml'
@@ -51,6 +52,19 @@ const chanSearch   = ref('')
 const loadingSites = ref(false)
 const loadingChans = ref(false)
 const siteError    = ref('')
+
+// Extract unique countries from site files
+const availableCountries = computed(() => {
+  const countries = new Set()
+  for (const site of sites.value) {
+    // Extract country codes from site names (e.g., dstv.com_za -> ZA)
+    const parts = site.split('_')
+    if (parts.length > 1) {
+      countries.add(parts[parts.length - 1].toUpperCase())
+    }
+  }
+  return Array.from(countries).sort()
+})
 
 // ── Global search ─────────────────────────────────────────────────────────────
 const globalSearch    = ref('')
@@ -79,9 +93,21 @@ function toggleChannelFull(ch) {
 
 // ── Filtered lists ────────────────────────────────────────────────────────────
 const filteredSites = computed(() => {
-  if (!siteSearch.value.trim()) return sites.value
-  const q = siteSearch.value.toLowerCase()
-  return sites.value.filter(s => s.toLowerCase().includes(q))
+  let filtered = sites.value
+
+  // Filter by country if selected
+  if (countryFilter.value) {
+    const country = countryFilter.value.toLowerCase()
+    filtered = filtered.filter(s => s.toLowerCase().endsWith(`_${country}`) || s.toLowerCase().endsWith(`_${country}.channels.xml`))
+  }
+
+  // Filter by search text
+  if (siteSearch.value.trim()) {
+    const q = siteSearch.value.toLowerCase()
+    filtered = filtered.filter(s => s.toLowerCase().includes(q))
+  }
+
+  return filtered
 })
 
 const filteredSiteChannels = computed(() => {
@@ -300,10 +326,7 @@ async function saveChannelsXml() {
   const content = activeTab.value === 'xml' ? channelsXml.value : buildXml()
   try {
     // Send both content and selected channels for persistence
-    await api.put('/api/epg/channels-xml', {
-      content,
-      channels: selectedChannels.value
-    })
+    await api.saveChannelsXml(content, selectedChannels.value)
     channelsXml.value = content
     saveSuccess.value = `Saved to ${xmlPath.value} (${selectedChannels.value.length} channels)`
     setTimeout(() => (saveSuccess.value = ''), 3000)

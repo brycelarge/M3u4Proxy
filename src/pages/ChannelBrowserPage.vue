@@ -197,6 +197,7 @@ function onSetName(payload) {
         :active-playlist-name="activePlaylistName"
         @select-group="selectGroup"
         @toggle-group="toggleGroup"
+        @toggle-section="toggleSection"
         @set-active="selectGroup"
         @close="sidebarOpen = false"
         @switch-source="switchSource"
