@@ -61,6 +61,7 @@ const searchingGlobal = ref(false)
 // selectedChannels: full channel objects [{name,site,site_id,lang,xmltv_id}]
 const selectedChannels = ref([])
 const selectedKeys     = computed(() => new Set(selectedChannels.value.map(selKey)))
+const loadingSelections = ref(false)
 
 function selKey(ch) { return `${ch.site}::${ch.site_id}` }
 function isSelected(ch) { return selectedKeys.value.has(selKey(ch)) }
@@ -217,6 +218,21 @@ async function saveAsEpgSource() {
   }
 }
 
+// ── Load saved selections from DB ────────────────────────────────────────────
+async function loadSavedSelections() {
+  loadingSelections.value = true
+  try {
+    const saved = await api.get('/api/epg/selected-channels')
+    if (Array.isArray(saved) && saved.length > 0) {
+      selectedChannels.value = saved
+    }
+  } catch (e) {
+    console.error('Failed to load saved selections:', e)
+  } finally {
+    loadingSelections.value = false
+  }
+}
+
 // ── channels.xml ──────────────────────────────────────────────────────────────
 async function loadChannelsXml() {
   try {
@@ -283,9 +299,13 @@ async function saveChannelsXml() {
   saveSuccess.value = ''
   const content = activeTab.value === 'xml' ? channelsXml.value : buildXml()
   try {
-    await api.saveChannelsXml(content)
+    // Send both content and selected channels for persistence
+    await api.put('/api/epg/channels-xml', {
+      content,
+      channels: selectedChannels.value
+    })
     channelsXml.value = content
-    saveSuccess.value = `Saved to ${xmlPath.value}`
+    saveSuccess.value = `Saved to ${xmlPath.value} (${selectedChannels.value.length} channels)`
     setTimeout(() => (saveSuccess.value = ''), 3000)
   } catch (e) {
     saveError.value = e.message
@@ -295,7 +315,7 @@ async function saveChannelsXml() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadChannelsXml(), loadSites(), loadSyncStatus(), loadGrabStatus()])
+  await Promise.all([loadSavedSelections(), loadChannelsXml(), loadSites(), loadSyncStatus(), loadGrabStatus()])
   // If a sync is already in progress, start polling
   if (syncStatus.value?.inProgress) {
     syncing.value = true

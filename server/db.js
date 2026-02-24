@@ -196,6 +196,18 @@ db.exec(`
     fetched_at  TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (show_title, season, episode)
   );
+
+  CREATE TABLE IF NOT EXISTS epg_selected_channels (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    site        TEXT NOT NULL,
+    site_id     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    xmltv_id    TEXT,
+    lang        TEXT DEFAULT 'en',
+    logo        TEXT,
+    created_at  TEXT DEFAULT (datetime('now')),
+    UNIQUE(site, site_id)
+  );
 `);
 
 // Create all indexes in a separate statement

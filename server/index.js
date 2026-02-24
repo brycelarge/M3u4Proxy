@@ -1364,14 +1364,40 @@ app.get('/api/epg/channels-xml', (req, res) => {
   }
 })
 
-// Save channels.xml content
+// Save channels.xml content and persist selections to DB
 app.put('/api/epg/channels-xml', (req, res) => {
-  const { content } = req.body
+  const { content, channels } = req.body
   if (typeof content !== 'string') return res.status(400).json({ error: 'content required' })
   try {
     mkdirSync(EPG_DIR, { recursive: true })
     writeFileSync(CHANNELS_XML, content, 'utf8')
+
+    // Persist selected channels to DB if provided
+    if (Array.isArray(channels) && channels.length > 0) {
+      const deleteAll = db.prepare('DELETE FROM epg_selected_channels')
+      const insert = db.prepare(
+        'INSERT INTO epg_selected_channels (site, site_id, name, xmltv_id, lang, logo) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      const transaction = db.transaction((channelList) => {
+        deleteAll.run()
+        for (const ch of channelList) {
+          insert.run(ch.site, ch.site_id, ch.name, ch.xmltv_id || '', ch.lang || 'en', ch.logo || '')
+        }
+      })
+      transaction(channels)
+    }
+
     res.json({ ok: true, path: CHANNELS_XML })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Get saved channel selections
+app.get('/api/epg/selected-channels', (req, res) => {
+  try {
+    const channels = db.prepare('SELECT site, site_id, name, xmltv_id, lang, logo FROM epg_selected_channels ORDER BY site, name').all()
+    res.json(channels)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
