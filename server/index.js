@@ -2501,10 +2501,14 @@ app.delete('/api/streams/:channelId', (req, res) => {
 })
 
 // ── Proxy settings ────────────────────────────────────────────────────────────
-const ENV_FILE = path.join(process.cwd(), '.env')
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data')
+const ENV_FILE = path.join(DATA_DIR, 'config', '.env')
 
 function readEnvFile() {
-  try { return existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf8') : '' } catch { return '' }
+  try {
+    mkdirSync(path.dirname(ENV_FILE), { recursive: true })
+    return existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf8') : ''
+  } catch { return '' }
 }
 
 function writeEnvKey(key, value) {
@@ -2515,6 +2519,7 @@ function writeEnvKey(key, value) {
   } else {
     content = content.trimEnd() + `\n${key}=${value}\n`
   }
+  mkdirSync(path.dirname(ENV_FILE), { recursive: true })
   writeFileSync(ENV_FILE, content, 'utf8')
   // Apply immediately without restart
   process.env[key] = String(value)
