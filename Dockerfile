@@ -65,11 +65,6 @@ RUN addgroup --system m3u4prox && \
     chown -R m3u4prox:m3u4prox /data && \
     chmod -R 755 /data
 
-# Create symlink to node_modules in epg-sites so config files can import dependencies
-# This is needed because epg-grabber config files use import statements
-RUN mkdir -p /data/epg-sites && \
-    ln -sf /app/node_modules /data/epg-sites/node_modules
-
 VOLUME ["/data"]
 
 EXPOSE 3005

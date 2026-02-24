@@ -15,6 +15,11 @@ if [ ! -L /epg-sites ]; then
   ln -sf /data/epg-sites /epg-sites
 fi
 
+# Create symlink to node_modules so config files can import dependencies
+if [ ! -L /data/epg-sites/node_modules ]; then
+  ln -sf /app/node_modules /data/epg-sites/node_modules
+fi
+
 # Set proper ownership - do this EVERY time to fix any root-owned subdirectories
 chown -R m3u4prox:m3u4prox /data
 chmod -R u+w /data/epg-sites
