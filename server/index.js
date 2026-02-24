@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import { randomBytes } from 'node:crypto'
 import db from './db.js'
+import { runMigrations } from './migrate.js'
 import { buildM3U, writeM3U, fetchAndParseM3U, fetchXtreamChannels } from './m3uBuilder.js'
 import { connectClient, getActiveSessions, killSession, getBufferSeconds } from './streamer.js'
 import { hashPassword, verifyPassword } from './auth.js'
@@ -199,13 +200,14 @@ async function refreshSourceCache(sourceId) {
   }
 
   const insert = db.prepare(
-    'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const replace = db.transaction((sid, chs) => {
     db.prepare('DELETE FROM source_channels WHERE source_id = ?').run(sid)
     for (const ch of chs) {
       // Extract quality and clean the channel name
       const { cleanedName, quality } = extractQuality(ch.tvg_name || '')
+      const normalizedName = normalizeChannelName(cleanedName)
       insert.run(
         sid,
         ch.tvg_id || '',
@@ -214,14 +216,32 @@ async function refreshSourceCache(sourceId) {
         ch.group_title || 'Ungrouped',
         ch.url,
         ch.raw_extinf || '',
-        quality
+        quality,
+        normalizedName
       )
+
+      // Update playlist_channels with cleaned name for channels with this URL
+      const updated = db.prepare('UPDATE playlist_channels SET tvg_name = ? WHERE url = ?')
+        .run(cleanedName, ch.url)
+      if (updated.changes > 0) {
+        console.log(`[source] Updated ${updated.changes} playlist channel(s): "${ch.tvg_name || ''}" -> "${cleanedName}"`)
+      }
     }
     db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(sid)
   })
   replace(source.id, channels)
   console.log(`[source] Refreshed "${source.name}" — ${channels.length} channels`)
   return channels.length
+}
+
+/**
+ * Normalize channel name for grouping (lowercase, no spaces, no special chars)
+ */
+function normalizeChannelName(name) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '') // Remove all non-alphanumeric characters
+    .trim()
 }
 
 /**
@@ -703,7 +723,7 @@ app.put('/api/playlists/:id/channels-by-groups', (req, res) => {
 app.get('/api/playlists/:id/group-order', (req, res) => {
   const playlist = db.prepare('SELECT group_order FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Not found' })
-  const groups = db.prepare('SELECT DISTINCT group_title FROM playlist_channels WHERE playlist_id = ? AND group_title != "" ORDER BY group_title').all(req.params.id).map(r => r.group_title)
+  const groups = db.prepare("SELECT DISTINCT group_title FROM playlist_channels WHERE playlist_id = ? AND group_title != '' ORDER BY group_title").all(req.params.id).map(r => r.group_title)
   const saved  = playlist.group_order ? JSON.parse(playlist.group_order) : []
   // Merge: saved order first, then any new groups not yet in saved order
   const ordered = [...saved.filter(g => groups.includes(g)), ...groups.filter(g => !saved.includes(g))]
@@ -2279,6 +2299,61 @@ app.get('/player/:channelId', (req, res) => {
   `)
 })
 
+/**
+ * Get all channel variants for a given channel, ordered by quality (best first)
+ * Returns array of {id, url, tvg_name, quality, source_id}
+ */
+function getChannelVariants(channelId) {
+  // First get the channel to find its normalized_name
+  const channel = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
+  if (!channel) return []
+
+  // Get the source channel to find normalized_name
+  const sourceChannel = db.prepare('SELECT normalized_name FROM source_channels WHERE url = ?').get(channel.url)
+  if (!sourceChannel || !sourceChannel.normalized_name) {
+    // No normalized name, return just this channel
+    return [{ id: channel.id, url: channel.url, tvg_name: channel.tvg_name, quality: '', source_id: channel.source_id }]
+  }
+
+  // Find all source channels with the same normalized_name, ordered by quality
+  const qualityOrder = { 'UHD': 1, 'FHD': 2, 'HD': 3, 'SD': 4, '': 5 }
+  const variants = db.prepare(`
+    SELECT id, url, tvg_name, quality, source_id
+    FROM source_channels
+    WHERE normalized_name = ?
+    ORDER BY CASE quality
+      WHEN 'UHD' THEN 1
+      WHEN 'FHD' THEN 2
+      WHEN 'HD' THEN 3
+      WHEN 'SD' THEN 4
+      ELSE 5
+    END
+  `).all(sourceChannel.normalized_name)
+
+  return variants.length > 0 ? variants : [{ id: channel.id, url: channel.url, tvg_name: channel.tvg_name, quality: '', source_id: channel.source_id }]
+}
+
+/**
+ * Try to connect to a stream with timeout
+ */
+async function tryConnectWithTimeout(channelId, url, name, res, sourceId, username, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('Connection timeout'))
+    }, timeoutMs)
+
+    connectClient(channelId, url, name, res, sourceId, username)
+      .then(() => {
+        clearTimeout(timeout)
+        resolve()
+      })
+      .catch((err) => {
+        clearTimeout(timeout)
+        reject(err)
+      })
+  })
+}
+
 // ── Stream proxy ──────────────────────────────────────────────────────────────
 // GET /stream/:channelId  — proxy upstream IPTV stream, reuse for multiple clients
 app.get('/stream/:channelId', async (req, res) => {
@@ -2305,19 +2380,32 @@ app.get('/stream/:channelId', async (req, res) => {
     }
   }
 
-  try {
-    await connectClient(channelId, row.url, row.tvg_name, res, row.source_id || null, username)
-  } catch (e) {
-    // Track failure
-    const existing = db.prepare('SELECT id, fail_count FROM failed_streams WHERE channel_id = ?').get(channelId)
-    if (existing) {
-      db.prepare(`UPDATE failed_streams SET fail_count=?, error=?, last_failed=datetime('now') WHERE id=?`)
-        .run(existing.fail_count + 1, e.message || 'Unknown error', existing.id)
-    } else {
-      db.prepare(`INSERT INTO failed_streams (channel_id, playlist_id, tvg_name, group_title, url, error, http_status) VALUES (?,?,?,?,?,?,?)`)
-        .run(channelId, row.playlist_id, row.tvg_name, row.group_title, row.url, e.message || 'Unknown error', e.status || null)
+  // Get all channel variants (grouped by normalized name, ordered by quality)
+  const variants = getChannelVariants(channelId)
+  console.log(`[stream] Found ${variants.length} variant(s) for channel ${channelId}`)
+
+  // Try each variant in order until one succeeds
+  let lastError = null
+  for (let i = 0; i < variants.length; i++) {
+    const variant = variants[i]
+    const qualityLabel = variant.quality ? ` (${variant.quality})` : ''
+    console.log(`[stream] Trying variant ${i + 1}/${variants.length}: ${variant.tvg_name}${qualityLabel}`)
+
+    try {
+      await connectClient(channelId, variant.url, variant.tvg_name, res, variant.source_id || null, username)
+      console.log(`[stream] Successfully connected to variant ${i + 1}`)
+      return // Success!
+    } catch (e) {
+      lastError = e
+      console.log(`[stream] Variant ${i + 1} failed: ${e.message}`)
+      // Continue to next variant
     }
-    if (!res.headersSent) res.status(502).send('Stream unavailable')
+  }
+
+  // All variants failed
+  console.log(`[stream] All ${variants.length} variant(s) failed for channel ${channelId}`)
+  if (!res.headersSent) {
+    res.status(502).send(`Stream unavailable - all ${variants.length} source(s) failed`)
   }
 })
 
@@ -2648,6 +2736,9 @@ app.get('/api/diagnostics/vpn', async (req, res) => {
 app.get('/{*path}', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'))
 })
+
+// Run migrations before starting server
+await runMigrations(db)
 
 app.listen(PORT, () => {
   console.log(`M3u4Proxy server running on http://localhost:${PORT}`)

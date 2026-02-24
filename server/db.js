@@ -94,15 +94,16 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS source_channels (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-    tvg_id      TEXT    DEFAULT '',
-    tvg_name    TEXT    NOT NULL,
-    tvg_logo    TEXT    DEFAULT '',
-    group_title TEXT    DEFAULT '',
-    url         TEXT    NOT NULL,
-    raw_extinf  TEXT    DEFAULT '',
-    quality     TEXT    DEFAULT ''
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id       INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    tvg_id          TEXT    DEFAULT '',
+    tvg_name        TEXT    NOT NULL,
+    tvg_logo        TEXT    DEFAULT '',
+    group_title     TEXT    DEFAULT '',
+    url             TEXT    NOT NULL,
+    raw_extinf      TEXT    DEFAULT '',
+    quality         TEXT    DEFAULT '',
+    normalized_name TEXT    DEFAULT ''
   );
 
   CREATE TABLE IF NOT EXISTS epg_site_channels (
@@ -232,8 +233,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tmdb_ep_show ON tmdb_episodes(show_title);
 
   CREATE INDEX IF NOT EXISTS idx_pc_playlist_group ON playlist_channels(playlist_id, group_title);
-  CREATE INDEX IF NOT EXISTS idx_pc_playlist_source ON playlist_channels(playlist_id, source_id);
-  CREATE INDEX IF NOT EXISTS idx_pc_playlist_group_source ON playlist_channels(playlist_id, source_id, group_title);
   CREATE INDEX IF NOT EXISTS idx_pc_url ON playlist_channels(url);
 `)
 
