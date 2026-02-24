@@ -18,6 +18,8 @@ services:
     volumes:
       - ./data:/data                      # All application data (DB, output, EPG, configs, etc.)
     environment:
+      - PUID=${PUID:-99}
+      - PGID=${PGID:-100}
       - PORT=3005
       - DATA_DIR=/data
       - EPG_GRAB_DAYS=${EPG_GRAB_DAYS:-3}
