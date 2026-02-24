@@ -48,6 +48,7 @@ class Session extends EventEmitter {
     this.bitrate      = 0  // bytes/sec, rolling
     this.abortCtrl    = new AbortController()
     this.dead         = false
+    this._bufferStarted = false  // Track if buffer has started streaming
   }
 
   // Rolling pre-buffer: array of { chunk: Uint8Array, ts: number }
@@ -145,39 +146,45 @@ async function pump(session) {
           session._lastBytes = session.bytesIn
           session._lastTick  = now
         }
-        // Maintain rolling pre-buffer
+
+        // Buffer logic: collect data first, then flush and stream
         const bufSecs = getBufferSeconds()
-        if (bufSecs > 0) {
-          // Add to buffer with timestamp
+        if (bufSecs > 0 && !session._bufferStarted) {
+          // ALWAYS push to preBuffer while filling
           session.preBuffer.push({ chunk: value, ts: now })
 
-          // Trim entries older than bufSecs
-          const cutoff = now - bufSecs * 1000
-          while (session.preBuffer.length && session.preBuffer[0].ts < cutoff) {
-            session.preBuffer.shift()
+          const bufferAge = session.preBuffer.length > 0 ? now - session.preBuffer[0].ts : 0
+          const targetMs = bufSecs * 1000
+
+          // Check if we've reached the 50% threshold
+          if (bufferAge >= (targetMs * 0.5)) {
+            console.log(`[stream] Buffer ready (${bufferAge}ms). Flushing ${session.preBuffer.length} chunks to clients.`)
+
+            // FLUSH: Send everything we collected to the clients right now
+            for (const entry of session.preBuffer) {
+              for (const client of session.clients) {
+                if (!client.writableEnded) {
+                  client.write(entry.chunk)
+                  session.bytesOut += entry.chunk.length
+                }
+              }
+              session.emit('chunk', entry.chunk)
+            }
+
+            session._bufferStarted = true
+            session.preBuffer = [] // Clear memory
           }
-
-          // Calculate buffer fullness as percentage
-          const bufferAge = session.preBuffer.length ? now - session.preBuffer[0].ts : 0
-          const bufferFullness = Math.min(bufferAge / (bufSecs * 1000), 1.0)
-
-          // Only start writing to clients once buffer is at least 30% full
-          // This prevents jitter from starting playback too early while not delaying too much
-          if (bufferFullness < 0.3) {
-            // Still filling — don't write yet
-            continue
+          // Don't write current chunk yet - it's in the buffer
+        } else {
+          // NORMAL FLOW: Buffer is done (or disabled), just stream live
+          for (const client of session.clients) {
+            if (!client.writableEnded) {
+              client.write(value)
+              session.bytesOut += value.length
+            }
           }
-
-          // Once buffer is full, we'll write the current chunk below
+          session.emit('chunk', value)
         }
-
-        for (const client of session.clients) {
-          if (!client.writableEnded) {
-            client.write(value)
-            session.bytesOut += value.length
-          }
-        }
-        session.emit('chunk', value)
       }
 
       if (session.dead) break
