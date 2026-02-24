@@ -236,12 +236,20 @@ async function refreshSourceCache(sourceId) {
 
 /**
  * Normalize channel name for grouping (lowercase, no spaces, no special chars)
+ * Removes common country prefixes and variations to improve matching
  */
 function normalizeChannelName(name) {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '') // Remove all non-alphanumeric characters
-    .trim()
+  let normalized = name.toLowerCase()
+
+  // Remove common country/region prefixes
+  normalized = normalized
+    .replace(/^(us|usa|uk|ca|au|nz|za)[\s:_-]+/i, '') // US: Fox -> Fox, USA FOX -> Fox
+    .replace(/^(united states|united kingdom|canada|australia)[\s:_-]+/i, '')
+
+  // Remove all non-alphanumeric characters
+  normalized = normalized.replace(/[^a-z0-9]/g, '')
+
+  return normalized
 }
 
 /**
@@ -677,6 +685,64 @@ app.get('/api/source-channels/:id/variants', (req, res) => {
   `).all(sourceChannel.normalized_name)
 
   res.json(variants)
+})
+
+// Bulk fetch variants for multiple channels
+app.post('/api/source-channels/bulk-variants', (req, res) => {
+  const { channelIds } = req.body
+  if (!Array.isArray(channelIds) || channelIds.length === 0) {
+    return res.json([])
+  }
+
+  const results = []
+
+  for (const channelId of channelIds) {
+    // Get the channel from playlist_channels
+    const channel = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
+    if (!channel) continue
+
+    // Get the source channel to find normalized_name
+    const sourceChannel = db.prepare('SELECT normalized_name FROM source_channels WHERE url = ?').get(channel.url)
+    if (!sourceChannel || !sourceChannel.normalized_name) continue
+
+    // Find all variants with the same normalized name
+    const variants = db.prepare(`
+      SELECT
+        sc.id,
+        sc.tvg_name,
+        sc.quality,
+        sc.url,
+        sc.group_title,
+        s.id as source_id,
+        s.name as source_name
+      FROM source_channels sc
+      JOIN sources s ON sc.source_id = s.id
+      WHERE sc.normalized_name = ?
+        AND sc.url != ?
+      ORDER BY
+        CASE sc.quality
+          WHEN 'UHD' THEN 1
+          WHEN 'FHD' THEN 2
+          WHEN 'HD' THEN 3
+          WHEN 'SD' THEN 4
+          ELSE 5
+        END
+    `).all(sourceChannel.normalized_name, channel.url)
+
+    if (variants.length > 0) {
+      results.push({
+        channel: {
+          id: channel.id,
+          tvg_name: channel.tvg_name,
+          group_title: channel.group_title,
+          source_id: channel.source_id
+        },
+        variants
+      })
+    }
+  }
+
+  res.json(results)
 })
 
 // Save channels to a playlist (replaces all existing)
