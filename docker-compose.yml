@@ -48,7 +48,7 @@ services:
 
       # ── DNS / routing ─────────────────────────────────────────────────────────
       # Comma-separated DNS servers (optional)
-      - NAME_SERVERS=
+      - NAME_SERVERS=${NAME_SERVERS:-}
       # Comma-separated CIDRs to route outside the tunnel (optional)
       - LOCAL_NETWORK=${LOCAL_NETWORK:-}
 
@@ -63,7 +63,4 @@ services:
 
       # ── Debug ─────────────────────────────────────────────────────────────────────────
       - DEBUG=${DEBUG:-false}
-    dns:
-      - ${DNS_SERVER_1:-1.1.1.1}
-      - ${DNS_SERVER_2:-8.8.8.8}
     restart: unless-stopped

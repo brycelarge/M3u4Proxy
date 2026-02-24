@@ -130,4 +130,7 @@ export const api = {
 
   // Proxy (for loading M3U URLs via backend)
   proxyUrl:            (url)        => `/api/proxy?url=${encodeURIComponent(url)}`,
+
+  // Source Channel Variants
+  getSourceChannelVariants: (id)    => request('GET', `/source-channels/${id}/variants`),
 }

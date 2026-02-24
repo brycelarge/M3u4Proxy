@@ -3,7 +3,7 @@ defineProps({
   filtered:        { type: Array,   required: true },
   currentSelected: { type: Object,  required: true }, // Set
 })
-const emit = defineEmits(['toggle-channel', 'select-all', 'select-none'])
+const emit = defineEmits(['toggle-channel', 'select-all', 'select-none', 'find-variants'])
 
 function onImgError(e) { e.target.style.display = 'none' }
 
@@ -31,6 +31,7 @@ function onHeaderCheckbox(filtered, currentSelected) {
         <div class="flex-1">Name</div>
         <div class="w-48 shrink-0 hidden md:block">Group</div>
         <div class="w-48 shrink-0 hidden lg:block">EPG ID</div>
+        <div class="w-20 shrink-0"></div>
       </div>
     </div>
     <!-- Rows -->
@@ -52,6 +53,15 @@ function onHeaderCheckbox(filtered, currentSelected) {
         <div class="flex-1 min-w-0 font-medium text-sm text-slate-200 truncate">{{ ch.name }}</div>
         <div class="w-48 shrink-0 text-sm text-slate-500 truncate hidden md:block">{{ ch.group }}</div>
         <div class="w-48 shrink-0 text-xs text-slate-600 truncate hidden lg:block">{{ ch.tvgId }}</div>
+        <div class="w-20 shrink-0" @click.stop>
+          <button
+            @click="emit('find-variants', ch)"
+            class="px-2 py-1 text-[10px] bg-[#22263a] hover:bg-cyan-500/20 border border-[#2e3250] hover:border-cyan-500/50 text-slate-400 hover:text-cyan-300 rounded transition-colors whitespace-nowrap"
+            title="Find other sources for this channel"
+          >
+            🔍
+          </button>
+        </div>
       </div>
     </RecycleScroller>
   </div>

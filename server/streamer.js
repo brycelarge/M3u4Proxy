@@ -15,6 +15,14 @@ const RECONNECT_DELAY   = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
 // Buffer N seconds of stream data before sending to clients.
 // Default 3 seconds helps absorb network jitter and connection drops.
 export function getBufferSeconds() {
+  try {
+    const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
+    if (setting) {
+      return parseFloat(setting.value)
+    }
+  } catch (e) {
+    // Database not ready or error, fall back to env/default
+  }
   return parseFloat(process.env.PROXY_BUFFER_SECONDS || '3')
 }
 
@@ -153,9 +161,9 @@ async function pump(session) {
           const bufferAge = session.preBuffer.length ? now - session.preBuffer[0].ts : 0
           const bufferFullness = Math.min(bufferAge / (bufSecs * 1000), 1.0)
 
-          // Only start writing to clients once buffer is at least 80% full
-          // This prevents jitter from starting playback too early
-          if (bufferFullness < 0.8) {
+          // Only start writing to clients once buffer is at least 30% full
+          // This prevents jitter from starting playback too early while not delaying too much
+          if (bufferFullness < 0.3) {
             // Still filling — don't write yet
             continue
           }
@@ -255,32 +263,10 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
     return
   }
 
-  // New session - validate upstream first
+  // New session
+  const bufferSecs = getBufferSeconds()
   console.log(`[stream] Opening "${channelName}" → ${upstreamUrl}`)
-
-  // Test upstream connection before creating session
-  const testAbort = new AbortController()
-  const testTimeout = setTimeout(() => testAbort.abort(), 5000)
-
-  try {
-    const testResponse = await fetch(upstreamUrl, {
-      signal: testAbort.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; M3UManager/1.0)' },
-    })
-    clearTimeout(testTimeout)
-
-    if (!testResponse.ok) {
-      throw new Error(`Upstream returned ${testResponse.status}`)
-    }
-
-    // Abort the test request - we just needed to verify it works
-    testAbort.abort()
-  } catch (e) {
-    clearTimeout(testTimeout)
-    throw new Error(`Failed to connect to upstream: ${e.message}`)
-  }
-
-  // Upstream is valid, create session
+  console.log(`[stream] Buffer: ${bufferSecs} seconds${bufferSecs === 0 ? ' (disabled)' : ''}`)
   const session = new Session(channelId, upstreamUrl, channelName, sourceId, username)
   sessions.set(channelId, session)
 

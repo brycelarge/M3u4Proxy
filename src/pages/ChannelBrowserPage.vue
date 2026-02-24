@@ -32,6 +32,12 @@ const showPlaylistModal = ref(false)
 const playlistForm = ref({ name: '', type: 'live' })
 const isEditingPlaylist = ref(false)
 
+// Find Other Sources modal
+const showVariantsModal = ref(false)
+const variantsLoading = ref(false)
+const variantsChannel = ref(null)
+const channelVariants = ref([])
+
 async function loadMeta() {
   try {
     const [sources, playlists] = await Promise.all([api.getSources(), api.getPlaylists()])
@@ -118,6 +124,28 @@ async function saveAndRefresh() {
 async function buildAndRefresh() {
   await buildPlaylist()
   allPlaylists.value = await api.getPlaylists()
+}
+
+async function findOtherSources(channel) {
+  variantsChannel.value = channel
+  showVariantsModal.value = true
+  variantsLoading.value = true
+  channelVariants.value = []
+
+  try {
+    const variants = await api.getSourceChannelVariants(channel.id)
+    channelVariants.value = variants
+  } catch (e) {
+    console.error('Failed to load variants:', e)
+  } finally {
+    variantsLoading.value = false
+  }
+}
+
+function addVariantToSelection(variant) {
+  // Add this variant to the current selection
+  toggleChannel(variant.id)
+  showVariantsModal.value = false
 }
 
 onMounted(loadMeta)
@@ -324,6 +352,7 @@ function onSetName(payload) {
               @toggle-channel="toggleChannel"
               @select-all="selectAll"
               @select-none="selectNone"
+              @find-variants="findOtherSources"
             />
 
             <!-- Load more -->
@@ -445,6 +474,83 @@ function onSetName(payload) {
               class="flex-1 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors"
             >
               {{ isEditingPlaylist ? 'Save' : 'Create' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Find Other Sources Modal -->
+    <Teleport to="body">
+      <div v-if="showVariantsModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showVariantsModal = false">
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-2xl shadow-2xl max-w-3xl w-full max-h-[80vh] flex flex-col">
+          <!-- Header -->
+          <div class="flex items-center justify-between p-5 border-b border-[#2e3250]">
+            <div>
+              <h2 class="text-lg font-semibold text-slate-100">🔍 Other Sources</h2>
+              <p class="text-xs text-slate-500 mt-1">{{ variantsChannel?.name }}</p>
+            </div>
+            <button @click="showVariantsModal = false" class="text-slate-500 hover:text-slate-300 text-2xl leading-none">&times;</button>
+          </div>
+
+          <!-- Content -->
+          <div class="flex-1 overflow-y-auto p-5">
+            <div v-if="variantsLoading" class="flex flex-col items-center justify-center gap-3 py-12 text-slate-500">
+              <span class="w-8 h-8 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></span>
+              <p class="text-sm">Loading variants...</p>
+            </div>
+
+            <div v-else-if="!channelVariants.length" class="flex flex-col items-center justify-center gap-3 py-12 text-slate-500">
+              <span class="text-4xl">🔍</span>
+              <p class="text-sm">No other sources found for this channel</p>
+            </div>
+
+            <div v-else class="space-y-2">
+              <p class="text-xs text-slate-500 mb-3">Found {{ channelVariants.length }} variant(s) from different sources</p>
+
+              <div
+                v-for="variant in channelVariants"
+                :key="variant.id"
+                class="flex items-center gap-3 p-3 bg-[#1a1d27] border border-[#2e3250] rounded-lg hover:border-cyan-500/50 transition-colors"
+              >
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="font-medium text-sm text-slate-200 truncate">{{ variant.tvg_name }}</span>
+                    <span
+                      v-if="variant.quality"
+                      :class="['text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap',
+                        variant.quality === 'UHD' ? 'bg-purple-500/15 border-purple-500/30 text-purple-400' :
+                        variant.quality === 'FHD' ? 'bg-blue-500/15 border-blue-500/30 text-blue-400' :
+                        variant.quality === 'HD' ? 'bg-green-500/15 border-green-500/30 text-green-400' :
+                        variant.quality === 'SD' ? 'bg-yellow-500/15 border-yellow-500/30 text-yellow-400' :
+                        'bg-slate-500/15 border-slate-500/30 text-slate-400']"
+                    >
+                      {{ variant.quality }}
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2 mt-1">
+                    <span class="text-xs text-slate-500">{{ variant.source_name }}</span>
+                    <span class="text-xs text-slate-600">•</span>
+                    <span class="text-xs text-slate-600 truncate">{{ variant.group_title }}</span>
+                  </div>
+                </div>
+                <button
+                  @click="addVariantToSelection(variant)"
+                  class="px-3 py-1.5 text-xs bg-indigo-500 hover:bg-indigo-400 text-white rounded-lg transition-colors whitespace-nowrap"
+                >
+                  Add to Selection
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="flex justify-end gap-3 p-5 border-t border-[#2e3250]">
+            <button
+              @click="showVariantsModal = false"
+              class="px-4 py-2 text-sm bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-300 hover:border-slate-500 transition-colors"
+            >
+              Close
             </button>
           </div>
         </div>

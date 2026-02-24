@@ -645,6 +645,40 @@ app.get('/api/playlists/:id/selection', (req, res) => {
   res.json({ groups, overrides, totalCount })
 })
 
+// Get other source variants for a channel (by source_channel id)
+app.get('/api/source-channels/:id/variants', (req, res) => {
+  const sourceChannel = db.prepare('SELECT normalized_name, tvg_name FROM source_channels WHERE id = ?').get(req.params.id)
+  if (!sourceChannel || !sourceChannel.normalized_name) {
+    return res.json([])
+  }
+
+  // Find all channels with the same normalized name from different sources
+  const variants = db.prepare(`
+    SELECT
+      sc.id,
+      sc.tvg_name,
+      sc.quality,
+      sc.url,
+      sc.group_title,
+      s.id as source_id,
+      s.name as source_name
+    FROM source_channels sc
+    JOIN sources s ON sc.source_id = s.id
+    WHERE sc.normalized_name = ?
+    ORDER BY
+      s.name,
+      CASE sc.quality
+        WHEN 'UHD' THEN 1
+        WHEN 'FHD' THEN 2
+        WHEN 'HD' THEN 3
+        WHEN 'SD' THEN 4
+        ELSE 5
+      END
+  `).all(sourceChannel.normalized_name)
+
+  res.json(variants)
+})
+
 // Save channels to a playlist (replaces all existing)
 app.put('/api/playlists/:id/channels', (req, res) => {
   const { channels } = req.body // array of channel objects
@@ -2456,7 +2490,6 @@ app.get('/stream/:channelId', async (req, res) => {
 
   // Try each variant in order until one succeeds
   let lastError = null
-  let httpStatus = null
 
   for (let i = 0; i < variants.length; i++) {
     const variant = variants[i]
@@ -2470,14 +2503,6 @@ app.get('/stream/:channelId', async (req, res) => {
     } catch (e) {
       lastError = e
       console.log(`[stream] Variant ${i + 1} failed: ${e.message}`)
-
-      // Extract HTTP status from error message if present
-      const statusMatch = e.message.match(/returned (\d+)/)
-      if (statusMatch) httpStatus = parseInt(statusMatch[1])
-
-      // Track failed stream in database
-      trackFailedStream(channelId, row.playlist_id, row.tvg_name, row.group_title, variant.url, e.message, httpStatus)
-
       // Continue to next variant
     }
   }
@@ -2501,32 +2526,10 @@ app.delete('/api/streams/:channelId', (req, res) => {
 })
 
 // ── Proxy settings ────────────────────────────────────────────────────────────
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data')
-const ENV_FILE = path.join(DATA_DIR, 'config', '.env')
-
-function readEnvFile() {
-  try {
-    mkdirSync(path.dirname(ENV_FILE), { recursive: true })
-    return existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf8') : ''
-  } catch { return '' }
-}
-
-function writeEnvKey(key, value) {
-  let content = readEnvFile()
-  const re = new RegExp(`^${key}=.*$`, 'm')
-  if (re.test(content)) {
-    content = content.replace(re, `${key}=${value}`)
-  } else {
-    content = content.trimEnd() + `\n${key}=${value}\n`
-  }
-  mkdirSync(path.dirname(ENV_FILE), { recursive: true })
-  writeFileSync(ENV_FILE, content, 'utf8')
-  // Apply immediately without restart
-  process.env[key] = String(value)
-}
-
 app.get('/api/proxy-settings', (req, res) => {
-  res.json({ bufferSeconds: getBufferSeconds() })
+  const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
+  const bufferSeconds = setting ? parseFloat(setting.value) : getBufferSeconds()
+  res.json({ bufferSeconds })
 })
 
 app.put('/api/proxy-settings', (req, res) => {
@@ -2536,7 +2539,7 @@ app.put('/api/proxy-settings', (req, res) => {
     return res.status(400).json({ error: 'bufferSeconds must be 0–30' })
   }
   try {
-    writeEnvKey('PROXY_BUFFER_SECONDS', val)
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('proxy_buffer_seconds', String(val))
     res.json({ ok: true, bufferSeconds: val })
   } catch (e) {
     res.status(500).json({ error: e.message })
