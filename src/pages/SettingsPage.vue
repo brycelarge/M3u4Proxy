@@ -65,11 +65,31 @@ const restoreFile   = ref(null)
 const restoring     = ref(false)
 const restoreResult = ref(null)
 const restoreError  = ref('')
+const downloading   = ref(false)
 
 function onRestoreFile(e) {
   restoreFile.value   = e.target.files[0] || null
   restoreResult.value = null
   restoreError.value  = ''
+}
+
+async function downloadBackup() {
+  downloading.value = true
+  try {
+    const response = await fetch('/api/backup')
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const date = new Date().toISOString().slice(0, 10)
+    a.download = `m3u-manager-backup-${date}.json.gz`
+    document.body.appendChild(a)
+    a.click()
+    window.URL.revokeObjectURL(url)
+    document.body.removeChild(a)
+  } finally {
+    downloading.value = false
+  }
 }
 
 async function doRestore() {
@@ -740,10 +760,13 @@ onMounted(async () => { await load(); await loadProxySettings() })
             <p class="text-sm text-slate-200 font-medium">Export Backup</p>
             <p class="text-xs text-slate-600 mt-0.5">Downloads a <code class="text-slate-400">.json.gz</code> file with all your data</p>
           </div>
-          <a href="/api/backup" download
-            class="px-4 py-2 text-xs bg-indigo-500 hover:bg-indigo-400 text-white font-semibold rounded-lg transition-colors shrink-0">
-            ⬇ Download Backup
-          </a>
+          <button
+            @click="downloadBackup"
+            :disabled="downloading"
+            class="px-4 py-2 text-xs bg-indigo-500 hover:bg-indigo-400 text-white font-semibold rounded-lg transition-colors shrink-0 disabled:opacity-50 flex items-center gap-2">
+            <span v-if="downloading" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+            <span>{{ downloading ? 'Downloading...' : '⬇ Download Backup' }}</span>
+          </button>
         </div>
 
         <!-- Restore -->
