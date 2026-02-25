@@ -20,7 +20,6 @@ import { execSync } from 'child_process'
 
 const TMDB_BASE = 'https://api.themoviedb.org/3'
 const TMDB_IMG  = 'https://image.tmdb.org/t/p/w300'
-const CACHE_TTL = 7 * 24 * 60 * 60 * 1000
 const tmdbKey   = () => process.env.TMDB_API_KEY || ''
 
 export const enrichState = {

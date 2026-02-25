@@ -286,17 +286,6 @@ async function pump(session) {
     await new Promise(r => setTimeout(r, RECONNECT_DELAY))
   }
 
-  // Clean up FFmpeg process if it exists
-  if (ffmpegResult) {
-    console.log(`[stream] Stopping FFmpeg process for "${session.channelName}"`)
-    try {
-      ffmpegResult.stdin.end()
-      ffmpegResult.process.kill('SIGTERM')
-    } catch (e) {
-      // Process already dead
-    }
-  }
-
   session.destroy()
   for (const client of session.clients) {
     if (!client.writableEnded) client.end()

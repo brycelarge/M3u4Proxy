@@ -3,7 +3,7 @@ import cors from 'cors'
 import cron from 'node-cron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import { randomBytes } from 'node:crypto'
 import db from './db.js'
@@ -3431,6 +3431,26 @@ app.get('/{*path}', (req, res) => {
 await runMigrations(db)
 
 console.log('[db] Database initialized')
+
+// Cleanup orphaned temp files on startup
+function cleanupOnStartup() {
+  const tmpDir = path.join(GRAB_EPG_DIR, 'tmp')
+  if (existsSync(tmpDir)) {
+    try {
+      const files = readdirSync(tmpDir)
+      if (files.length > 0) {
+        console.log(`[cleanup] Removing ${files.length} temp files from previous runs`)
+        for (const file of files) {
+          try { unlinkSync(path.join(tmpDir, file)) } catch {}
+        }
+      }
+    } catch (err) {
+      console.log(`[cleanup] Could not clean temp directory: ${err.message}`)
+    }
+  }
+}
+
+cleanupOnStartup()
 
 app.listen(PORT, () => {
   console.log(`M3u4Proxy server running on http://localhost:${PORT}`)
