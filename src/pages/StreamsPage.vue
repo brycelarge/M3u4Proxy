@@ -226,19 +226,6 @@ onUnmounted(() => clearInterval(interval))
                 <span title="Bytes sent to clients">↑ <span class="text-emerald-400">{{ fmt(s.bytesOut || 0) }}</span></span>
                 <span class="text-slate-700">·</span>
                 <span title="Session duration">{{ elapsed(s.startedAt) }}</span>
-                <template v-if="s.ffmpegRemux">
-                  <span class="text-slate-700">·</span>
-                  <span
-                    class="text-purple-400 font-medium"
-                    :title="s.transcodeReason || 'Stream is being remuxed with FFmpeg'"
-                  >
-                    🎬 FFmpeg{{ s.transcodeReason ? `: ${s.transcodeReason}` : '' }}
-                  </span>
-                </template>
-                <template v-else>
-                  <span class="text-slate-700">·</span>
-                  <span class="text-cyan-400" title="Stream is buffered only (no remuxing)">⏱️ Buffered</span>
-                </template>
                 <template v-if="s.reconnects > 0">
                   <span class="text-slate-700">·</span>
                   <span class="text-amber-500" title="Reconnect count">⚡ {{ s.reconnects }} reconnect{{ s.reconnects > 1 ? 's' : '' }}</span>

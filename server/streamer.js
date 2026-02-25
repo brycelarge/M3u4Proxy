@@ -8,7 +8,6 @@
 
 import { EventEmitter } from 'node:events'
 import db from './db.js'
-import { shouldUseFFmpeg, createRemuxProcess, getContentType, getFFmpegSettings } from './ffmpegRemux.js'
 
 const MAX_RECONNECTS    = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY   = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
@@ -52,7 +51,7 @@ function getRollingBufferSize() {
 const sessions = new Map()
 
 class Session extends EventEmitter {
-  constructor(channelId, upstreamUrl, channelName, sourceId, username, ffmpegRemux = false, transcodeReason = null) {
+  constructor(channelId, upstreamUrl, channelName, sourceId, username) {
     super()
     this.setMaxListeners(200)
     this.channelId    = channelId
@@ -71,8 +70,6 @@ class Session extends EventEmitter {
     this.abortCtrl    = new AbortController()
     this.dead         = false
     this._bufferStarted = false  // Track if buffer has started streaming
-    this.ffmpegRemux  = ffmpegRemux  // Track if FFmpeg remuxing is enabled
-    this.transcodeReason = transcodeReason  // Why FFmpeg is being used (e.g., "HEVC → H.264 for Firefox")
     this._recentChunks = []  // Rolling buffer of recent chunks for joining clients (burst-and-bridge)
     this._currentBufferSize = 0  // Track buffer size efficiently without reduce()
     this._rollingBufferStarted = false  // Only start collecting after finding a keyframe
@@ -132,35 +129,6 @@ function checkMaxStreams(sourceId) {
 
 // ── Upstream pump with reconnect ──────────────────────────────────────────────
 async function pump(session) {
-  // If FFmpeg is enabled, create remux process
-  let ffmpegResult = null
-
-  if (session.ffmpegRemux) {
-    try {
-      ffmpegResult = createRemuxProcess(null, { forWebPlayer: false })
-
-      // Pipe FFmpeg output to clients
-      ffmpegResult.outputStream.on('data', (chunk) => {
-        session.bytesOut += chunk.length
-        for (const client of session.clients) {
-          if (!client.writableEnded) {
-            client.write(chunk)
-          }
-        }
-        session.emit('chunk', chunk)
-      })
-
-      ffmpegResult.outputStream.on('error', (err) => {
-        console.error(`[stream] FFmpeg output error for "${session.channelName}":`, err.message)
-      })
-
-      console.log(`[stream] FFmpeg remux process started for "${session.channelName}"`)
-    } catch (err) {
-      console.error(`[stream] Failed to start FFmpeg for "${session.channelName}":`, err.message)
-      session.ffmpegRemux = false // Disable FFmpeg and continue with direct streaming
-    }
-  }
-
   while (!session.dead) {
     try {
       const upstream = await fetch(session.upstreamUrl, {
@@ -203,16 +171,9 @@ async function pump(session) {
           session._lastTick  = now
         }
 
-        // If FFmpeg is enabled, pipe data through it instead of directly to clients
-        if (session.ffmpegRemux && ffmpegResult) {
-          // Write to FFmpeg stdin - FFmpeg output handler will send to clients
-          if (!ffmpegResult.stdin.destroyed) {
-            ffmpegResult.stdin.write(value)
-          }
-        } else {
-          // Normal flow: Buffer logic for direct streaming
-          const bufSecs = getBufferSeconds()
-          if (bufSecs > 0 && !session._bufferStarted) {
+        // Buffer logic for direct streaming
+        const bufSecs = getBufferSeconds()
+        if (bufSecs > 0 && !session._bufferStarted) {
             // ALWAYS push to preBuffer while filling
             session.preBuffer.push({ chunk: value, ts: now })
 
@@ -410,23 +371,15 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
     return
   }
 
-  // Check if FFmpeg remuxing should be used
-  const useFFmpeg = shouldUseFFmpeg(false) // false = not web player, use IPTV settings
-  const ffmpegSettings = useFFmpeg ? getFFmpegSettings() : null
-
   const bufferSecs = getBufferSeconds()
   console.log(`[stream] Opening "${channelName}" → ${upstreamUrl}`)
   console.log(`[stream] Buffer: ${bufferSecs} seconds${bufferSecs === 0 ? ' (disabled)' : ''}`)
-  if (useFFmpeg) {
-    console.log(`[stream] FFmpeg remuxing: ENABLED (${ffmpegSettings.outputFormat} format)`)
-  }
 
-  const session = new Session(channelId, upstreamUrl, channelName, sourceId, username, useFFmpeg)
+  const session = new Session(channelId, upstreamUrl, channelName, sourceId, username)
   sessions.set(channelId, session)
 
-  // Set streaming headers based on FFmpeg settings
-  const contentType = useFFmpeg ? getContentType(ffmpegSettings.outputFormat) : 'video/mp2t'
-  res.setHeader('Content-Type', contentType)
+  // Set streaming headers
+  res.setHeader('Content-Type', 'video/mp2t')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('X-Accel-Buffering', 'no')
   res.setHeader('Connection', 'keep-alive')
@@ -462,8 +415,6 @@ export function getActiveSessions() {
     bitrate:     s.bitrate,
     reconnects:  s.reconnects,
     upstreamUrl: s.upstreamUrl,
-    ffmpegRemux: s.ffmpegRemux,
-    transcodeReason: s.transcodeReason,
   }))
 }
 

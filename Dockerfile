@@ -26,7 +26,6 @@ RUN apk add --no-cache \
         ca-certificates \
         curl \
         dos2unix \
-        ffmpeg \
         git \
         iproute2 \
         iptables \
