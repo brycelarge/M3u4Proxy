@@ -171,104 +171,96 @@ async function pump(session) {
           session._lastTick  = now
         }
 
-        // If FFmpeg is enabled, pipe data through it instead of directly to clients
-        if (session.ffmpegRemux && ffmpegResult) {
-          // Write to FFmpeg stdin - FFmpeg output handler will send to clients
-          if (!ffmpegResult.stdin.destroyed) {
-            ffmpegResult.stdin.write(value)
-          }
-        } else {
-          // Normal flow: Buffer logic for direct streaming
-          const bufSecs = getBufferSeconds()
-          if (bufSecs > 0 && !session._bufferStarted) {
-            // ALWAYS push to preBuffer while filling
-            session.preBuffer.push({ chunk: value, ts: now })
+        // Normal flow: Buffer logic for direct streaming
+        const bufSecs = getBufferSeconds()
+        if (bufSecs > 0 && !session._bufferStarted) {
+          // ALWAYS push to preBuffer while filling
+          session.preBuffer.push({ chunk: value, ts: now })
 
-            const bufferAge = session.preBuffer.length > 0 ? now - session.preBuffer[0].ts : 0
-            const targetMs = bufSecs * 1000
+          const bufferAge = session.preBuffer.length > 0 ? now - session.preBuffer[0].ts : 0
+          const targetMs = bufSecs * 1000
 
-            // Check if we've reached the 50% threshold
-            if (bufferAge >= (targetMs * 0.5)) {
-              console.log(`[stream] Buffer ready (${bufferAge}ms), flushing to clients`)
+          // Check if we've reached the 50% threshold
+          if (bufferAge >= (targetMs * 0.5)) {
+            console.log(`[stream] Buffer ready (${bufferAge}ms), flushing to clients`)
 
-              // Simple PES start code detection (0x00 0x00 0x01) which often indicates a new frame/keyframe
-              const hasPesStart = (buf, startIdx) => {
-                for (let i = startIdx; i < Math.min(startIdx + 188 - 3, buf.length - 3); i++) {
-                  if (buf[i] === 0x00 && buf[i+1] === 0x00 && buf[i+2] === 0x01) {
-                    // Check if it's a video stream (0xE0 - 0xEF)
-                    if (buf[i+3] >= 0xE0 && buf[i+3] <= 0xEF) {
-                      return true
-                    }
+            // Simple PES start code detection (0x00 0x00 0x01) which often indicates a new frame/keyframe
+            const hasPesStart = (buf, startIdx) => {
+              for (let i = startIdx; i < Math.min(startIdx + 188 - 3, buf.length - 3); i++) {
+                if (buf[i] === 0x00 && buf[i+1] === 0x00 && buf[i+2] === 0x01) {
+                  // Check if it's a video stream (0xE0 - 0xEF)
+                  if (buf[i+3] >= 0xE0 && buf[i+3] <= 0xEF) {
+                    return true
                   }
                 }
-                return false
               }
+              return false
+            }
 
-              // Find sync point in buffered data before flushing
-              const combined = Buffer.concat(session.preBuffer.map(e => e.chunk))
-              let syncOffset = 0
-              let foundKeyframe = false
+            // Find sync point in buffered data before flushing
+            const combined = Buffer.concat(session.preBuffer.map(e => e.chunk))
+            let syncOffset = 0
+            let foundKeyframe = false
 
-              // Look for valid MPEG-TS sync point (2 consecutive 0x47 at 188-byte intervals) AND a keyframe
+            // Look for valid MPEG-TS sync point (2 consecutive 0x47 at 188-byte intervals) AND a keyframe
+            for (let i = 0; i <= combined.length - 376; i++) {
+              if (combined[i] === 0x47 && combined[i + 188] === 0x47) {
+                const pusi = (combined[i+1] & 0x40) !== 0
+
+                if (pusi && hasPesStart(combined, i)) {
+                  syncOffset = i
+                  foundKeyframe = true
+                  break
+                }
+              }
+            }
+
+            // Fallback to basic sync if no keyframe found in buffer
+            if (!foundKeyframe) {
               for (let i = 0; i <= combined.length - 376; i++) {
                 if (combined[i] === 0x47 && combined[i + 188] === 0x47) {
-                  const pusi = (combined[i+1] & 0x40) !== 0
-
-                  if (pusi && hasPesStart(combined, i)) {
-                    syncOffset = i
-                    foundKeyframe = true
-                    break
-                  }
+                  syncOffset = i
+                  break
                 }
               }
-
-              // Fallback to basic sync if no keyframe found in buffer
-              if (!foundKeyframe) {
-                for (let i = 0; i <= combined.length - 376; i++) {
-                  if (combined[i] === 0x47 && combined[i + 188] === 0x47) {
-                    syncOffset = i
-                    break
-                  }
-                }
-              }
-
-              // FLUSH: Send from sync point onwards
-              const syncedData = combined.slice(syncOffset)
-
-              // Send via event emitter for consistency with normal flow
-              session.emit('chunk', syncedData)
-              session.bytesOut += (syncedData.length * session.clients.size)
-
-              session._bufferStarted = true
-              session._preBuffer = [] // Clear memory
-            }
-            // Don't write current chunk yet - it's in the buffer
-          } else {
-            // NORMAL FLOW: Only the event emitter sends data to clients
-            // This prevents double-writing to clients who joined via connectClient
-            session.emit('chunk', value)
-
-            // Update stats
-            session.bytesOut += (value.length * session.clients.size)
-
-            // ROLLING BUFFER: Build the bridge for joining clients
-            const isKeyframe = (value[1] & 0x40) !== 0 && hasPesStart(value)
-
-            // Start collecting only once we hit a keyframe to ensure the burst is decodable
-            if (!session._rollingBufferStarted && isKeyframe) {
-              session._rollingBufferStarted = true
             }
 
-            if (session._rollingBufferStarted) {
-              session._recentChunks.push(value)
-              session._currentBufferSize += value.length
+            // FLUSH: Send from sync point onwards
+            const syncedData = combined.slice(syncOffset)
 
-              // Maintain rolling buffer based on configured buffer seconds
-              const maxBufferSize = getRollingBufferSize()
-              while (session._currentBufferSize > maxBufferSize && session._recentChunks.length > 0) {
-                const removed = session._recentChunks.shift()
-                session._currentBufferSize -= removed.length
-              }
+            // Send via event emitter for consistency with normal flow
+            session.emit('chunk', syncedData)
+            session.bytesOut += (syncedData.length * session.clients.size)
+
+            session._bufferStarted = true
+            session._preBuffer = [] // Clear memory
+          }
+          // Don't write current chunk yet - it's in the buffer
+        } else {
+          // NORMAL FLOW: Only the event emitter sends data to clients
+          // This prevents double-writing to clients who joined via connectClient
+          session.emit('chunk', value)
+
+          // Update stats
+          session.bytesOut += (value.length * session.clients.size)
+
+          // ROLLING BUFFER: Build the bridge for joining clients
+          const isKeyframe = (value[1] & 0x40) !== 0 && hasPesStart(value)
+
+          // Start collecting only once we hit a keyframe to ensure the burst is decodable
+          if (!session._rollingBufferStarted && isKeyframe) {
+            session._rollingBufferStarted = true
+          }
+
+          if (session._rollingBufferStarted) {
+            session._recentChunks.push(value)
+            session._currentBufferSize += value.length
+
+            // Maintain rolling buffer based on configured buffer seconds
+            const maxBufferSize = getRollingBufferSize()
+            while (session._currentBufferSize > maxBufferSize && session._recentChunks.length > 0) {
+              const removed = session._recentChunks.shift()
+              session._currentBufferSize -= removed.length
             }
           }
         }
