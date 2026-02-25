@@ -56,12 +56,25 @@ function initGroupRanges() {
   groupRanges.value = ranges
 }
 
-function autoNumberGroups() {
-  // Auto-assign group ranges: 101, 201, 301, etc.
+function initializeGroupRanges() {
   let groupNum = 1
   for (const g of allGroups.value) {
     if (!groupRanges.value[g]) groupRanges.value[g] = {}
-    groupRanges.value[g].start = groupNum * 100 + 1
+    // Only set if not already set
+    if (!groupRanges.value[g].start) {
+      groupRanges.value[g].start = groupNum * 100
+      groupRanges.value[g].step = 1
+    }
+    groupNum++
+  }
+}
+
+function autoNumberGroups() {
+  // Auto-assign group ranges: 100, 200, 300, etc.
+  let groupNum = 1
+  for (const g of allGroups.value) {
+    if (!groupRanges.value[g]) groupRanges.value[g] = {}
+    groupRanges.value[g].start = groupNum * 100
     groupRanges.value[g].step = 1
     groupNum++
   }
@@ -77,7 +90,11 @@ function applyGroupRanges() {
     const step = Math.max(1, parseInt(range.step) || 1)
     let n = parseInt(range.start)
     sorted.value.filter(ch => effectiveGroup(ch) === g).forEach(ch => {
-      nums[ch.id] = n
+      // Apply to all variant IDs
+      const ids = ch.variantIds || [ch.id]
+      for (const id of ids) {
+        nums[id] = n
+      }
       n += step
     })
   }
@@ -93,7 +110,14 @@ function bulkAssignNumbers() {
     let   n     = parseInt(range.start)
     if (isNaN(n)) continue
     const groupChannels = sorted.value.filter(ch => effectiveGroup(ch) === g)
-    for (const ch of groupChannels) { nums[ch.id] = n; n += step }
+    for (const ch of groupChannels) {
+      // Apply to all variant IDs
+      const ids = ch.variantIds || [ch.id]
+      for (const id of ids) {
+        nums[id] = n
+      }
+      n += step
+    }
   }
   emit('set-numbers', nums)
 }
@@ -162,7 +186,16 @@ const allGroups = computed(() => {
 })
 
 watch(() => props.show, (v) => {
-  if (v) { checked.value = new Set(); bulkGroup.value = ''; search.value = ''; filterGroup.value = ''; editingGroupId.value = null; activeTab.value = 'channels'; initGroupRanges() }
+  if (v) {
+    checked.value = new Set()
+    bulkGroup.value = ''
+    search.value = ''
+    filterGroup.value = ''
+    editingGroupId.value = null
+    activeTab.value = 'channels'
+    initGroupRanges()
+    initializeGroupRanges()
+  }
 })
 
 watch(allGroups, () => { initGroupRanges() }, { immediate: true })
@@ -208,7 +241,9 @@ function startEditGroup(ch) {
 }
 function commitEditGroup(ch) {
   if (editingGroupId.value !== ch.id) return
-  emit('set-group', { ids: [ch.id], group: editingGroupVal.value.trim() })
+  // Apply to all variant IDs if available
+  const ids = ch.variantIds || [ch.id]
+  emit('set-group', { ids, group: editingGroupVal.value.trim() })
   editingGroupId.value = null
 }
 function cancelEditGroup() { editingGroupId.value = null }
@@ -222,7 +257,11 @@ function startEditEpg(ch) {
 }
 function commitEditEpg(ch) {
   if (editingEpgId.value !== ch.id) return
-  emit('set-epg-id', { id: ch.id, tvg_id: editingEpgVal.value.trim() })
+  // Apply to all variant IDs if available
+  const ids = ch.variantIds || [ch.id]
+  for (const id of ids) {
+    emit('set-epg-id', { id, tvg_id: editingEpgVal.value.trim() })
+  }
   editingEpgId.value = null
 }
 function cancelEditEpg() { editingEpgId.value = null }
@@ -247,7 +286,11 @@ function startEditName(ch) {
 function commitEditName(ch) {
   if (editingNameId.value !== ch.id) return
   const val = editingNameVal.value.trim()
-  emit('set-name', { id: ch.id, name: val || null })
+  // Apply to all variant IDs if available
+  const ids = ch.variantIds || [ch.id]
+  for (const id of ids) {
+    emit('set-name', { id, name: val || null })
+  }
   editingNameId.value = null
 }
 function cancelEditName() { editingNameId.value = null }
@@ -259,7 +302,11 @@ function effectiveEpgSourceId(ch) {
 
 function onEpgSourceChange(ch, evt) {
   const val = evt.target.value
-  emit('set-epg-source', { id: ch.id, source_id: val ? Number(val) : null })
+  // Apply to all variant IDs if available
+  const ids = ch.variantIds || [ch.id]
+  for (const id of ids) {
+    emit('set-epg-source', { id, source_id: val ? Number(val) : null })
+  }
 }
 
 // Bulk group
@@ -396,7 +443,7 @@ function clearAllNumbers() {
         <!-- ── GROUP NUMBERS TAB ─────────────────────────────────────────── -->
         <div v-if="activeTab === 'group-numbers'" class="flex-1 overflow-y-auto">
           <div class="p-4 border-b border-[#2e3250] bg-[#13151f] flex items-center gap-3">
-            <p class="text-xs text-slate-500 flex-1">Set a start number per group — channels within each group are numbered sequentially from that start.</p>
+            <p class="text-xs text-slate-500 flex-1">Groups are auto-assigned start numbers (100, 200, 300...). Adjust if needed, then apply.</p>
             <button @click="applyGroupRanges"
               class="px-4 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 text-white font-semibold rounded-lg transition-colors shrink-0">
               Apply All Ranges
@@ -407,7 +454,7 @@ function clearAllNumbers() {
             </button>
             <button @click="autoNumberGroups"
               class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] hover:border-amber-400 text-slate-400 hover:text-amber-400 rounded-lg transition-colors shrink-0">
-              Auto-Number (101, 201...)
+              Reset to 100, 200, 300...
             </button>
             <button @click="clearAllNumbers"
               class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] hover:border-red-400 text-slate-400 hover:text-red-400 rounded-lg transition-colors shrink-0">
@@ -677,6 +724,9 @@ function clearAllNumbers() {
                     title="Click to rename">
                     {{ effectiveName(ch) }}
                     <span v-if="nameOverrides[ch.id]" class="text-[9px] text-rose-500/60 ml-1">renamed</span>
+                    <span v-if="ch.variantCount && ch.variantCount > 1" class="text-[9px] text-green-500/70 ml-1" :title="`${ch.variantCount} variants will receive same settings`">
+                      ×{{ ch.variantCount }}
+                    </span>
                   </button>
                 </td>
 

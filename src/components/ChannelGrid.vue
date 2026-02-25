@@ -41,7 +41,12 @@ function onImgError(e) { e.target.style.display = 'none' }
         </div>
 
         <!-- Channel name -->
-        <p class="text-xs font-medium text-center leading-tight line-clamp-2 w-full text-white">{{ ch.name }}</p>
+        <div class="w-full text-center">
+          <p class="text-xs font-medium leading-tight line-clamp-2 text-white">{{ ch.name }}</p>
+          <p v-if="ch.tvg_name && ch.tvg_name !== ch.name" class="text-[9px] text-green-400/70 mt-0.5 truncate" :title="`Cleaned: ${ch.tvg_name}`">
+            → {{ ch.tvg_name }}
+          </p>
+        </div>
 
         <!-- Channel info (click instruction) -->
         <p class="text-[10px] text-slate-500 mt-1">Click to {{ currentSelected.has(ch.id) ? 'remove' : 'select' }}</p>

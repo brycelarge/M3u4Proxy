@@ -50,26 +50,46 @@ function tmdbGet(path) {
   }
 }
 
+// Decode HTML entities in titles
+function decodeHtmlEntities(text) {
+  return text
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+}
+
 // Search for a title — returns { tmdb_id, media_type, poster, desc } or null
+// Uses multi-search to reduce API calls from 2 to 1
 function tmdbSearchTitle(title) {
-  for (const type of ['tv', 'movie']) {
-    try {
-      const data = tmdbGet(`/search/${type}?query=${encodeURIComponent(title)}&page=1`)
-      const top  = data?.results?.[0]
-      if (!top) continue
-      return {
-        tmdb_id:    top.id,
-        media_type: type,
-        poster:     top.poster_path ? `${TMDB_IMG}${top.poster_path}` : null,
-        desc:       top.overview    || null,
-      }
-    } catch {}
+  try {
+    // Decode HTML entities before searching
+    const cleanTitle = decodeHtmlEntities(title)
+    const data = tmdbGet(`/search/multi?query=${encodeURIComponent(cleanTitle)}&page=1`)
+    const results = data?.results || []
+
+    // Filter to only TV and movie results, prioritize TV shows
+    const tvResult = results.find(r => r.media_type === 'tv')
+    const movieResult = results.find(r => r.media_type === 'movie')
+    const top = tvResult || movieResult
+
+    if (!top) return null
+
+    return {
+      tmdb_id:    top.id,
+      media_type: top.media_type,
+      poster:     top.poster_path ? `${TMDB_IMG}${top.poster_path}` : null,
+      desc:       top.overview    || null,
+    }
+  } catch (err) {
+    console.error(`[tmdb] Search failed for "${title}":`, err.message)
+    return null
   }
-  return null
 }
 
 // Fetch all episodes for a TV show and upsert into tmdb_episodes
-function fetchAndStoreAllEpisodes(title, tmdbId) {
+export function fetchAndStoreAllEpisodes(title, tmdbId) {
   try {
     const show = tmdbGet(`/tv/${tmdbId}`)
     if (!show?.seasons) return
@@ -98,15 +118,6 @@ function fetchAndStoreAllEpisodes(title, tmdbId) {
 }
 
 // ── XML helpers ───────────────────────────────────────────────────────────────
-function decodeHtmlEntities(str) {
-  return str
-    .replace(/&amp;/g, '&')
-    .replace(/&apos;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-}
-
 export function extractTitle(progBlock) {
   const m = progBlock.match(/<title[^>]*>([^<]+)<\/title>/)
   return m ? decodeHtmlEntities(m[1].trim()) : null
@@ -207,14 +218,17 @@ export async function enrichGuide(_unused, { onProgress } = {}) {
     log(`Skipped ${skippedNewsAndSports} programmes from news and sports channels`)
     log(`${allTitles.size} unique titles found across all EPG sources`)
 
-    // Skip titles that are already fully enriched:
+    // Skip titles that are already fully enriched or blocked:
+    //   - Blocked: skip entirely
     //   - TV shows: skip only if tmdb_episodes already has rows (episodes fetched)
     //   - Movies / not-found: skip if any tmdb_enrichment row exists
-    const getEnrichRow = db.prepare('SELECT media_type FROM tmdb_enrichment WHERE title = ?')
+    const getEnrichRow = db.prepare('SELECT media_type, blocked, manual_override FROM tmdb_enrichment WHERE title = ?')
     const getEpCount   = db.prepare('SELECT COUNT(*) as c FROM tmdb_episodes WHERE show_title = ?')
     const needsFetch = [...allTitles].filter(title => {
       const row = getEnrichRow.get(title)
       if (!row) return true                          // never seen
+      if (row.blocked) return false                  // blocked: skip
+      if (row.manual_override) return false          // manual override: skip
       if (row.media_type === 'tv') return getEpCount.get(title).c === 0  // tv: only if no episodes yet
       return false                                   // movie / not-found: already done
     })

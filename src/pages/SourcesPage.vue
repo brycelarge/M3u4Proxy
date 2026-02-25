@@ -22,6 +22,19 @@ async function pollGrabStatus() {
 }
 
 const form = ref({ name: '', category: 'playlist', type: 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0 })
+const showCleanupRules = ref(false)
+const cleanupRules = ref([])
+const newRule = ref({ find: '', replace: '', useRegex: false, flags: 'gi', enabled: true })
+const testInput = ref('PREFIX: Channel Name Full')
+
+function getCleanupRulesCount(source) {
+  try {
+    if (!source.cleanup_rules) return 0
+    return JSON.parse(source.cleanup_rules).length
+  } catch {
+    return 0
+  }
+}
 
 const playlistSources = computed(() => sources.value.filter(s => s.category !== 'epg'))
 const epgSources      = computed(() => sources.value.filter(s => s.category === 'epg'))
@@ -39,17 +52,59 @@ function openCreate(category = 'playlist') {
 function openEdit(s) {
   editing.value = s
   form.value = { name: s.name, category: s.category || 'playlist', type: s.type, url: s.url, username: s.username || '', password: s.password || '', refresh_cron: s.refresh_cron || '0 */6 * * *', max_streams: s.max_streams || 0, priority: s.priority || 999 }
+  try {
+    cleanupRules.value = s.cleanup_rules ? JSON.parse(s.cleanup_rules) : []
+  } catch {
+    cleanupRules.value = []
+  }
   showForm.value = true
 }
+
+function openCleanupRules() {
+  showCleanupRules.value = true
+}
+
+function addCleanupRule() {
+  if (!newRule.value.find) return
+  cleanupRules.value.push({ ...newRule.value })
+  newRule.value = { find: '', replace: '', useRegex: false, flags: 'gi', enabled: true }
+}
+
+function removeCleanupRule(idx) {
+  cleanupRules.value.splice(idx, 1)
+}
+
+function toggleCleanupRule(idx) {
+  cleanupRules.value[idx].enabled = !cleanupRules.value[idx].enabled
+}
+
+const testOutput = computed(() => {
+  let result = testInput.value
+  for (const rule of cleanupRules.value.filter(r => r.enabled)) {
+    try {
+      if (rule.useRegex) {
+        const regex = new RegExp(rule.find, rule.flags || 'gi')
+        result = result.replace(regex, rule.replace || '')
+      } else {
+        const regex = new RegExp(rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+        result = result.replace(regex, rule.replace || '')
+      }
+    } catch (e) {
+      return `Error: ${e.message}`
+    }
+  }
+  return result.trim()
+})
 
 async function save() {
   loading.value = true
   error.value = ''
   try {
+    const payload = { ...form.value, cleanup_rules: cleanupRules.value }
     if (editing.value) {
-      await api.updateSource(editing.value.id, form.value)
+      await api.updateSource(editing.value.id, payload)
     } else {
-      await api.createSource(form.value)
+      await api.createSource(payload)
     }
     showForm.value = false
     await load()
@@ -147,6 +202,9 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
               <div class="flex flex-wrap gap-2 mt-0.5 text-xs text-slate-600">
                 <span class="uppercase font-mono">{{ s.type }}</span>
                 <span v-if="s.channel_count" class="text-slate-400">· {{ s.channel_count.toLocaleString() }} ch</span>
+                <span v-if="getCleanupRulesCount(s) > 0" class="text-amber-400">
+                  · ⚙️ {{ getCleanupRulesCount(s) }} cleanup rule{{ getCleanupRulesCount(s) > 1 ? 's' : '' }}
+                </span>
                 <span v-if="s.last_fetched" class="hidden sm:inline">· {{ new Date(s.last_fetched + 'Z').toLocaleString() }}</span>
                 <span v-else class="text-amber-600">· Not fetched</span>
               </div>
@@ -297,6 +355,16 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
               <input v-model="form.refresh_cron" placeholder="0 */6 * * *" class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl px-3 py-2.5 text-sm font-mono text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500" />
               <p class="text-xs text-slate-600 mt-1">e.g. <code>0 */6 * * *</code> = every 6 hours</p>
             </div>
+
+            <!-- Cleanup Rules Button (Playlist sources only) -->
+            <div v-if="form.category !== 'epg'">
+              <button @click="openCleanupRules" type="button"
+                class="w-full px-4 py-2.5 text-sm bg-[#22263a] border border-[#2e3250] rounded-xl text-slate-300 hover:border-amber-400 hover:text-amber-300 transition-colors flex items-center justify-between">
+                <span>⚙️ Channel Name Cleanup Rules</span>
+                <span class="text-xs text-slate-600">{{ cleanupRules.length }} rules</span>
+              </button>
+              <p class="text-xs text-slate-600 mt-1">Strip or replace text before normalization (e.g., NETWORK → NET)</p>
+            </div>
           </div>
 
           <p v-if="error" class="text-xs text-red-400 mt-3">⚠ {{ error }}</p>
@@ -305,6 +373,127 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
             <button @click="showForm = false" class="flex-1 py-2.5 text-sm bg-[#22263a] border border-[#2e3250] rounded-xl text-slate-300 hover:border-slate-500 transition-colors">Cancel</button>
             <button @click="save" :disabled="loading || !form.name || !form.url" class="flex-1 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors">
               {{ loading ? 'Saving…' : 'Save' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- Cleanup Rules Modal -->
+    <Teleport to="body">
+      <div v-if="showCleanupRules" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+        <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl w-full max-w-3xl shadow-2xl flex flex-col" style="max-height: 90vh">
+          <div class="flex items-center gap-3 px-5 py-3.5 border-b border-[#2e3250] shrink-0">
+            <h2 class="text-sm font-bold text-slate-100">Channel Name Cleanup Rules</h2>
+            <span class="text-xs text-slate-500 ml-auto">{{ cleanupRules.length }} rules</span>
+            <button @click="showCleanupRules = false" class="text-slate-500 hover:text-slate-300 text-lg leading-none ml-3">✕</button>
+          </div>
+
+          <div class="flex-1 overflow-y-auto p-5 space-y-4">
+            <!-- Info -->
+            <div class="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300">
+              <p class="font-semibold mb-1">💡 How it works</p>
+              <p>Cleanup rules are applied to channel names BEFORE normalization. Use them to strip or replace text so variants match correctly.</p>
+              <p class="mt-1 text-amber-400/70">Example: Strip "NETWORK" so "Channel Network Name" and "Channel NET Name" both normalize to the same name.</p>
+            </div>
+
+            <!-- Current Rules -->
+            <div>
+              <p class="text-xs text-slate-500 mb-2">Current Rules (applied in order)</p>
+              <div v-if="!cleanupRules.length" class="text-center py-8 text-slate-600 text-sm bg-[#13151f] border border-[#2e3250] rounded-xl">
+                No cleanup rules yet — add one below
+              </div>
+              <div v-else class="space-y-2">
+                <div v-for="(rule, idx) in cleanupRules" :key="idx"
+                  class="flex items-center gap-3 bg-[#13151f] border border-[#2e3250] rounded-lg px-3 py-2.5">
+                  <input type="checkbox" :checked="rule.enabled" @change="toggleCleanupRule(idx)"
+                    class="accent-green-500 cursor-pointer" />
+                  <div class="flex-1 min-w-0 font-mono text-xs">
+                    <span class="text-slate-300">{{ rule.find }}</span>
+                    <span class="text-slate-600 mx-1">→</span>
+                    <span class="text-indigo-300">{{ rule.replace || '(remove)' }}</span>
+                    <span v-if="rule.useRegex" class="ml-2 text-[10px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-400">regex</span>
+                  </div>
+                  <button @click="removeCleanupRule(idx)"
+                    class="px-2 py-1 text-xs bg-red-500/10 border border-red-900/40 hover:border-red-500 text-red-400 rounded transition-colors">
+                    ✕
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Add New Rule -->
+            <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+              <p class="text-sm font-semibold text-slate-100 mb-3">Add New Rule</p>
+              <div class="space-y-3">
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-slate-500 mb-1.5">Find (text or regex)</label>
+                    <input v-model="newRule.find" placeholder="NETWORK"
+                      class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 outline-none focus:border-amber-500"
+                      @keyup.enter="addCleanupRule" />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-500 mb-1.5">Replace with</label>
+                    <input v-model="newRule.replace" placeholder="NET (or leave empty to remove)"
+                      class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 outline-none focus:border-amber-500"
+                      @keyup.enter="addCleanupRule" />
+                  </div>
+                </div>
+                <div class="flex items-center gap-4">
+                  <label class="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                    <input type="checkbox" v-model="newRule.useRegex" class="accent-purple-500" />
+                    <span>Use Regex</span>
+                  </label>
+                  <div v-if="newRule.useRegex" class="flex items-center gap-2">
+                    <label class="text-xs text-slate-500">Flags:</label>
+                    <input v-model="newRule.flags" placeholder="gi"
+                      class="w-16 bg-[#22263a] border border-[#2e3250] rounded px-2 py-1 text-xs font-mono text-slate-200 outline-none focus:border-purple-500" />
+                  </div>
+                  <button @click="addCleanupRule" :disabled="!newRule.find"
+                    class="ml-auto px-4 py-1.5 text-xs bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors">
+                    Add Rule
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Live Test -->
+            <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+              <p class="text-sm font-semibold text-slate-100 mb-3">Live Test</p>
+              <div class="space-y-2">
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1.5">Input</label>
+                  <input v-model="testInput" placeholder="PREFIX: Channel Name Full"
+                    class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500" />
+                </div>
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1.5">Output (after cleanup rules)</label>
+                  <div class="w-full bg-[#22263a] border border-green-500/30 rounded-lg px-3 py-2 text-sm font-mono text-green-300 min-h-[38px] flex items-center">
+                    {{ testOutput }}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Common Examples -->
+            <details class="bg-[#13151f] border border-[#2e3250] rounded-xl">
+              <summary class="px-4 py-2.5 text-xs font-semibold text-slate-400 cursor-pointer hover:text-slate-300">
+                📚 Common Examples
+              </summary>
+              <div class="px-4 pb-3 space-y-2 text-xs text-slate-500">
+                <p><code class="text-slate-300">CHANNEL</code> → <code class="text-indigo-300">CH</code> (normalize variants to same)</p>
+                <p><code class="text-slate-300">\b(NETWORK|NET)\b</code> → <code class="text-indigo-300">(empty)</code> + regex (strip text)</p>
+                <p><code class="text-slate-300">\s+</code> → <code class="text-indigo-300"> </code> + regex (collapse spaces)</p>
+                <p><code class="text-slate-300">\b(HD|FHD|UHD|4K|SD)\b</code> → <code class="text-indigo-300">(empty)</code> + regex (remove quality)</p>
+              </div>
+            </details>
+          </div>
+
+          <div class="flex gap-3 px-5 py-3.5 border-t border-[#2e3250] shrink-0">
+            <button @click="showCleanupRules = false"
+              class="flex-1 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 text-white font-semibold rounded-xl transition-colors">
+              Done
             </button>
           </div>
         </div>

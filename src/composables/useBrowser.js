@@ -97,10 +97,23 @@ export function useBrowser() {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const currentSelected = computed(() => {
-    const sel = selectionMap.value[activeGroup.value]
-    if (sel instanceof Set) return sel
-    if (sel === '__all__') return new Set(channels.value.map(c => c.id))
-    return new Set()
+    // Build a Set of all selected channel IDs across all groups
+    const allSelected = new Set()
+
+    for (const [groupName, selection] of Object.entries(selectionMap.value)) {
+      if (selection === '__all__') {
+        // For '__all__' groups, add all channels from that group
+        // Note: This only works for the currently loaded channels
+        channels.value
+          .filter(c => (c.group_title || activeGroup.value) === groupName)
+          .forEach(c => allSelected.add(c.id))
+      } else if (selection instanceof Set) {
+        // Add all IDs from this group's selection Set
+        selection.forEach(id => allSelected.add(id))
+      }
+    }
+
+    return allSelected
   })
 
   const selectedCount = computed(() => {
@@ -108,14 +121,10 @@ export function useBrowser() {
     if (activePlaylistId.value && playlistTotalCount.value > 0) {
       return playlistTotalCount.value
     }
+
     // Otherwise calculate from selectionMap (for source browsing mode)
-    // Count ALL selections, including from groups not currently loaded (e.g., variants from other sources)
-    const groupCountMap = Object.fromEntries(groups.value.map(g => [g.name, g.count]))
-    return Object.entries(selectionMap.value).reduce((sum, [name, s]) => {
-      if (s instanceof Set) return sum + s.size
-      if (s === '__all__') return sum + (groupCountMap[name] || 0)
-      return sum
-    }, 0)
+    // Use currentSelected.value which already aggregates all selections
+    return currentSelected.value.size
   })
 
   const totalCount = computed(() =>
@@ -447,6 +456,22 @@ export function useBrowser() {
   function toggleChannel(ch) {
     // Use the channel's group_title if available, otherwise use activeGroup
     const g = ch.group_title || activeGroup.value
+    if (!g) {
+      console.error('[browser] toggleChannel: no group found', {
+        channel: ch,
+        activeGroup: activeGroup.value,
+        hasGroupTitle: !!ch.group_title
+      })
+      return
+    }
+
+    console.log('[browser] toggleChannel:', {
+      channelId: ch.id,
+      channelName: ch.name,
+      group: g,
+      currentlySelected: currentSelected.value.has(ch.id)
+    })
+
     const currentMap = selectionMap.value
     const s = new Set(currentMap[g] instanceof Set ? currentMap[g] : [])
 
@@ -464,8 +489,13 @@ export function useBrowser() {
     newMap[g] = s
     selectionMap.value = newMap
 
-    // Save to localStorage
-    saveSelection()
+    console.log('[browser] After toggle:', {
+      group: g,
+      selectionSize: s.size,
+      isSelected: s.has(ch.id),
+      activeGroup: activeGroup.value,
+      groupMatchesActive: g === activeGroup.value
+    })
   }
 
   function selectAll() {
@@ -561,6 +591,8 @@ export function useBrowser() {
   // Returns flat array of all selected channel objects across all groups
   async function getAllSelectedChannels() {
     const result = []
+    const seenNormalized = new Map() // Track variants by normalized_name
+
     for (const g of groups.value) {
       const sel = selectionMap.value[g.name]
       if (!sel || (sel instanceof Set && sel.size === 0)) continue
@@ -580,9 +612,33 @@ export function useBrowser() {
 
       const ids = sel === '__all__' ? new Set(groupChannels.map(c => c.id)) : sel
       for (const ch of groupChannels) {
-        if (ids.has(ch.id)) result.push({ ...ch, originalGroup: g.name })
+        if (!ids.has(ch.id)) continue
+
+        const normalized = ch.normalized_name
+        if (normalized) {
+          // Track variants by normalized_name
+          if (!seenNormalized.has(normalized)) {
+            seenNormalized.set(normalized, {
+              ...ch,
+              originalGroup: g.name,
+              variantIds: [ch.id], // Track all variant IDs
+              variantCount: 1
+            })
+          } else {
+            // Add this variant's ID to the list
+            const existing = seenNormalized.get(normalized)
+            existing.variantIds.push(ch.id)
+            existing.variantCount++
+          }
+        } else {
+          // No normalized_name - add as-is
+          result.push({ ...ch, originalGroup: g.name, variantIds: [ch.id], variantCount: 1 })
+        }
       }
     }
+
+    // Add deduplicated channels to result
+    result.push(...seenNormalized.values())
     return result
   }
 

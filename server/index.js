@@ -135,12 +135,13 @@ app.post('/api/sources', (req, res) => {
 })
 
 app.put('/api/sources/:id', (req, res) => {
-  const { name, type, url, username, password, refresh_cron, category, max_streams, priority } = req.body
+  const { name, type, url, username, password, refresh_cron, category, max_streams, priority, cleanup_rules } = req.body
   const cat = category || 'playlist'
   const typ = cat === 'epg' ? 'epg' : (type || 'm3u')
+  const cleanupRulesJson = cleanup_rules ? JSON.stringify(cleanup_rules) : null
   db.prepare(
-    'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=?, priority=? WHERE id=?'
-  ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, Number(priority) || 999, req.params.id)
+    'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=?, priority=?, cleanup_rules=? WHERE id=?'
+  ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, Number(priority) || 999, cleanupRulesJson, req.params.id)
   res.json(db.prepare('SELECT * FROM sources WHERE id = ?').get(req.params.id))
 })
 
@@ -199,15 +200,60 @@ async function refreshSourceCache(sourceId) {
     channels = await fetchAndParseM3U(source.url)
   }
 
+  // Load cleanup rules for this source
+  let cleanupRules = []
+  try {
+    if (source.cleanup_rules) {
+      cleanupRules = JSON.parse(source.cleanup_rules).filter(r => r.enabled)
+    }
+  } catch (e) {
+    console.error(`[source] Failed to parse cleanup_rules for "${source.name}":`, e.message)
+  }
+
   const insert = db.prepare(
     'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const replace = db.transaction((sid, chs) => {
     db.prepare('DELETE FROM source_channels WHERE source_id = ?').run(sid)
+
+    // Track seen URLs to deduplicate after cleanup (only for non-VOD sources)
+    const seenUrls = new Map()
+    const isVodSource = source.category === 'vod'
+
     for (const ch of chs) {
+      let channelName = ch.tvg_name || ''
+
+      // Apply cleanup rules before quality extraction and normalization
+      for (const rule of cleanupRules) {
+        try {
+          if (rule.useRegex) {
+            const regex = new RegExp(rule.find, rule.flags || 'gi')
+            channelName = channelName.replace(regex, rule.replace || '')
+          } else {
+            // Simple string replacement (case-insensitive)
+            const regex = new RegExp(rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+            channelName = channelName.replace(regex, rule.replace || '')
+          }
+        } catch (e) {
+          console.error(`[source] Cleanup rule failed for "${source.name}":`, e.message)
+        }
+      }
+
       // Extract quality and clean the channel name
-      const { cleanedName, quality } = extractQuality(ch.tvg_name || '')
+      const { cleanedName, quality } = extractQuality(channelName.trim())
       const normalizedName = normalizeChannelName(cleanedName)
+
+      // Deduplicate by URL - keep first occurrence (skip for VOD sources)
+      if (!isVodSource && seenUrls.has(ch.url)) {
+        if (process.env.DEBUG) {
+          console.log(`[source] Skipping duplicate URL: "${cleanedName}" (same as "${seenUrls.get(ch.url)}")`)
+        }
+        continue
+      }
+      if (!isVodSource) {
+        seenUrls.set(ch.url, cleanedName)
+      }
+
       insert.run(
         sid,
         ch.tvg_id || '',
@@ -223,7 +269,7 @@ async function refreshSourceCache(sourceId) {
       // Update playlist_channels with cleaned name for channels with this URL
       const updated = db.prepare('UPDATE playlist_channels SET tvg_name = ? WHERE url = ?')
         .run(cleanedName, ch.url)
-      if (updated.changes > 0) {
+      if (updated.changes > 0 && process.env.DEBUG) {
         console.log(`[source] Updated ${updated.changes} playlist channel(s): "${ch.tvg_name || ''}" -> "${cleanedName}"`)
       }
     }
@@ -236,45 +282,9 @@ async function refreshSourceCache(sourceId) {
 
 /**
  * Normalize channel name for grouping (lowercase, no spaces, no special chars)
- * Preserves and normalizes country prefixes to distinguish geographic variants
  */
 function normalizeChannelName(name) {
-  // Load region mappings from settings (cached for performance)
-  let regionMappings = {}
-  try {
-    const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('region_mappings')
-    if (setting?.value) {
-      regionMappings = JSON.parse(setting.value)
-    }
-  } catch (e) {
-    // Use defaults if settings not available
-    regionMappings = {
-      'USA': 'US',
-      'UK': 'GB',
-      'UAE': 'AE',
-      'RSA': 'ZA',
-      'SS': 'ZA',
-      'DSTV': 'ZA'
-    }
-  }
-
-  // Build patterns from mapping keys
-  const GEO_PATTERNS = Object.keys(regionMappings).sort((a, b) => b.length - a.length) // Longest first
-
   let normalized = name.toLowerCase()
-  let geoPrefix = ''
-
-  // Extract and normalize geo prefix (e.g., "USA: History" → "us_history")
-  for (const code of GEO_PATTERNS) {
-    const pattern = new RegExp(`^${code}[:\\s_-]+`, 'i')
-    if (pattern.test(normalized)) {
-      const matched = code.toUpperCase()
-      const standardCode = regionMappings[matched] || matched
-      geoPrefix = standardCode.toLowerCase() + '_'
-      normalized = normalized.replace(pattern, '')
-      break
-    }
-  }
 
   // Remove quality indicators
   normalized = normalized.replace(/\b(hd|fhd|uhd|4k|sd|hevc|h\.?265)\b/gi, '')
@@ -282,7 +292,7 @@ function normalizeChannelName(name) {
   // Remove all non-alphanumeric characters
   normalized = normalized.replace(/[^a-z0-9]/g, '')
 
-  return geoPrefix + normalized
+  return normalized
 }
 
 /**
@@ -1730,6 +1740,297 @@ app.post('/api/epg/enrich', async (req, res) => {
     .finally(() => clearTimeout(safetyTimeout))
 })
 
+// ── TMDB Match Corrector ──────────────────────────────────────────────────────
+
+app.get('/api/tmdb/titles/:playlistId', async (req, res) => {
+  try {
+    const playlistId = req.params.playlistId
+    const { filter, search } = req.query
+
+    // Get XMLTV content
+    const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId)
+    if (!playlist) {
+      return res.status(404).json({ error: 'Playlist not found' })
+    }
+
+    // Get all channels for this playlist
+    const channels = db.prepare(`
+      SELECT pc.*, sc.normalized_name
+      FROM playlist_channels pc
+      LEFT JOIN source_channels sc ON sc.url = pc.url
+      WHERE pc.playlist_id = ?
+    `).all(playlistId)
+
+    if (!channels.length) {
+      return res.json({ titles: [], total: 0, stats: { matched: 0, not_found: 0, unmatched: 0, blocked: 0 } })
+    }
+
+    // Get EPG data - build set of tvg_ids for this playlist's channels
+    const epgIds = new Set(channels.map(ch => ch.custom_tvg_id || ch.tvg_id).filter(Boolean))
+
+    if (epgIds.size === 0) {
+      return res.json({ titles: [], total: 0, stats: { matched: 0, not_found: 0, unmatched: 0, blocked: 0 } })
+    }
+
+    const cacheRows = db.prepare('SELECT content FROM epg_cache WHERE content IS NOT NULL').all()
+
+    // Build a map of tvg_id to channel info (name and group)
+    // Also build a set of excluded news/sports channel IDs
+    const tvgIdToChannels = new Map()
+    const excludedChannels = new Set()
+
+    for (const ch of channels) {
+      const tvgId = ch.custom_tvg_id || ch.tvg_id
+      if (!tvgId) continue
+
+      // Check if this is a news or sports channel
+      const groupLower = (ch.group_title || '').toLowerCase()
+      if (groupLower.includes('news') || groupLower.includes('sport')) {
+        excludedChannels.add(tvgId)
+      }
+
+      if (!tvgIdToChannels.has(tvgId)) {
+        tvgIdToChannels.set(tvgId, [])
+      }
+      tvgIdToChannels.get(tvgId).push({
+        name: ch.tvg_name,
+        group: ch.group_title
+      })
+    }
+
+    // Extract titles from programmes that match this playlist's channels
+    const titleCounts = new Map()
+    const titleChannels = new Map() // Track which channels have each title
+    const titleRuntimes = new Map() // Track runtime for each title (in minutes)
+    const progRe = /<programme\b[^>]*>[\s\S]*?<\/programme>/g
+    let matchedProgs = 0
+    let skippedNewsAndSports = 0
+
+    for (const row of cacheRows) {
+      progRe.lastIndex = 0
+      let m
+      while ((m = progRe.exec(row.content)) !== null) {
+        const prog = parseProgBlock(m[0])
+
+        // Skip news and sports channels
+        if (prog.channel && excludedChannels.has(prog.channel)) {
+          skippedNewsAndSports++
+          continue
+        }
+
+        // Only count programmes for channels in this playlist
+        if (prog.title && prog.channel && epgIds.has(prog.channel)) {
+          matchedProgs++
+          titleCounts.set(prog.title, (titleCounts.get(prog.title) || 0) + 1)
+
+          // Calculate runtime from start/stop times
+          if (prog.start && prog.stop && !titleRuntimes.has(prog.title)) {
+            const startTime = new Date(prog.start)
+            const stopTime = new Date(prog.stop)
+            const runtimeMinutes = Math.round((stopTime - startTime) / 1000 / 60)
+            if (runtimeMinutes > 0) {
+              titleRuntimes.set(prog.title, runtimeMinutes)
+            }
+          }
+
+          // Track which channels have this title
+          if (!titleChannels.has(prog.title)) {
+            titleChannels.set(prog.title, new Set())
+          }
+          // Add all channels with this tvg_id
+          const channelInfos = tvgIdToChannels.get(prog.channel) || []
+          for (const chInfo of channelInfos) {
+            titleChannels.get(prog.title).add(JSON.stringify(chInfo))
+          }
+        }
+      }
+    }
+
+    // Get enrichment data for all titles
+    const enrichmentData = db.prepare('SELECT * FROM tmdb_enrichment').all()
+    const enrichMap = new Map(enrichmentData.map(e => [e.title, e]))
+
+    // Get episode counts for TV shows
+    const episodeCounts = db.prepare(`
+      SELECT show_title, COUNT(*) as count
+      FROM tmdb_episodes
+      GROUP BY show_title
+    `).all()
+    const episodeMap = new Map(episodeCounts.map(e => [e.show_title, e.count]))
+
+    // Build title list with match status
+    const titles = []
+    for (const [title, count] of titleCounts.entries()) {
+      const enrich = enrichMap.get(title)
+      let status = 'unmatched'
+
+      if (enrich) {
+        if (enrich.blocked) status = 'blocked'
+        else if (enrich.tmdb_id) status = 'matched'
+        else status = 'not_found'
+      }
+
+      // Apply filters
+      if (filter && filter !== 'all' && status !== filter) continue
+      if (search && !title.toLowerCase().includes(search.toLowerCase())) continue
+
+      // Get channel info for this title
+      const channelSet = titleChannels.get(title) || new Set()
+      const channels = Array.from(channelSet).map(str => JSON.parse(str))
+
+      titles.push({
+        title,
+        programme_count: count,
+        status,
+        tmdb_id: enrich?.tmdb_id || null,
+        media_type: enrich?.media_type || null,
+        poster: enrich?.poster || null,
+        description: enrich?.description || null,
+        fetched_at: enrich?.fetched_at || null,
+        episode_count: enrich?.media_type === 'tv' ? (episodeMap.get(title) || 0) : null,
+        manual_override: enrich?.manual_override || false,
+        blocked: enrich?.blocked || false,
+        channels: channels, // Array of {name, group}
+        runtime_minutes: titleRuntimes.get(title) || null
+      })
+    }
+
+    // Calculate stats
+    const stats = {
+      matched: titles.filter(t => t.status === 'matched').length,
+      not_found: titles.filter(t => t.status === 'not_found').length,
+      unmatched: titles.filter(t => t.status === 'unmatched').length,
+      blocked: titles.filter(t => t.status === 'blocked').length
+    }
+
+    res.json({ titles, total: titles.length, stats })
+  } catch (e) {
+    console.error('[tmdb] Error getting titles:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Manual TMDB search
+app.post('/api/tmdb/search', async (req, res) => {
+  try {
+    if (!process.env.TMDB_API_KEY) {
+      return res.status(400).json({ error: 'TMDB_API_KEY not set' })
+    }
+
+    const { query, type } = req.body
+    if (!query) return res.status(400).json({ error: 'query required' })
+
+    const { tmdbSearchTitle } = await import('./epgEnrich.js')
+    const types = type === 'both' ? ['tv', 'movie'] : [type || 'tv']
+    const results = []
+
+    for (const t of types) {
+      try {
+        const url = `https://api.themoviedb.org/3/search/${t}?api_key=${process.env.TMDB_API_KEY}&language=en-US&query=${encodeURIComponent(query)}&page=1`
+        const response = await fetch(url)
+        const data = await response.json()
+
+        if (data.results) {
+          for (const item of data.results.slice(0, 10)) {
+            results.push({
+              tmdb_id: item.id,
+              media_type: t,
+              title: item.title || item.name,
+              poster: item.poster_path ? `https://image.tmdb.org/t/p/w300${item.poster_path}` : null,
+              description: item.overview || null,
+              release_date: item.release_date || item.first_air_date || null
+            })
+          }
+        }
+      } catch (e) {
+        console.error(`[tmdb] Search error for ${t}:`, e.message)
+      }
+    }
+
+    res.json({ results })
+  } catch (e) {
+    console.error('[tmdb] Search error:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Update a match
+app.put('/api/tmdb/matches/:title', async (req, res) => {
+  try {
+    const title = decodeURIComponent(req.params.title)
+    const { tmdb_id, media_type, poster, description, blocked } = req.body
+
+    // Update or insert enrichment data
+    db.prepare(`
+      INSERT INTO tmdb_enrichment (title, tmdb_id, media_type, poster, description, manual_override, blocked, fetched_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?, datetime('now'))
+      ON CONFLICT(title) DO UPDATE SET
+        tmdb_id=excluded.tmdb_id,
+        media_type=excluded.media_type,
+        poster=excluded.poster,
+        description=excluded.description,
+        manual_override=1,
+        blocked=excluded.blocked,
+        fetched_at=excluded.fetched_at
+    `).run(title, tmdb_id, media_type, poster, description, blocked ? 1 : 0)
+
+    // If TV show, fetch episodes
+    if (media_type === 'tv' && tmdb_id) {
+      const { fetchAndStoreAllEpisodes } = await import('./epgEnrich.js')
+      await fetchAndStoreAllEpisodes(title, tmdb_id)
+    }
+
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[tmdb] Error updating match:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Block/unblock a title
+app.put('/api/tmdb/block/:title', (req, res) => {
+  try {
+    const title = decodeURIComponent(req.params.title)
+    const { blocked } = req.body
+
+    // Insert or update with blocked flag
+    db.prepare(`
+      INSERT INTO tmdb_enrichment (title, blocked, fetched_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(title) DO UPDATE SET
+        blocked=excluded.blocked,
+        fetched_at=excluded.fetched_at
+    `).run(title, blocked ? 1 : 0)
+
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[tmdb] Error blocking title:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Clear a match
+app.delete('/api/tmdb/matches/:title', (req, res) => {
+  try {
+    const title = decodeURIComponent(req.params.title)
+
+    // Clear match data but preserve blocked flag
+    db.prepare(`
+      UPDATE tmdb_enrichment
+      SET tmdb_id=NULL, media_type=NULL, poster=NULL, description=NULL, manual_override=0
+      WHERE title=?
+    `).run(title)
+
+    // Delete episodes
+    db.prepare('DELETE FROM tmdb_episodes WHERE show_title=?').run(title)
+
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[tmdb] Error clearing match:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // Register our own guide.xml as an EPG source
 app.post('/api/epg/sources/from-scraper', (req, res) => {
   const proto = req.headers['x-forwarded-proto'] || req.protocol
@@ -2611,8 +2912,15 @@ app.get('/player/:channelId', (req, res) => {
 })
 
 /**
- * Get all channel variants for a given channel, ordered by quality (best first)
+ * Get all channel variants for a given channel, ordered by availability and quality
  * Returns array of {id, url, tvg_name, quality, source_id}
+ *
+ * Logic:
+ * 1. Get all variants with same normalized_name
+ * 2. Check each source's max_streams vs active streams
+ * 3. Prioritize sources with available slots
+ * 4. Within available sources, order by quality (best first)
+ * 5. Unavailable sources go last (in case all fail)
  */
 function getChannelVariants(channelId) {
   // First get the channel to find its normalized_name
@@ -2626,24 +2934,80 @@ function getChannelVariants(channelId) {
     return [{ id: channel.id, url: channel.url, tvg_name: channel.tvg_name, quality: '', source_id: channel.source_id }]
   }
 
-  // Find all source channels with the same normalized_name, ordered by source priority then quality
+  // Find all source channels with the same normalized_name
   const variants = db.prepare(`
-    SELECT sc.id, sc.url, sc.tvg_name, sc.quality, sc.source_id
+    SELECT sc.id, sc.url, sc.tvg_name, sc.quality, sc.source_id, s.max_streams, s.priority
     FROM source_channels sc
     LEFT JOIN sources s ON sc.source_id = s.id
     WHERE sc.normalized_name = ?
-    ORDER BY
-      COALESCE(s.priority, 999) ASC,
-      CASE sc.quality
-        WHEN 'UHD' THEN 1
-        WHEN 'FHD' THEN 2
-        WHEN 'HD' THEN 3
-        WHEN 'SD' THEN 4
-        ELSE 5
-      END
   `).all(sourceChannel.normalized_name)
 
-  return variants.length > 0 ? variants : [{ id: channel.id, url: channel.url, tvg_name: channel.tvg_name, quality: '', source_id: channel.source_id }]
+  if (!variants.length) {
+    return [{ id: channel.id, url: channel.url, tvg_name: channel.tvg_name, quality: '', source_id: channel.source_id }]
+  }
+
+  // Get active sessions to count streams per source
+  const activeSessions = getActiveSessions()
+  const activeBySource = new Map()
+  for (const session of activeSessions) {
+    if (session.sourceId) {
+      activeBySource.set(session.sourceId, (activeBySource.get(session.sourceId) || 0) + 1)
+    }
+  }
+
+  // Categorize variants: available vs unavailable
+  const available = []
+  const unavailable = []
+
+  for (const variant of variants) {
+    const activeCount = activeBySource.get(variant.source_id) || 0
+    const maxStreams = variant.max_streams || 0
+    const hasCapacity = maxStreams === 0 || activeCount < maxStreams
+
+    const variantData = {
+      id: variant.id,
+      url: variant.url,
+      tvg_name: variant.tvg_name,
+      quality: variant.quality || '',
+      source_id: variant.source_id,
+      priority: variant.priority || 999,
+      activeCount,
+      maxStreams
+    }
+
+    if (hasCapacity) {
+      available.push(variantData)
+    } else {
+      unavailable.push(variantData)
+    }
+  }
+
+  // Sort available by priority then quality
+  available.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority - b.priority
+    const qualityOrder = { 'UHD': 1, 'FHD': 2, 'HD': 3, 'SD': 4 }
+    const aQ = qualityOrder[a.quality] || 5
+    const bQ = qualityOrder[b.quality] || 5
+    return aQ - bQ
+  })
+
+  // Sort unavailable by priority then quality (as fallback)
+  unavailable.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority - b.priority
+    const qualityOrder = { 'UHD': 1, 'FHD': 2, 'HD': 3, 'SD': 4 }
+    const aQ = qualityOrder[a.quality] || 5
+    const bQ = qualityOrder[b.quality] || 5
+    return aQ - bQ
+  })
+
+  // Return available sources first, then unavailable as fallback
+  return [...available, ...unavailable].map(v => ({
+    id: v.id,
+    url: v.url,
+    tvg_name: v.tvg_name,
+    quality: v.quality,
+    source_id: v.source_id
+  }))
 }
 
 /**
@@ -2723,9 +3087,29 @@ app.get('/stream/:channelId', async (req, res) => {
     }
   }
 
-  // Get all channel variants (grouped by normalized name, ordered by quality)
+  // Get all channel variants (ordered by availability and quality)
   const variants = getChannelVariants(channelId)
+
+  // Log variant selection with source capacity info
+  const activeSessions = getActiveSessions()
+  const activeBySource = new Map()
+  for (const session of activeSessions) {
+    if (session.sourceId) {
+      activeBySource.set(session.sourceId, (activeBySource.get(session.sourceId) || 0) + 1)
+    }
+  }
+
   console.log(`[stream] Found ${variants.length} variant(s) for channel ${channelId}`)
+  for (let i = 0; i < variants.length; i++) {
+    const v = variants[i]
+    if (v.source_id) {
+      const source = db.prepare('SELECT name, max_streams FROM sources WHERE id = ?').get(v.source_id)
+      const active = activeBySource.get(v.source_id) || 0
+      const max = source?.max_streams || 0
+      const capacityInfo = max > 0 ? ` [${active}/${max} streams]` : ` [${active} streams, unlimited]`
+      console.log(`[stream]   ${i + 1}. ${v.tvg_name} (${v.quality || 'unknown'}) from ${source?.name || 'unknown'}${capacityInfo}`)
+    }
+  }
 
   // Try each variant in order until one succeeds
   let lastError = null
@@ -3067,22 +3451,8 @@ app.get('/{*path}', (req, res) => {
 // Run migrations before starting server
 await runMigrations(db)
 
-// Initialize default region mappings if not set
-const regionMappingsSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('region_mappings')
-if (!regionMappingsSetting) {
-  const defaultMappings = {
-    'USA': 'US',
-    'UK': 'GB',
-    'UAE': 'AE',
-    'RSA': 'ZA',
-    'SS': 'ZA',
-    'DSTV': 'ZA'
-  }
-  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('region_mappings', JSON.stringify(defaultMappings))
-  console.log('[settings] Initialized default region mappings')
-}
+console.log('[db] Database initialized')
 
 app.listen(PORT, () => {
   console.log(`M3u4Proxy server running on http://localhost:${PORT}`)
 })
-

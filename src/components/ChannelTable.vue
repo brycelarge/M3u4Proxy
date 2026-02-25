@@ -49,7 +49,12 @@ function onHeaderCheckbox(filtered, currentSelected) {
             <span v-else class="text-xs text-slate-600">📺</span>
           </div>
         </div>
-        <div class="flex-1 min-w-0 font-medium text-sm text-slate-200 truncate">{{ ch.name }}</div>
+        <div class="flex-1 min-w-0">
+          <div class="font-medium text-sm text-slate-200 truncate">{{ ch.name }}</div>
+          <div v-if="ch.tvg_name && ch.tvg_name !== ch.name" class="text-[10px] text-green-400/70 truncate" :title="`Cleaned: ${ch.tvg_name}`">
+            → {{ ch.tvg_name }}
+          </div>
+        </div>
         <div class="w-48 shrink-0 text-sm text-slate-500 truncate hidden md:block">{{ ch.group }}</div>
         <div class="w-48 shrink-0 text-xs text-slate-600 truncate hidden lg:block">{{ ch.tvgId }}</div>
       </div>

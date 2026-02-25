@@ -1,8 +1,9 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../composables/useApi.js'
+import TmdbMatchModal from '../components/TmdbMatchModal.vue'
 
-const tab        = ref('auto')
+const tab        = ref('mappings')
 const playlists  = ref([])
 const epgSources = ref([])
 const mappings   = ref([])
@@ -23,6 +24,27 @@ const filterMode = ref('all')
 const checked    = ref(new Set())
 const sortCol    = ref('score')   // 'name' | 'score' | 'status'
 const sortDir    = ref('desc')
+
+// TMDB Matches tab state
+const tmdbTitles = ref([])
+const tmdbStats = ref({ matched: 0, not_found: 0, unmatched: 0, blocked: 0 })
+
+// Decode HTML entities for display
+function decodeHtmlEntities(text) {
+  if (!text) return text
+  return text
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+}
+const tmdbFilterStatus = ref('all')
+const tmdbSearchQuery = ref('')
+const tmdbSortBy = ref('title')
+const tmdbLoading = ref(false)
+const tmdbShowModal = ref(false)
+const tmdbEditingTitle = ref(null)
 
 // ── Edit/search modal ─────────────────────────────────────────────────────────
 const editRow       = ref(null)   // the match row being edited
@@ -387,6 +409,108 @@ const epgByDate = computed(() => {
   return groups
 })
 
+// ── TMDB Matches Tab Functions ──────────────────────────────────────────────
+async function loadTmdbTitles() {
+  if (!selectedPl.value) {
+    console.log('[tmdb] No playlist selected')
+    return
+  }
+  tmdbLoading.value = true
+  console.log('[tmdb] Loading titles for playlist:', selectedPl.value)
+  try {
+    const params = new URLSearchParams()
+    if (tmdbFilterStatus.value !== 'all') params.append('filter', tmdbFilterStatus.value)
+    if (tmdbSearchQuery.value) params.append('search', tmdbSearchQuery.value)
+
+    const url = `/api/tmdb/titles/${selectedPl.value}?${params}`
+    console.log('[tmdb] Fetching:', url)
+    const response = await fetch(url)
+    const data = await response.json()
+    console.log('[tmdb] Response:', data)
+    tmdbTitles.value = data.titles || []
+    tmdbStats.value = data.stats || { matched: 0, not_found: 0, unmatched: 0, blocked: 0 }
+    console.log('[tmdb] Loaded', tmdbTitles.value.length, 'titles')
+  } catch (e) {
+    console.error('[tmdb] Error loading TMDB titles:', e)
+  } finally {
+    tmdbLoading.value = false
+  }
+}
+
+const tmdbSortedTitles = computed(() => {
+  const sorted = [...tmdbTitles.value]
+  if (tmdbSortBy.value === 'title') {
+    sorted.sort((a, b) => a.title.localeCompare(b.title))
+  } else if (tmdbSortBy.value === 'count') {
+    sorted.sort((a, b) => b.programme_count - a.programme_count)
+  } else if (tmdbSortBy.value === 'date') {
+    sorted.sort((a, b) => {
+      if (!a.fetched_at) return 1
+      if (!b.fetched_at) return -1
+      return new Date(b.fetched_at) - new Date(a.fetched_at)
+    })
+  }
+  return sorted
+})
+
+function getTmdbStatusBadge(status) {
+  const badges = {
+    matched: { class: 'bg-green-500/20 text-green-400 border-green-500/30', icon: '✓', label: 'Matched' },
+    not_found: { class: 'bg-red-500/20 text-red-400 border-red-500/30', icon: '⚠', label: 'Not Found' },
+    unmatched: { class: 'bg-slate-500/20 text-slate-400 border-slate-500/30', icon: '⭕', label: 'Unmatched' },
+    blocked: { class: 'bg-amber-500/20 text-amber-400 border-amber-500/30', icon: '🚫', label: 'Blocked' }
+  }
+  return badges[status] || badges.unmatched
+}
+
+function openTmdbEditModal(title) {
+  tmdbEditingTitle.value = title
+  tmdbShowModal.value = true
+}
+
+function closeTmdbModal() {
+  tmdbShowModal.value = false
+  tmdbEditingTitle.value = null
+}
+
+async function handleTmdbSave(updateData) {
+  // Update the local title data immediately
+  if (tmdbEditingTitle.value && updateData) {
+    const titleIndex = tmdbTitles.value.findIndex(t => t.title === tmdbEditingTitle.value.title)
+    if (titleIndex !== -1) {
+      const title = tmdbTitles.value[titleIndex]
+
+      if (updateData.cleared) {
+        // Clear match - reset to unmatched
+        title.status = 'unmatched'
+        title.tmdb_id = null
+        title.media_type = null
+        title.poster = null
+        title.description = null
+        title.manual_override = false
+        title.blocked = false
+      } else if (updateData.blocked !== undefined) {
+        // Block/unblock
+        title.blocked = updateData.blocked
+        title.status = updateData.blocked ? 'blocked' : 'unmatched'
+      } else if (updateData.tmdb_id) {
+        // New match
+        title.status = 'matched'
+        title.tmdb_id = updateData.tmdb_id
+        title.media_type = updateData.media_type
+        title.poster = updateData.poster
+        title.description = updateData.description
+        title.manual_override = true
+      }
+
+      // Trigger reactivity by creating new array
+      tmdbTitles.value = [...tmdbTitles.value]
+    }
+  }
+
+  closeTmdbModal()
+}
+
 // ── TMDB Enrichment ──────────────────────────────────────────────────────────
 const enrichStatus  = ref(null)
 const enriching     = ref(false)
@@ -416,7 +540,33 @@ async function triggerEnrich() {
   }
 }
 
-onMounted(async () => { await loadAll(); await loadEnrichStatus() })
+// Watch for tab changes to load TMDB data when switching to TMDB tab
+watch(tab, async (newTab) => {
+  if (newTab === 'tmdb') {
+    console.log('[tmdb-watch] Switched to TMDB tab, selectedPl:', selectedPl.value)
+    // Auto-select first playlist if none selected
+    if (!selectedPl.value && playlists.value.length > 0) {
+      selectedPl.value = String(playlists.value.filter(p => p.playlist_type !== 'vod')[0]?.id || '')
+      console.log('[tmdb-watch] Auto-selected playlist:', selectedPl.value)
+    }
+    // Load titles if we have a playlist
+    if (selectedPl.value) {
+      await loadTmdbTitles()
+    }
+  }
+})
+
+onMounted(async () => {
+  await loadAll()
+  await loadEnrichStatus()
+  // If TMDB tab is active on mount and we have playlists, load titles
+  if (tab.value === 'tmdb' && playlists.value.length > 0 && !selectedPl.value) {
+    selectedPl.value = String(playlists.value.filter(p => p.playlist_type !== 'vod')[0]?.id || '')
+    if (selectedPl.value) {
+      await loadTmdbTitles()
+    }
+  }
+})
 onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
 </script>
 
@@ -429,46 +579,23 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
         <h1 class="text-sm font-bold text-slate-100">EPG Mappings</h1>
         <p class="text-xs text-slate-500 mt-0.5">Map channel <code>tvg-id</code> values to EPG IDs — fixes guide data in Plex/Emby/Jellyfin</p>
       </div>
-      <button
-        @click="triggerEnrich"
-        :disabled="enriching || !enrichStatus?.guideExists || !enrichStatus?.tmdbKeySet"
-        :title="!enrichStatus?.tmdbKeySet ? 'Add TMDB_API_KEY to .env to enable' : !enrichStatus?.guideExists ? 'Run an EPG grab first' : 'Enrich guide.xml with TMDB posters & descriptions for mapped channels'"
-        class="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-semibold rounded-lg transition-colors shrink-0">
-        <span v-if="enriching" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-        {{ enriching ? 'Enriching…' : '🎥 TMDB Enrich' }}
-      </button>
       <div class="flex bg-[#13151f] border border-[#2e3250] rounded-lg p-0.5">
-        <button @click="tab = 'auto'"
+        <button @click="tab = 'mappings'"
           :class="['px-3 py-1.5 text-xs font-medium rounded transition-colors',
-            tab === 'auto' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:text-slate-200']">
-          🤖 Auto-Match
+            tab === 'mappings' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:text-slate-200']">
+          🗺️ Mappings
         </button>
-        <button @click="tab = 'manual'"
+        <button @click="tab = 'tmdb'"
           :class="['px-3 py-1.5 text-xs font-medium rounded transition-colors',
-            tab === 'manual' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:text-slate-200']">
-          ✏️ Manual ({{ mappings.length }})
+            tab === 'tmdb' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:text-slate-200']">
+          🎬 TMDB Matching
         </button>
       </div>
     </div>
 
-    <!-- TMDB enrichment status bar -->
-    <div v-if="enriching || enrichStatus?.lastRun || enrichStatus?.lastError" class="flex items-center gap-3 px-6 py-2 shrink-0 border-b"
-      :class="enrichStatus?.lastError ? 'bg-red-500/10 border-red-500/20' : 'bg-violet-500/10 border-violet-500/20'">
-      <span v-if="enriching" class="w-3 h-3 border-2 border-violet-400/30 border-t-violet-400 rounded-full animate-spin shrink-0"></span>
-      <span v-else-if="enrichStatus?.lastError" class="text-red-400 shrink-0">✗</span>
-      <span v-else class="text-violet-400 shrink-0">★</span>
-      <p class="text-xs font-medium flex-1 truncate" :class="enrichStatus?.lastError ? 'text-red-300' : 'text-violet-300'">
-        <template v-if="enriching">TMDB enrichment in progress… <span v-if="enrichStatus?.log?.length" class="text-violet-400/70 text-[10px]">{{ enrichStatus.log[enrichStatus.log.length - 1] }}</span></template>
-        <template v-else-if="enrichStatus?.lastError">Enrichment failed: {{ enrichStatus.lastError }}</template>
-        <template v-else>TMDB enriched · {{ enrichStatus?.enriched }} programmes updated · {{ enrichStatus?.lastRun ? new Date(enrichStatus.lastRun).toLocaleString() : '' }}</template>
-      </p>
-    </div>
-    <div v-else-if="enrichStatus && !enrichStatus.tmdbKeySet" class="flex items-center gap-2 px-6 py-1.5 shrink-0 bg-[#13151f] border-b border-[#2e3250]">
-      <span class="text-[10px] text-slate-600">🎥 TMDB enrichment disabled — add <code class="text-slate-500">TMDB_API_KEY=your_key</code> to .env for automatic poster &amp; description injection into guide.xml</span>
-    </div>
 
-    <!-- ── AUTO-MATCH TAB ──────────────────────────────────────────────────── -->
-    <template v-if="tab === 'auto'">
+    <!-- ── MAPPINGS TAB ──────────────────────────────────────────────────── -->
+    <template v-if="tab === 'mappings'">
 
       <!-- Toolbar -->
       <div class="flex flex-wrap items-center gap-2 px-6 py-3 border-b border-[#2e3250] shrink-0 bg-[#13151f]">
@@ -753,33 +880,156 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
       </div>
     </template>
 
-    <!-- ── MANUAL TAB ──────────────────────────────────────────────────────── -->
-    <template v-else>
-      <div class="flex-1 overflow-y-auto p-6">
-        <div class="flex justify-end mb-4">
-          <button @click="showForm = true" class="px-4 py-2 text-xs bg-indigo-500 hover:bg-indigo-400 text-white font-semibold rounded-xl transition-colors">
-            + Add Mapping
-          </button>
+    <!-- ── TMDB MATCHES TAB ──────────────────────────────────────────────────── -->
+    <template v-else-if="tab === 'tmdb'">
+      <!-- TMDB Enrich Button & Stats -->
+      <div class="flex items-center gap-3 px-6 py-3 bg-[#1a1d27] border-b border-[#2e3250] shrink-0">
+        <button
+          @click="triggerEnrich"
+          :disabled="enriching || !enrichStatus?.guideExists || !enrichStatus?.tmdbKeySet"
+          :title="!enrichStatus?.tmdbKeySet ? 'Add TMDB_API_KEY to .env to enable' : !enrichStatus?.guideExists ? 'Run an EPG grab first' : 'Enrich guide.xml with TMDB posters & descriptions for mapped channels'"
+          class="flex items-center gap-1.5 px-4 py-2 text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-semibold rounded-lg transition-colors shrink-0">
+          <span v-if="enriching" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+          {{ enriching ? 'Enriching…' : '🎥 Run TMDB Enrich' }}
+        </button>
+
+        <!-- Stats Badges -->
+        <button
+          @click="tmdbFilterStatus = tmdbFilterStatus === 'matched' ? 'all' : 'matched'; loadTmdbTitles()"
+          :class="['flex items-center gap-2 px-2 py-1 rounded-lg border transition-colors cursor-pointer',
+            tmdbFilterStatus === 'matched'
+              ? 'bg-green-500/20 border-green-500/40'
+              : 'bg-green-500/10 border-green-500/20 hover:bg-green-500/15']">
+          <span class="text-[10px] text-green-400">✓ Matched</span>
+          <span class="text-xs font-bold text-green-300">{{ tmdbStats.matched }}</span>
+        </button>
+        <button
+          @click="tmdbFilterStatus = tmdbFilterStatus === 'unmatched' ? 'all' : 'unmatched'; loadTmdbTitles()"
+          :class="['flex items-center gap-2 px-2 py-1 rounded-lg border transition-colors cursor-pointer',
+            tmdbFilterStatus === 'unmatched'
+              ? 'bg-slate-500/20 border-slate-500/40'
+              : 'bg-slate-500/10 border-slate-500/20 hover:bg-slate-500/15']">
+          <span class="text-[10px] text-slate-400">⭕ Unmatched</span>
+          <span class="text-xs font-bold text-slate-300">{{ tmdbStats.unmatched }}</span>
+        </button>
+        <button
+          @click="tmdbFilterStatus = tmdbFilterStatus === 'not_found' ? 'all' : 'not_found'; loadTmdbTitles()"
+          :class="['flex items-center gap-2 px-2 py-1 rounded-lg border transition-colors cursor-pointer',
+            tmdbFilterStatus === 'not_found'
+              ? 'bg-red-500/20 border-red-500/40'
+              : 'bg-red-500/10 border-red-500/20 hover:bg-red-500/15']">
+          <span class="text-[10px] text-red-400">⚠ Not Found</span>
+          <span class="text-xs font-bold text-red-300">{{ tmdbStats.not_found }}</span>
+        </button>
+        <button
+          @click="tmdbFilterStatus = tmdbFilterStatus === 'blocked' ? 'all' : 'blocked'; loadTmdbTitles()"
+          :class="['flex items-center gap-2 px-2 py-1 rounded-lg border transition-colors cursor-pointer',
+            tmdbFilterStatus === 'blocked'
+              ? 'bg-amber-500/20 border-amber-500/40'
+              : 'bg-amber-500/10 border-amber-500/20 hover:bg-amber-500/15']">
+          <span class="text-[10px] text-amber-400">🚫 Blocked</span>
+          <span class="text-xs font-bold text-amber-300">{{ tmdbStats.blocked }}</span>
+        </button>
+
+        <!-- Status Message -->
+        <div v-if="enriching || enrichStatus?.lastRun || enrichStatus?.lastError" class="flex items-center gap-2 flex-1 ml-2">
+          <span v-if="enriching" class="w-3 h-3 border-2 border-violet-400/30 border-t-violet-400 rounded-full animate-spin shrink-0"></span>
+          <span v-else-if="enrichStatus?.lastError" class="text-red-400 shrink-0">✗</span>
+          <span v-else class="text-violet-400 shrink-0">★</span>
+          <p class="text-[10px] font-medium flex-1 truncate" :class="enrichStatus?.lastError ? 'text-red-300' : 'text-violet-300'">
+            <template v-if="enriching">{{ enrichStatus?.log?.length ? enrichStatus.log[enrichStatus.log.length - 1] : 'In progress…' }}</template>
+            <template v-else-if="enrichStatus?.lastError">{{ enrichStatus.lastError }}</template>
+            <template v-else>{{ enrichStatus?.enriched }} programmes · {{ enrichStatus?.lastRun ? new Date(enrichStatus.lastRun).toLocaleString() : '' }}</template>
+          </p>
         </div>
-        <div class="space-y-2">
-          <div v-if="!mappings.length" class="text-center py-16 text-slate-500">
-            <p class="text-4xl mb-3">🗺️</p>
-            <p class="text-sm">No manual EPG mappings yet.</p>
-          </div>
-          <div v-if="mappings.length" class="flex items-center gap-4 px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-            <div class="flex-1">Source tvg-id</div>
-            <div class="text-slate-600 shrink-0">→</div>
-            <div class="flex-1">Target tvg-id</div>
-            <div class="w-48 shrink-0 hidden md:block">Note</div>
-            <div class="w-16 shrink-0"></div>
-          </div>
-          <div v-for="m in mappings" :key="m.id"
-            class="flex items-center gap-4 bg-[#1a1d27] border border-[#2e3250] rounded-xl px-4 py-3">
-            <div class="flex-1 min-w-0 font-mono text-sm text-slate-300 truncate">{{ m.source_tvg_id }}</div>
-            <div class="text-slate-500 shrink-0">→</div>
-            <div class="flex-1 min-w-0 font-mono text-sm text-indigo-300 truncate">{{ m.target_tvg_id }}</div>
-            <div class="w-48 shrink-0 text-xs text-slate-500 truncate hidden md:block">{{ m.note || '—' }}</div>
-            <button @click="removeManual(m)" class="w-16 shrink-0 px-2 py-1 text-xs bg-[#22263a] border border-red-900/50 rounded-lg hover:border-red-500 text-red-400 transition-colors text-center">Delete</button>
+        <div v-else-if="enrichStatus && !enrichStatus.tmdbKeySet" class="flex-1 ml-2">
+          <span class="text-[10px] text-slate-500">Add TMDB_API_KEY to .env to enable</span>
+        </div>
+      </div>
+
+      <!-- Filters -->
+      <div class="flex items-center gap-3 px-6 py-3 bg-[#1a1d27] border-b border-[#2e3250] shrink-0">
+        <select v-model="selectedPl" @change="loadTmdbTitles"
+          class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-200 outline-none focus:border-indigo-500">
+          <option value="" disabled>Select playlist…</option>
+          <option v-for="p in playlists.filter(p => p.playlist_type !== 'vod')" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
+        </select>
+
+        <select v-model="tmdbFilterStatus" @change="loadTmdbTitles"
+          class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-200 outline-none focus:border-indigo-500">
+          <option value="all">All Status</option>
+          <option value="matched">Matched</option>
+          <option value="unmatched">Unmatched</option>
+          <option value="not_found">Not Found</option>
+          <option value="blocked">Blocked</option>
+        </select>
+
+        <select v-model="tmdbSortBy"
+          class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-200 outline-none focus:border-indigo-500">
+          <option value="title">Sort: Title (A-Z)</option>
+          <option value="count">Sort: Programme Count</option>
+          <option value="date">Sort: Last Fetched</option>
+        </select>
+
+        <input v-model="tmdbSearchQuery" @input="loadTmdbTitles" placeholder="Search titles..."
+          class="flex-1 px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500" />
+      </div>
+
+      <!-- Title List -->
+      <div class="flex-1 overflow-y-auto px-6 py-4">
+        <div v-if="tmdbLoading" class="flex items-center justify-center py-12">
+          <span class="w-8 h-8 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></span>
+        </div>
+
+        <div v-else-if="!tmdbSortedTitles.length" class="text-center py-12 text-slate-600">
+          <p class="text-sm">{{ selectedPl ? 'No titles found' : 'Select a playlist to view titles' }}</p>
+          <p class="text-xs text-slate-700 mt-2">Debug: tmdbTitles.length = {{ tmdbTitles.length }}, selectedPl = {{ selectedPl }}</p>
+        </div>
+
+        <div v-else class="space-y-2">
+          <div v-for="title in tmdbSortedTitles" :key="title.title"
+            @click="openTmdbEditModal(title)"
+            class="flex items-center gap-4 p-4 bg-[#1a1d27] border border-[#2e3250] rounded-xl hover:border-indigo-500/50 cursor-pointer transition-colors">
+
+            <!-- Poster -->
+            <div class="w-16 h-24 shrink-0 rounded-lg overflow-hidden bg-[#22263a] flex items-center justify-center">
+              <img v-if="title.poster" :src="title.poster" class="w-full h-full object-cover" />
+              <span v-else class="text-2xl text-slate-600">🎬</span>
+            </div>
+
+            <!-- Info -->
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1">
+                <h3 class="text-sm font-semibold text-slate-100 truncate">{{ decodeHtmlEntities(title.title) }}</h3>
+                <span :class="['text-[9px] px-2 py-0.5 rounded-full border', getTmdbStatusBadge(title.status).class]">
+                  {{ getTmdbStatusBadge(title.status).icon }} {{ getTmdbStatusBadge(title.status).label }}
+                </span>
+                <span v-if="title.manual_override" class="text-[9px] px-2 py-0.5 rounded-full border bg-purple-500/20 text-purple-400 border-purple-500/30">
+                  ✏️ Manual
+                </span>
+              </div>
+
+              <div class="flex items-center gap-3 text-xs text-slate-500">
+                <span>{{ title.programme_count }} programme{{ title.programme_count !== 1 ? 's' : '' }}</span>
+                <span v-if="title.runtime_minutes" class="text-amber-400">• {{ title.runtime_minutes }} min</span>
+                <span v-if="title.media_type">• {{ title.media_type === 'tv' ? 'TV Show' : 'Movie' }}</span>
+                <span v-if="title.tmdb_id">• TMDB ID: {{ title.tmdb_id }}</span>
+                <span v-if="title.episode_count">• {{ title.episode_count }} episodes</span>
+                <span v-if="title.fetched_at">• {{ new Date(title.fetched_at).toLocaleDateString() }}</span>
+              </div>
+
+              <div v-if="title.channels && title.channels.length" class="flex flex-wrap gap-1 mt-2">
+                <span v-for="(ch, idx) in title.channels" :key="idx"
+                  class="text-[10px] px-2 py-0.5 rounded bg-slate-500/10 border border-slate-500/20 text-slate-400">
+                  {{ ch.name }} : {{ ch.group }}
+                </span>
+              </div>
+
+              <p v-if="title.description" class="text-xs text-slate-600 mt-1 line-clamp-2">{{ title.description }}</p>
+            </div>
+
+            <!-- Arrow -->
+            <div class="shrink-0 text-slate-600">→</div>
           </div>
         </div>
       </div>
@@ -943,6 +1193,14 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
         </div>
       </div>
     </Teleport>
+
+    <!-- TMDB Match Modal -->
+    <TmdbMatchModal
+      v-if="tmdbShowModal"
+      :title="tmdbEditingTitle"
+      @close="closeTmdbModal"
+      @save="handleTmdbSave"
+    />
 
   </div>
 </template>

@@ -245,57 +245,11 @@ function copyUrl(url, key) {
 const TABS = [
   { id: 'hdhr',        label: 'HDHomeRun',   icon: '📡' },
   { id: 'scheduler',   label: 'Scheduler',    icon: '🕐' },
-  { id: 'regions',     label: 'Regions',      icon: '🌍' },
   { id: 'proxy',       label: 'Proxy',        icon: '⚡' },
   { id: 'backup',      label: 'Backup',       icon: '💾' },
   { id: 'diagnostics',  label: 'Diagnostics',  icon: '🔧' },
   { id: 'architecture', label: 'Architecture', icon: '🗺️' },
 ]
-
-// ── Region Mappings ──────────────────────────────────────────────────────────
-const regionMappings = ref({})
-const regionFrom = ref('')
-const regionTo = ref('')
-const regionSaving = ref(false)
-const regionSaved = ref(false)
-const regionError = ref('')
-
-async function loadRegionMappings() {
-  try {
-    const s = await api.getSettings()
-    if (s.region_mappings) {
-      regionMappings.value = JSON.parse(s.region_mappings)
-    }
-  } catch {}
-}
-
-function addRegionMapping() {
-  if (!regionFrom.value || !regionTo.value) return
-  regionMappings.value = { ...regionMappings.value, [regionFrom.value.toUpperCase()]: regionTo.value.toUpperCase() }
-  regionFrom.value = ''
-  regionTo.value = ''
-}
-
-function removeRegionMapping(key) {
-  const updated = { ...regionMappings.value }
-  delete updated[key]
-  regionMappings.value = updated
-}
-
-async function saveRegionMappings() {
-  regionSaving.value = true
-  regionError.value = ''
-  regionSaved.value = false
-  try {
-    await api.saveSettings({ region_mappings: JSON.stringify(regionMappings.value) })
-    regionSaved.value = true
-    setTimeout(() => { regionSaved.value = false }, 2500)
-  } catch (e) {
-    regionError.value = e.message
-  } finally {
-    regionSaving.value = false
-  }
-}
 
 // ── Proxy settings ───────────────────────────────────────────────────────────
 const proxySettings     = ref({ bufferSeconds: 0 })
@@ -387,7 +341,7 @@ async function clearDeadChannels() {
   } finally { deadClearing.value = false }
 }
 
-onMounted(async () => { await load(); await loadProxySettings(); await loadRegionMappings() })
+onMounted(async () => { await load(); await loadProxySettings() })
 </script>
 
 <template>
@@ -694,82 +648,6 @@ onMounted(async () => { await load(); await loadProxySettings(); await loadRegio
     </div>
 
     </template> <!-- end scheduler tab -->
-
-    <!-- Region Mappings Tab -->
-    <template v-if="tab === 'regions'">
-    <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6">
-      <div class="flex items-center gap-3 mb-5">
-        <div class="w-9 h-9 rounded-xl bg-green-500/20 text-green-400 flex items-center justify-center text-lg shrink-0">🌍</div>
-        <div>
-          <h2 class="text-sm font-bold text-slate-100">Region Mappings</h2>
-          <p class="text-xs text-slate-500">Map channel prefixes to standardized country codes for better cross-source variant matching</p>
-        </div>
-      </div>
-
-      <!-- Current Mappings -->
-      <div class="mb-5">
-        <p class="text-xs text-slate-500 mb-3">Current mappings ({{ Object.keys(regionMappings).length }})</p>
-        <div v-if="!Object.keys(regionMappings).length" class="text-center py-8 text-slate-600 text-sm">
-          No region mappings yet — add one below
-        </div>
-        <div v-else class="space-y-2">
-          <div v-for="(to, from) in regionMappings" :key="from"
-            class="flex items-center gap-3 bg-[#13151f] border border-[#2e3250] rounded-lg px-4 py-2.5">
-            <span class="font-mono text-sm text-slate-300 flex-1">{{ from }}</span>
-            <span class="text-slate-600">→</span>
-            <span class="font-mono text-sm text-indigo-300 flex-1">{{ to }}</span>
-            <button @click="removeRegionMapping(from)"
-              class="px-2 py-1 text-xs bg-red-500/10 border border-red-900/40 hover:border-red-500 text-red-400 rounded transition-colors">
-              ✕
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Add New Mapping -->
-      <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4 mb-5">
-        <p class="text-sm font-semibold text-slate-100 mb-3">Add New Mapping</p>
-        <div class="flex items-end gap-3 flex-wrap">
-          <div class="flex-1 min-w-32">
-            <label class="block text-xs text-slate-500 mb-1.5">Channel Prefix</label>
-            <input v-model="regionFrom" placeholder="USA, SS, DSTV"
-              class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500"
-              @keyup.enter="addRegionMapping" />
-          </div>
-          <div class="flex-1 min-w-32">
-            <label class="block text-xs text-slate-500 mb-1.5">Maps To</label>
-            <input v-model="regionTo" placeholder="US, ZA"
-              class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500"
-              @keyup.enter="addRegionMapping" />
-          </div>
-          <button @click="addRegionMapping" :disabled="!regionFrom || !regionTo"
-            class="px-4 py-2 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors">
-            Add
-          </button>
-        </div>
-        <p class="text-xs text-slate-600 mt-2">Example: Map "USA" → "US" so "USA History" and "US History" are treated as variants</p>
-      </div>
-
-      <!-- How it works -->
-      <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4 space-y-2 text-xs text-slate-500 mb-5">
-        <p class="font-semibold text-slate-400">How it works</p>
-        <p>• Channel names like <code class="text-slate-300">USA: Discovery</code> are normalized to <code class="text-slate-300">us_discovery</code></p>
-        <p>• Mappings ensure <code class="text-slate-300">USA: Discovery</code> and <code class="text-slate-300">US: Discovery</code> have the same normalized name</p>
-        <p>• This allows the system to find variants across different sources with different naming conventions</p>
-        <p>• After changing mappings, <strong class="text-amber-400">refresh your sources</strong> to regenerate normalized names</p>
-      </div>
-
-      <p v-if="regionError" class="text-xs text-red-400 mb-3">⚠ {{ regionError }}</p>
-
-      <div class="flex items-center gap-3">
-        <button @click="saveRegionMappings" :disabled="regionSaving"
-          class="px-6 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors">
-          {{ regionSaving ? 'Saving…' : 'Save Mappings' }}
-        </button>
-        <span v-if="regionSaved" class="text-xs text-green-400">✓ Saved — refresh sources to apply</span>
-      </div>
-    </div>
-    </template> <!-- end regions tab -->
 
     <!-- Proxy Tab -->
     <template v-if="tab === 'proxy'">
