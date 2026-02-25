@@ -136,7 +136,11 @@ async function clearMatch() {
         <div class="flex items-center gap-3 px-5 py-4 border-b border-[#2e3250] shrink-0">
           <div class="flex-1">
             <h2 class="text-sm font-bold text-slate-100">{{ decodeHtmlEntities(title.title) }}</h2>
-            <p class="text-xs text-slate-500 mt-0.5">{{ title.programme_count }} programme{{ title.programme_count !== 1 ? 's' : '' }} in XMLTV</p>
+            <div class="flex items-center gap-3 text-xs text-slate-500 mt-0.5">
+              <span>{{ title.programme_count }} programme{{ title.programme_count !== 1 ? 's' : '' }} in XMLTV</span>
+              <span v-if="title.runtime_minutes" class="text-amber-400">• {{ title.runtime_minutes }} min</span>
+              <span v-if="title.episode_info" class="text-cyan-400">• {{ title.episode_info }}</span>
+            </div>
           </div>
           <button @click="emit('close')" class="text-slate-500 hover:text-slate-300 text-lg leading-none">✕</button>
         </div>

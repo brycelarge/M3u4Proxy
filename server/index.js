@@ -1802,6 +1802,7 @@ app.get('/api/tmdb/titles/:playlistId', async (req, res) => {
     const titleCounts = new Map()
     const titleChannels = new Map() // Track which channels have each title
     const titleRuntimes = new Map() // Track runtime for each title (in minutes)
+    const titleEpisodes = new Map() // Track episode info for each title
     const progRe = /<programme\b[^>]*>[\s\S]*?<\/programme>/g
     let matchedProgs = 0
     let skippedNewsAndSports = 0
@@ -1831,6 +1832,11 @@ app.get('/api/tmdb/titles/:playlistId', async (req, res) => {
             if (runtimeMinutes > 0) {
               titleRuntimes.set(prog.title, runtimeMinutes)
             }
+          }
+
+          // Track episode info if available
+          if (prog.episode && !titleEpisodes.has(prog.title)) {
+            titleEpisodes.set(prog.title, prog.episode)
           }
 
           // Track which channels have this title
@@ -1891,7 +1897,8 @@ app.get('/api/tmdb/titles/:playlistId', async (req, res) => {
         manual_override: enrich?.manual_override || false,
         blocked: enrich?.blocked || false,
         channels: channels, // Array of {name, group}
-        runtime_minutes: titleRuntimes.get(title) || null
+        runtime_minutes: titleRuntimes.get(title) || null,
+        episode_info: titleEpisodes.get(title) || null
       })
     }
 

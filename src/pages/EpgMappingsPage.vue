@@ -1025,6 +1025,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
               <div class="flex items-center gap-3 text-xs text-slate-500">
                 <span>{{ title.programme_count }} programme{{ title.programme_count !== 1 ? 's' : '' }}</span>
                 <span v-if="title.runtime_minutes" class="text-amber-400">• {{ title.runtime_minutes }} min</span>
+                <span v-if="title.episode_info" class="text-cyan-400">• {{ title.episode_info }}</span>
                 <span v-if="title.media_type">• {{ title.media_type === 'tv' ? 'TV Show' : 'Movie' }}</span>
                 <span v-if="title.tmdb_id">• TMDB ID: {{ title.tmdb_id }}</span>
                 <span v-if="title.episode_count">• {{ title.episode_count }} episodes</span>
