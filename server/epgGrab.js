@@ -138,10 +138,48 @@ function spawnGrabber(configPath, channelsFile, outputFile, onLine) {
 }
 
 // ── Merge XMLTV files ─────────────────────────────────────────────────────────
-function mergeXmltvFiles(files) {
+function mergeXmltvFiles(files, preserveExisting = false) {
   const seenChannels = new Set()
   const channelBlocks = []
   const programmeBlocks = []
+
+  // If preserving existing data, load current guide.xml first
+  if (preserveExisting && existsSync(GUIDE_XML)) {
+    try {
+      const existingContent = readFileSync(GUIDE_XML, 'utf8')
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+
+      // Extract existing channels
+      const chanRe = /<channel\b[^>]*>[\s\S]*?<\/channel>/g
+      let m
+      while ((m = chanRe.exec(existingContent)) !== null) {
+        const idMatch = m[0].match(/\bid="([^"]*)"/)
+        const id = idMatch?.[1]
+        if (id && !seenChannels.has(id)) {
+          seenChannels.add(id)
+          channelBlocks.push(m[0])
+        }
+      }
+
+      // Extract existing programmes that are not older than 2 days
+      const progRe = /<programme\b[\s\S]*?<\/programme>/g
+      while ((m = progRe.exec(existingContent)) !== null) {
+        const stopMatch = m[0].match(/\bstop="([^"]*)"/)
+        if (stopMatch) {
+          const stopTime = stopMatch[1].replace(/\s.*/, '')
+          const stopDate = new Date(
+            `${stopTime.slice(0,4)}-${stopTime.slice(4,6)}-${stopTime.slice(6,8)}T${stopTime.slice(8,10)}:${stopTime.slice(10,12)}:${stopTime.slice(12,14)}Z`
+          )
+          // Keep programmes that ended less than 2 days ago
+          if (stopDate >= twoDaysAgo) {
+            programmeBlocks.push(m[0])
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[epg-grab] Error preserving existing guide.xml:', e.message)
+    }
+  }
 
   for (const f of files) {
     if (!existsSync(f)) continue
@@ -222,7 +260,7 @@ export async function runGrab({ onProgress } = {}) {
     const flushGuide = () => {
       if (!outputFiles.length) return
       try {
-        const merged = mergeXmltvFiles(outputFiles)
+        const merged = mergeXmltvFiles(outputFiles, true) // Preserve existing data
         writeFileSync(GUIDE_XML, merged, 'utf8')
         grabState.guideExists = true
         grabState.guideUrl    = '/guide.xml'
@@ -276,9 +314,9 @@ export async function runGrab({ onProgress } = {}) {
       throw new Error('No EPG data was retrieved. All sites failed. Check that config files exist (run EPG Sync first).')
     }
 
-    // Final merge (deduplicates across all sites)
+    // Final merge (deduplicates across all sites and preserves existing data)
     log(`Finalising guide.xml from ${outputFiles.length} sites…`)
-    const merged = mergeXmltvFiles(outputFiles)
+    const merged = mergeXmltvFiles(outputFiles, true) // Preserve existing data
     writeFileSync(GUIDE_XML, merged, 'utf8')
 
     // Clean up tmp files
