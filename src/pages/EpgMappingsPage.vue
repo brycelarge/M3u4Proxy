@@ -411,25 +411,23 @@ const epgByDate = computed(() => {
 
 // ── TMDB Matches Tab Functions ──────────────────────────────────────────────
 async function loadTmdbTitles() {
-  if (!selectedPl.value) {
-    console.log('[tmdb] No playlist selected')
-    return
-  }
-  tmdbLoading.value = true
-  console.log('[tmdb] Loading titles for playlist:', selectedPl.value)
-  try {
-    const params = new URLSearchParams()
-    if (tmdbFilterStatus.value !== 'all') params.append('filter', tmdbFilterStatus.value)
-    if (tmdbSearchQuery.value) params.append('search', tmdbSearchQuery.value)
+  if (!selectedPl.value) return
 
-    const url = `/api/tmdb/titles/${selectedPl.value}?${params}`
-    console.log('[tmdb] Fetching:', url)
+  tmdbLoading.value = true
+  try {
+    // Load ALL titles from API without filters - we'll filter client-side
+    const url = `/api/tmdb/titles/${selectedPl.value}`
     const response = await fetch(url)
     const data = await response.json()
-    console.log('[tmdb] Response:', data)
     tmdbTitles.value = data.titles || []
-    tmdbStats.value = data.stats || { matched: 0, not_found: 0, unmatched: 0, blocked: 0 }
-    console.log('[tmdb] Loaded', tmdbTitles.value.length, 'titles')
+
+    // Calculate stats from all titles
+    tmdbStats.value = {
+      matched: tmdbTitles.value.filter(t => t.status === 'matched').length,
+      unmatched: tmdbTitles.value.filter(t => t.status === 'unmatched').length,
+      not_found: tmdbTitles.value.filter(t => t.status === 'not_found').length,
+      blocked: tmdbTitles.value.filter(t => t.status === 'blocked').length
+    }
   } catch (e) {
     console.error('[tmdb] Error loading TMDB titles:', e)
   } finally {
@@ -437,20 +435,35 @@ async function loadTmdbTitles() {
   }
 }
 
+// Client-side filtering and sorting for instant response
 const tmdbSortedTitles = computed(() => {
-  const sorted = [...tmdbTitles.value]
+  let filtered = [...tmdbTitles.value]
+
+  // Apply status filter
+  if (tmdbFilterStatus.value !== 'all') {
+    filtered = filtered.filter(t => t.status === tmdbFilterStatus.value)
+  }
+
+  // Apply search filter
+  if (tmdbSearchQuery.value) {
+    const query = tmdbSearchQuery.value.toLowerCase()
+    filtered = filtered.filter(t => t.title.toLowerCase().includes(query))
+  }
+
+  // Apply sorting
   if (tmdbSortBy.value === 'title') {
-    sorted.sort((a, b) => a.title.localeCompare(b.title))
+    filtered.sort((a, b) => a.title.localeCompare(b.title))
   } else if (tmdbSortBy.value === 'count') {
-    sorted.sort((a, b) => b.programme_count - a.programme_count)
+    filtered.sort((a, b) => b.programme_count - a.programme_count)
   } else if (tmdbSortBy.value === 'date') {
-    sorted.sort((a, b) => {
+    filtered.sort((a, b) => {
       if (!a.fetched_at) return 1
       if (!b.fetched_at) return -1
       return new Date(b.fetched_at) - new Date(a.fetched_at)
     })
   }
-  return sorted
+
+  return filtered
 })
 
 function getTmdbStatusBadge(status) {
@@ -955,7 +968,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
           <option v-for="p in playlists.filter(p => p.playlist_type !== 'vod')" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
         </select>
 
-        <select v-model="tmdbFilterStatus" @change="loadTmdbTitles"
+        <select v-model="tmdbFilterStatus"
           class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-200 outline-none focus:border-indigo-500">
           <option value="all">All Status</option>
           <option value="matched">Matched</option>
@@ -971,7 +984,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
           <option value="date">Sort: Last Fetched</option>
         </select>
 
-        <input v-model="tmdbSearchQuery" @input="loadTmdbTitles" placeholder="Search titles..."
+        <input v-model="tmdbSearchQuery" placeholder="Search titles..."
           class="flex-1 px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500" />
       </div>
 
