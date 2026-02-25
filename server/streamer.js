@@ -182,7 +182,7 @@ async function pump(session) {
 
             // Check if we've reached the 50% threshold
             if (bufferAge >= (targetMs * 0.5)) {
-              console.log(`[stream] Buffer ready (${bufferAge}ms). Flushing ${session.preBuffer.length} chunks to clients.`)
+              console.log(`[stream] Buffer ready (${bufferAge}ms), flushing to clients`)
 
               // Simple PES start code detection (0x00 0x00 0x01) which often indicates a new frame/keyframe
               const hasPesStart = (buf, startIdx) => {
@@ -210,9 +210,6 @@ async function pump(session) {
                   if (pusi && hasPesStart(combined, i)) {
                     syncOffset = i
                     foundKeyframe = true
-                    if (i > 0) {
-                      console.log(`[stream] Found keyframe sync point at offset ${i} in buffer, trimming ${i} bytes`)
-                    }
                     break
                   }
                 }
@@ -223,7 +220,6 @@ async function pump(session) {
                 for (let i = 0; i <= combined.length - 376; i++) {
                   if (combined[i] === 0x47 && combined[i + 188] === 0x47) {
                     syncOffset = i
-                    console.log(`[stream] No keyframe in buffer, falling back to basic sync at offset ${i}`)
                     break
                   }
                 }
@@ -254,7 +250,6 @@ async function pump(session) {
             // Start collecting only once we hit a keyframe to ensure the burst is decodable
             if (!session._rollingBufferStarted && isKeyframe) {
               session._rollingBufferStarted = true
-              console.log(`[stream] Keyframe found. Starting rolling buffer for "${session.channelName}"`)
             }
 
             if (session._rollingBufferStarted) {
@@ -310,25 +305,15 @@ async function pump(session) {
 
 // ── Start or join a stream session ────────────────────────────────────────────
 export async function connectClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null) {
-  console.log(`[stream] connectClient called: channelId=${channelId}, channelName=${channelName}`)
-
   // Check if response is already sent
   if (res.headersSent) {
-    console.log(`[stream] Response headers already sent, cannot connect client`)
     throw new Error('Response headers already sent')
-  }
-
-  // Debug: Check if session exists
-  console.log(`[stream] Checking for existing session: channelId=${channelId}, exists=${sessions.has(channelId)}, total sessions=${sessions.size}`)
-  if (sessions.size > 0) {
-    console.log(`[stream] Active session IDs:`, [...sessions.keys()])
   }
 
   // Reuse existing session (no limit check needed - not creating new upstream connection)
   if (sessions.has(channelId)) {
     const session = sessions.get(channelId)
-    console.log(`[stream] ✓ SHARED SESSION: Client joining "${session.channelName}" (now ${session.clients.size + 1} clients total)`)
-    console.log(`[stream] Reusing existing upstream connection - no new source stream needed`)
+    console.log(`[stream] ✓ Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
 
     // Set streaming headers
     res.setHeader('Content-Type', 'video/mp2t')
@@ -345,7 +330,6 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
     // 2. Send the Bridge Data (The Past)
     if (session._recentChunks.length > 0) {
       const bridgeData = Buffer.concat(session._recentChunks)
-      console.log(`[stream] Bursting ${bridgeData.length} bytes (${session._recentChunks.length} chunks) to joining client`)
       res.write(bridgeData)
     }
 
@@ -372,8 +356,7 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
   }
 
   const bufferSecs = getBufferSeconds()
-  console.log(`[stream] Opening "${channelName}" → ${upstreamUrl}`)
-  console.log(`[stream] Buffer: ${bufferSecs} seconds${bufferSecs === 0 ? ' (disabled)' : ''}`)
+  console.log(`[stream] Opening "${channelName}" (buffer: ${bufferSecs}s)`)
 
   const session = new Session(channelId, upstreamUrl, channelName, sourceId, username)
   sessions.set(channelId, session)
