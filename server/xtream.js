@@ -48,9 +48,39 @@ function getPlaylist(id) {
 }
 
 function getChannels(playlistId) {
-  let channels = db.prepare(
-    'SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id'
-  ).all(playlistId)
+  // Get all channels with their normalized names and deduplicate
+  const allChannels = db.prepare(`
+    SELECT
+      pc.*,
+      sc.normalized_name,
+      COALESCE(s.priority, 999) as source_priority,
+      CASE sc.quality
+        WHEN 'UHD' THEN 1
+        WHEN 'FHD' THEN 2
+        WHEN 'HD' THEN 3
+        WHEN 'SD' THEN 4
+        ELSE 5
+      END as quality_order
+    FROM playlist_channels pc
+    LEFT JOIN source_channels sc ON sc.url = pc.url
+    LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+    WHERE pc.playlist_id = ?
+    ORDER BY
+      sc.normalized_name,
+      source_priority ASC,
+      quality_order ASC,
+      pc.sort_order, pc.id
+  `).all(playlistId)
+
+  // Deduplicate by normalized_name - keep only the first (best) variant
+  // Channels without normalized_name are kept as-is (no deduplication)
+  const seen = new Set()
+  let channels = allChannels.filter(ch => {
+    if (!ch.normalized_name) return true // Keep channels without normalized_name
+    if (seen.has(ch.normalized_name)) return false // Skip duplicates
+    seen.add(ch.normalized_name)
+    return true
+  })
 
   const playlist = db.prepare('SELECT group_order FROM playlists WHERE id = ?').get(playlistId)
   if (playlist?.group_order) {

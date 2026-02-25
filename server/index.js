@@ -15,7 +15,7 @@ import { registerHdhrRoutes, startAllDeviceServers } from './hdhr.js'
 import { registerXtreamRoutes } from './xtream.js'
 import { syncEpgSites, getLastSynced, getSiteList } from './epgSync.js'
 import { runGrab, grabState, GUIDE_XML, EPG_DIR as GRAB_EPG_DIR } from './epgGrab.js'
-import { enrichGuide, enrichState, injectEnrichment, extractTitle, parseEpisodeNum } from './epgEnrich.js'
+import { enrichGuide, enrichState, parseEpisodeNum } from './epgEnrich.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -239,20 +239,27 @@ async function refreshSourceCache(sourceId) {
  * Preserves and normalizes country prefixes to distinguish geographic variants
  */
 function normalizeChannelName(name) {
-  // Country code normalization map
-  const COUNTRY_CODE_MAP = {
-    'USA': 'US',
-    'UK': 'GB',
-    'UAE': 'AE',
-    'RSA': 'ZA',
-    'SS': 'SS', // SuperSport
+  // Load region mappings from settings (cached for performance)
+  let regionMappings = {}
+  try {
+    const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('region_mappings')
+    if (setting?.value) {
+      regionMappings = JSON.parse(setting.value)
+    }
+  } catch (e) {
+    // Use defaults if settings not available
+    regionMappings = {
+      'USA': 'US',
+      'UK': 'GB',
+      'UAE': 'AE',
+      'RSA': 'ZA',
+      'SS': 'ZA',
+      'DSTV': 'ZA'
+    }
   }
 
-  // Common country/region codes to detect
-  const GEO_PATTERNS = [
-    'US', 'USA', 'UK', 'GB', 'CA', 'AU', 'NZ', 'ZA', 'RSA', 'IN', 'PK',
-    'AR', 'BR', 'MX', 'ES', 'FR', 'DE', 'IT', 'NL', 'BE', 'UAE', 'SS'
-  ]
+  // Build patterns from mapping keys
+  const GEO_PATTERNS = Object.keys(regionMappings).sort((a, b) => b.length - a.length) // Longest first
 
   let normalized = name.toLowerCase()
   let geoPrefix = ''
@@ -262,7 +269,7 @@ function normalizeChannelName(name) {
     const pattern = new RegExp(`^${code}[:\\s_-]+`, 'i')
     if (pattern.test(normalized)) {
       const matched = code.toUpperCase()
-      const standardCode = COUNTRY_CODE_MAP[matched] || matched
+      const standardCode = regionMappings[matched] || matched
       geoPrefix = standardCode.toLowerCase() + '_'
       normalized = normalized.replace(pattern, '')
       break
@@ -874,7 +881,40 @@ app.post('/api/playlists/:id/build', (req, res) => {
     console.log(`[playlist] Auto-set output_path="${playlist.output_path}" for "${playlist.name}"`)
   }
 
-  let channels = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id').all(playlist.id)
+  // Get all channels with their normalized names and deduplicate
+  const allChannels = db.prepare(`
+    SELECT
+      pc.*,
+      sc.normalized_name,
+      COALESCE(s.priority, 999) as source_priority,
+      CASE sc.quality
+        WHEN 'UHD' THEN 1
+        WHEN 'FHD' THEN 2
+        WHEN 'HD' THEN 3
+        WHEN 'SD' THEN 4
+        ELSE 5
+      END as quality_order
+    FROM playlist_channels pc
+    LEFT JOIN source_channels sc ON sc.url = pc.url
+    LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+    WHERE pc.playlist_id = ?
+    ORDER BY
+      sc.normalized_name,
+      source_priority ASC,
+      quality_order ASC,
+      pc.sort_order, pc.id
+  `).all(playlist.id)
+
+  // Deduplicate by normalized_name - keep only the first (best) variant
+  // Channels without normalized_name are kept as-is (no deduplication)
+  const seen = new Set()
+  let channels = allChannels.filter(ch => {
+    if (!ch.normalized_name) return true // Keep channels without normalized_name
+    if (seen.has(ch.normalized_name)) return false // Skip duplicates
+    seen.add(ch.normalized_name)
+    return true
+  })
+
   const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
   const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
   if (playlist.group_order) {
@@ -925,9 +965,11 @@ app.get('/api/playlists/:id/m3u', (req, res) => {
   `).all(playlist.id)
 
   // Deduplicate by normalized_name - keep only the first (best) variant
+  // Channels without normalized_name are kept as-is (no deduplication)
   const seen = new Set()
   let channels = allChannels.filter(ch => {
-    if (!ch.normalized_name || seen.has(ch.normalized_name)) return false
+    if (!ch.normalized_name) return true // Keep channels without normalized_name
+    if (seen.has(ch.normalized_name)) return false // Skip duplicates
     seen.add(ch.normalized_name)
     return true
   })
@@ -962,19 +1004,50 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
 
-  // Get playlist channels with their EPG mappings
-  const channels = db.prepare(`
+  // Get all channels with their normalized names and deduplicate
+  const allChannels = db.prepare(`
     SELECT pc.*,
+           sc.normalized_name,
+           COALESCE(s.priority, 999) as source_priority,
+           CASE sc.quality
+             WHEN 'UHD' THEN 1
+             WHEN 'FHD' THEN 2
+             WHEN 'HD' THEN 3
+             WHEN 'SD' THEN 4
+             ELSE 5
+           END as quality_order,
            CASE
              WHEN pc.custom_tvg_id != '' THEN pc.custom_tvg_id
              WHEN em.target_tvg_id IS NOT NULL THEN em.target_tvg_id
              ELSE pc.tvg_id
            END as epg_id
     FROM playlist_channels pc
+    LEFT JOIN source_channels sc ON sc.url = pc.url
+    LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
     LEFT JOIN epg_mappings em ON (em.source_tvg_id = pc.tvg_id OR em.source_tvg_id = pc.custom_tvg_id)
     WHERE pc.playlist_id = ?
-    ORDER BY pc.sort_order, pc.id
+    ORDER BY
+      sc.normalized_name,
+      source_priority ASC,
+      quality_order ASC,
+      pc.sort_order, pc.id
   `).all(playlist.id)
+
+  // Deduplicate by normalized_name - keep only the first (best) variant
+  // Channels without normalized_name are kept as-is (no deduplication)
+  const seen = new Set()
+  const channels = allChannels.filter(ch => {
+    if (!ch.normalized_name) return true // Keep channels without normalized_name
+    if (seen.has(ch.normalized_name)) return false // Skip duplicates
+    seen.add(ch.normalized_name)
+    return true
+  })
+
+  // Re-sort by sort_order after deduplication
+  channels.sort((a, b) => {
+    if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
+    return a.id - b.id
+  })
 
   // Filter to channels with EPG data
   const mappedChannels = channels.filter(ch => ch.epg_id && ch.epg_id.trim())
@@ -1034,6 +1107,9 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
     }
   })
 
+  // Get TMDB enrichment data
+  const { showMap, epMap } = getEnrichmentMaps()
+
   // From cache
   for (const row of cacheRows) {
     const progRe = /<programme\b[^>]*channel="([^"]*)"[^>]*>[\s\S]*?<\/programme>/g
@@ -1050,7 +1126,22 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
           progContent = progContent.replace(`channel="${channelId}"`, `channel="${idMapping[channelId]}"`)
         }
 
-        // Fix any icon URLs to use our proxy
+        // Parse and apply TMDB enrichment
+        const prog = parseProgBlock(progContent)
+        const enriched = applyEnrichment(prog, showMap, epMap)
+
+        // Add enriched poster if available and not already present
+        if (enriched.icon && !/<icon\b/.test(progContent)) {
+          const proxyUrl = `http://${req.headers.host}/api/logo?url=${encodeURIComponent(enriched.icon)}`
+          progContent = progContent.replace('</programme>', `  <icon src="${proxyUrl}" />\n</programme>`)
+        }
+
+        // Add enriched description if available and not already present
+        if (enriched.desc && !/<desc\b/.test(progContent)) {
+          progContent = progContent.replace('</programme>', `  <desc>${escapeXml(enriched.desc)}</desc>\n</programme>`)
+        }
+
+        // Fix any existing icon URLs to use our proxy
         const iconMatch = progContent.match(/<icon\s+src="([^"]+)"\s*\/>/)
         if (iconMatch) {
           const originalUrl = iconMatch[1]
@@ -1238,7 +1329,7 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
     // Get playlist channels, deduplicated by normalized_name (one channel per normalized name)
     const allChannels = db.prepare(`
       SELECT
-        pc.id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.custom_logo, pc.custom_tvg_id, pc.epg_source_id,
+        pc.id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.custom_logo, pc.custom_tvg_id, pc.epg_source_id, pc.sort_order,
         sc.normalized_name,
         COALESCE(s.priority, 999) as source_priority,
         CASE sc.quality
@@ -1253,15 +1344,16 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
       LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
       WHERE pc.playlist_id = ?
       ORDER BY
-        sc.normalized_name,
-        source_priority ASC,
-        quality_order ASC
+        pc.sort_order ASC,
+        pc.id ASC
     `).all(playlist_id)
 
     // Deduplicate by normalized_name - keep only the first (best) variant
+    // Channels without normalized_name are kept as-is (no deduplication)
     const seen = new Set()
     const playlistChannels = allChannels.filter(ch => {
-      if (!ch.normalized_name || seen.has(ch.normalized_name)) return false
+      if (!ch.normalized_name) return true // Keep channels without normalized_name
+      if (seen.has(ch.normalized_name)) return false // Skip duplicates
       seen.add(ch.normalized_name)
       return true
     })
@@ -2974,6 +3066,21 @@ app.get('/{*path}', (req, res) => {
 
 // Run migrations before starting server
 await runMigrations(db)
+
+// Initialize default region mappings if not set
+const regionMappingsSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('region_mappings')
+if (!regionMappingsSetting) {
+  const defaultMappings = {
+    'USA': 'US',
+    'UK': 'GB',
+    'UAE': 'AE',
+    'RSA': 'ZA',
+    'SS': 'ZA',
+    'DSTV': 'ZA'
+  }
+  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('region_mappings', JSON.stringify(defaultMappings))
+  console.log('[settings] Initialized default region mappings')
+}
 
 app.listen(PORT, () => {
   console.log(`M3u4Proxy server running on http://localhost:${PORT}`)

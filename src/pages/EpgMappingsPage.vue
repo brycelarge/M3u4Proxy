@@ -578,6 +578,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
               <th class="w-8 px-3 py-2.5">
                 <input type="checkbox" :checked="allChecked" :indeterminate="someChecked" @change="toggleAll" class="accent-indigo-500 cursor-pointer" />
               </th>
+              <th class="px-3 py-2.5 text-center text-slate-400 font-medium w-12">#</th>
               <th @click="setSort('name')" class="px-3 py-2.5 text-left text-slate-400 font-medium cursor-pointer hover:text-slate-200 select-none">
                 Channel <span class="text-slate-600">{{ sortCol === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}</span>
               </th>
@@ -602,6 +603,10 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
               <td class="px-3 py-2" @click.stop>
                 <input type="checkbox" :checked="checked.has(m.channel_id)"
                   @change="toggleOne(m.channel_id)" class="accent-indigo-500 cursor-pointer" />
+              </td>
+
+              <td class="px-3 py-2 text-center font-mono text-slate-500 text-xs">
+                {{ m.sort_order ? m.sort_order : '—' }}
               </td>
 
               <td class="px-3 py-2">
