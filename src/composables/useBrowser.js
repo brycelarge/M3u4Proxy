@@ -109,6 +109,7 @@ export function useBrowser() {
       return playlistTotalCount.value
     }
     // Otherwise calculate from selectionMap (for source browsing mode)
+    // Count ALL selections, including from groups not currently loaded (e.g., variants from other sources)
     const groupCountMap = Object.fromEntries(groups.value.map(g => [g.name, g.count]))
     return Object.entries(selectionMap.value).reduce((sum, [name, s]) => {
       if (s instanceof Set) return sum + s.size
@@ -444,10 +445,27 @@ export function useBrowser() {
 
   // ── Selection ────────────────────────────────────────────────────────────────
   function toggleChannel(ch) {
-    const g = activeGroup.value
-    const s = new Set(selectionMap.value[g] instanceof Set ? selectionMap.value[g] : [])
-    s.has(ch.id) ? s.delete(ch.id) : s.add(ch.id)
-    selectionMap.value = { ...selectionMap.value, [g]: s }
+    // Use the channel's group_title if available, otherwise use activeGroup
+    const g = ch.group_title || activeGroup.value
+    const currentMap = selectionMap.value
+    const s = new Set(currentMap[g] instanceof Set ? currentMap[g] : [])
+
+    if (s.has(ch.id)) {
+      s.delete(ch.id)
+    } else {
+      s.add(ch.id)
+    }
+
+    // Create completely new object to ensure Vue reactivity
+    const newMap = {}
+    for (const key in currentMap) {
+      newMap[key] = currentMap[key]
+    }
+    newMap[g] = s
+    selectionMap.value = newMap
+
+    // Save to localStorage
+    saveSelection()
   }
 
   function selectAll() {

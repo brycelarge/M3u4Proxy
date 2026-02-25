@@ -8,7 +8,7 @@ import ChannelTable       from '../components/ChannelTable.vue'
 import ReviewSelectionModal from '../components/ReviewSelectionModal.vue'
 
 const {
-  loading, error, groups, channels,
+  loading, error, groups, channels, selectionMap,
   search, groupSearch, activeGroup, loadingGroup, copied, urlCopied,
   viewMode, exporting, gridCols,
   currentSelected, selectedCount, totalCount, groupState, selectionCounts,
@@ -132,14 +132,18 @@ async function findOtherSourcesBulk() {
   channelVariants.value = []
 
   try {
-    // Get all selected channels (await since it's async)
     const selected = await getAllSelectedChannels()
-    const channelIds = selected.map(ch => ch.id)
 
-    console.log(`[Find Other Sources] Searching for variants of ${channelIds.length} channels`)
-    console.log(`[Find Other Sources] Channel IDs:`, channelIds.slice(0, 5), '...')
+    // Deduplicate by normalized_name - only search for one channel per normalized name
+    const seenNames = new Map()
+    for (const ch of selected) {
+      if (ch.normalized_name && !seenNames.has(ch.normalized_name)) {
+        seenNames.set(ch.normalized_name, ch.id)
+      }
+    }
 
-    // Fetch variants for all selected channels
+    const channelIds = Array.from(seenNames.values())
+
     const response = await fetch('/api/source-channels/bulk-variants', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -149,46 +153,50 @@ async function findOtherSourcesBulk() {
       return r.json()
     })
 
-    console.log(`[Find Other Sources] Found variants for ${response.length} channels`)
     channelVariants.value = response
   } catch (e) {
-    console.error('[Find Other Sources] Failed to load variants:', e)
     alert(`Failed to load variants: ${e.message}`)
   } finally {
     variantsLoading.value = false
   }
 }
 
-// Add a single variant to selection
-function addVariant(variant) {
-  // Variant is a source_channel, we need to add it to the selection
-  // Create a channel object that toggleChannel expects
-  toggleChannel({ id: variant.id, ...variant })
+// Check if a variant is currently in the selection
+function isVariantSelected(variant) {
+  // Check all groups in selectionMap for this variant ID
+  for (const [groupName, selection] of Object.entries(selectionMap.value)) {
+    if (selection instanceof Set && selection.has(variant.id)) {
+      return true
+    }
+  }
+  return false
+}
+
+// Toggle a variant in/out of selection
+function toggleVariant(variant) {
+  toggleChannel(variant)
 }
 
 // Add all variants for a specific channel
 function addChannelVariants(variants) {
   for (const variant of variants) {
-    toggleChannel({ id: variant.id, ...variant })
-  }
-}
-
-// Add all variants from all channels
-function addAllVariants() {
-  for (const item of channelVariants.value) {
-    for (const variant of item.variants) {
-      toggleChannel({ id: variant.id, ...variant })
+    if (!isVariantSelected(variant)) {
+      toggleChannel(variant)
     }
   }
 }
 
-function addVariantsToSelection(variants) {
-  // Add selected variants to the current selection
-  for (const variant of variants) {
-    addVariant(variant)
+// Add all unselected variants
+function addAllVariants() {
+  for (const item of channelVariants.value) {
+    for (const variant of item.variants) {
+      if (!isVariantSelected(variant)) {
+        toggleChannel(variant)
+      }
+    }
   }
-  showVariantsModal.value = false
 }
+
 
 onMounted(loadMeta)
 
@@ -606,12 +614,15 @@ function onSetName(payload) {
                         <span class="text-xs text-slate-600 truncate">{{ variant.group_title }}</span>
                       </div>
                     </div>
-                    <button
-                      @click="addVariant(variant)"
-                      class="px-3 py-1.5 text-xs bg-indigo-500 hover:bg-indigo-400 text-white rounded-lg transition-colors whitespace-nowrap"
-                    >
-                      Add
-                    </button>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        :checked="isVariantSelected(variant)"
+                        @change="toggleVariant(variant)"
+                        class="w-4 h-4 rounded border-2 border-slate-600 bg-[#22263a] checked:bg-indigo-500 checked:border-indigo-500 cursor-pointer"
+                      />
+                      <span class="text-xs text-slate-400">{{ isVariantSelected(variant) ? 'Selected' : 'Select' }}</span>
+                    </label>
                   </div>
                 </div>
               </div>

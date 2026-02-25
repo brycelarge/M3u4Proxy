@@ -236,20 +236,46 @@ async function refreshSourceCache(sourceId) {
 
 /**
  * Normalize channel name for grouping (lowercase, no spaces, no special chars)
- * Removes common country prefixes and variations to improve matching
+ * Preserves and normalizes country prefixes to distinguish geographic variants
  */
 function normalizeChannelName(name) {
-  let normalized = name.toLowerCase()
+  // Country code normalization map
+  const COUNTRY_CODE_MAP = {
+    'USA': 'US',
+    'UK': 'GB',
+    'UAE': 'AE',
+    'RSA': 'ZA',
+    'SS': 'SS', // SuperSport
+  }
 
-  // Remove common country/region prefixes
-  normalized = normalized
-    .replace(/^(us|usa|uk|ca|au|nz|za)[\s:_-]+/i, '') // US: Fox -> Fox, USA FOX -> Fox
-    .replace(/^(united states|united kingdom|canada|australia)[\s:_-]+/i, '')
+  // Common country/region codes to detect
+  const GEO_PATTERNS = [
+    'US', 'USA', 'UK', 'GB', 'CA', 'AU', 'NZ', 'ZA', 'RSA', 'IN', 'PK',
+    'AR', 'BR', 'MX', 'ES', 'FR', 'DE', 'IT', 'NL', 'BE', 'UAE', 'SS'
+  ]
+
+  let normalized = name.toLowerCase()
+  let geoPrefix = ''
+
+  // Extract and normalize geo prefix (e.g., "USA: History" → "us_history")
+  for (const code of GEO_PATTERNS) {
+    const pattern = new RegExp(`^${code}[:\\s_-]+`, 'i')
+    if (pattern.test(normalized)) {
+      const matched = code.toUpperCase()
+      const standardCode = COUNTRY_CODE_MAP[matched] || matched
+      geoPrefix = standardCode.toLowerCase() + '_'
+      normalized = normalized.replace(pattern, '')
+      break
+    }
+  }
+
+  // Remove quality indicators
+  normalized = normalized.replace(/\b(hd|fhd|uhd|4k|sd|hevc|h\.?265)\b/gi, '')
 
   // Remove all non-alphanumeric characters
   normalized = normalized.replace(/[^a-z0-9]/g, '')
 
-  return normalized
+  return geoPrefix + normalized
 }
 
 /**
@@ -376,20 +402,22 @@ app.get('/api/sources/all/channels', (req, res) => {
   if (!source) return res.status(404).json({ error: `Source "${sourceName}" not found` })
   const total = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ? AND group_title = ?').get(source.id, groupTitle).c
   const rows = db.prepare(
-    'SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?'
+    'SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?'
   ).all(source.id, groupTitle, limit, offset)
   const result = {
     total, offset, limit,
     channels: rows.map(r => ({
-      id:          String(r.id),
-      name:        r.tvg_name,
-      logo:        r.tvg_logo,
-      group:       groupKey,
-      group_title: r.group_title,
-      source_id:   r.source_id,
-      source_name: sourceName,
-      url:         r.url,
-      tvg_id:      r.tvg_id,
+      id:              String(r.id),
+      name:            r.tvg_name,
+      logo:            r.tvg_logo,
+      group:           groupKey,
+      group_title:     r.group_title,
+      source_id:       r.source_id,
+      source_name:     sourceName,
+      url:             r.url,
+      tvg_id:          r.tvg_id,
+      normalized_name: r.normalized_name,
+      quality:         r.quality,
     }))
   }
   setCache(cacheKey, result)
@@ -428,20 +456,22 @@ app.get('/api/sources/:id/channels', (req, res) => {
     ? db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ? AND group_title = ?').get(source.id, group).c
     : db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ?').get(source.id).c
   const rows = group
-    ? db.prepare('SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?').all(source.id, group, limit, offset)
-    : db.prepare('SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id FROM source_channels WHERE source_id = ? ORDER BY id LIMIT ? OFFSET ?').all(source.id, limit, offset)
+    ? db.prepare('SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?').all(source.id, group, limit, offset)
+    : db.prepare('SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? ORDER BY id LIMIT ? OFFSET ?').all(source.id, limit, offset)
 
   const result = {
     total, offset, limit,
     channels: rows.map(r => ({
-      id:          String(r.id),
-      name:        r.tvg_name,
-      logo:        r.tvg_logo,
-      group:       r.group_title,
-      url:         r.url,
-      tvg_id:      r.tvg_id,
-      group_title: r.group_title,
-      source_id:   r.source_id,
+      id:              String(r.id),
+      name:            r.tvg_name,
+      logo:            r.tvg_logo,
+      group:           r.group_title,
+      url:             r.url,
+      tvg_id:          r.tvg_id,
+      group_title:     r.group_title,
+      source_id:       r.source_id,
+      normalized_name: r.normalized_name,
+      quality:         r.quality,
     }))
   }
 
@@ -703,17 +733,9 @@ app.post('/api/source-channels/bulk-variants', (req, res) => {
     if (!channel || !channel.normalized_name) continue
 
     // Find all variants with the same normalized name from DIFFERENT sources
-    // Ordered by source priority (lower = better), then quality
+    // Return FULL channel objects so frontend can use them directly with toggleChannel
     const variants = db.prepare(`
-      SELECT
-        sc.id,
-        sc.tvg_name,
-        sc.quality,
-        sc.url,
-        sc.group_title,
-        s.id as source_id,
-        s.name as source_name,
-        COALESCE(s.priority, 999) as source_priority
+      SELECT sc.*
       FROM source_channels sc
       JOIN sources s ON sc.source_id = s.id
       WHERE sc.normalized_name = ?

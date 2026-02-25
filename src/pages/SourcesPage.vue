@@ -32,13 +32,13 @@ async function load() {
 
 function openCreate(category = 'playlist') {
   editing.value = null
-  form.value = { name: '', category, type: category === 'epg' ? 'epg' : 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0 }
+  form.value = { name: '', category, type: category === 'epg' ? 'epg' : 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0, priority: 999 }
   showForm.value = true
 }
 
 function openEdit(s) {
   editing.value = s
-  form.value = { name: s.name, category: s.category || 'playlist', type: s.type, url: s.url, username: s.username || '', password: s.password || '', refresh_cron: s.refresh_cron || '0 */6 * * *', max_streams: s.max_streams || 0 }
+  form.value = { name: s.name, category: s.category || 'playlist', type: s.type, url: s.url, username: s.username || '', password: s.password || '', refresh_cron: s.refresh_cron || '0 */6 * * *', max_streams: s.max_streams || 0, priority: s.priority || 999 }
   showForm.value = true
 }
 
@@ -283,6 +283,13 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
               <input v-model.number="form.max_streams" type="number" min="0" placeholder="0 = unlimited"
                 class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500" />
               <p class="text-xs text-slate-600 mt-1">How many simultaneous streams your provider allows. 0 = unlimited.</p>
+            </div>
+
+            <div v-if="form.category !== 'epg'">
+              <label class="block text-xs text-slate-500 mb-1.5">Priority</label>
+              <input v-model.number="form.priority" type="number" min="1" placeholder="999"
+                class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500" />
+              <p class="text-xs text-slate-600 mt-1">Lower number = higher priority for stream failover. Default: 999</p>
             </div>
 
             <div>
