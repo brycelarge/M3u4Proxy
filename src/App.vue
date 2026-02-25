@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import AdminLogin         from './components/AdminLogin.vue'
 import { isAuthenticated, verifySession, logout } from './composables/useAdmin.js'
+import { api }            from './composables/useApi.js'
 import ChannelBrowserPage from './pages/ChannelBrowserPage.vue'
 import SourcesPage        from './pages/SourcesPage.vue'
 import PlaylistsPage      from './pages/PlaylistsPage.vue'
@@ -16,6 +17,17 @@ const page      = ref('browser')
 const theme     = ref('dark')
 const navOpen   = ref(false)
 const authReady = ref(false)
+const activeStreamCount = ref(0)
+let streamCheckInterval = null
+
+async function checkActiveStreams() {
+  try {
+    const streams = await api.getStreams()
+    activeStreamCount.value = streams.length
+  } catch {
+    activeStreamCount.value = 0
+  }
+}
 
 function applyTheme(t) {
   theme.value = t
@@ -65,6 +77,14 @@ onMounted(async () => {
       // If API fails, stay on default (sources)
     }
   }
+
+  // Start checking for active streams
+  checkActiveStreams()
+  streamCheckInterval = setInterval(checkActiveStreams, 5000)
+})
+
+onUnmounted(() => {
+  if (streamCheckInterval) clearInterval(streamCheckInterval)
 })
 </script>
 
@@ -112,10 +132,12 @@ onMounted(async () => {
       <!-- Streams button -->
       <button
         @click="navigate('streams')"
-        :title="'View active streams'"
+        :title="`View active streams${activeStreamCount > 0 ? ` (${activeStreamCount})` : ''}`"
         :class="['flex items-center justify-center w-8 h-8 rounded-lg transition-colors text-base shrink-0',
-          page === 'streams' ? 'bg-red-500/20 text-red-400 border border-red-500/40' : 'text-slate-400 hover:text-slate-200 hover:bg-[#22263a]']"
-      >🔴</button>
+          page === 'streams'
+            ? (activeStreamCount > 0 ? 'bg-green-500/20 text-green-400 border border-green-500/40' : 'bg-red-500/20 text-red-400 border border-red-500/40')
+            : (activeStreamCount > 0 ? 'text-green-400 hover:text-green-300 hover:bg-green-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-[#22263a]')]"
+      >{{ activeStreamCount > 0 ? '🟢' : '🔴' }}</button>
 
       <!-- Theme toggle -->
       <button

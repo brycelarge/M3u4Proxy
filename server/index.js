@@ -2757,7 +2757,10 @@ app.get('/api/hdhr/status', (req, res) => {
 app.get('/player/:channelId', (req, res) => {
   const { channelId } = req.params
   const channelName = req.query.name || 'Live Stream'
-  const streamUrl = `/stream/${channelId}`
+  // Use absolute URL for mpegts.js worker compatibility
+  const protocol = req.protocol
+  const host = req.get('host')
+  const streamUrl = `${protocol}://${host}/stream/${channelId}`
 
   res.send(`
 <!DOCTYPE html>
@@ -2841,45 +2844,7 @@ app.get('/player/:channelId', (req, res) => {
     let player = null;
 
     function playStream() {
-      // Try HLS.js first (most common for IPTV)
-      if (Hls.isSupported()) {
-        player = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-          backBufferLength: 90
-        });
-
-        player.loadSource(streamUrl);
-        player.attachMedia(video);
-
-        player.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(err => {
-            console.error('Autoplay failed:', err);
-          });
-        });
-
-        player.on(Hls.Events.ERROR, (event, data) => {
-          console.error('HLS error:', data);
-          if (data.fatal) {
-            // If HLS fails, try mpegts.js
-            console.log('HLS failed, trying mpegts.js');
-            player.destroy();
-            tryMpegts();
-          }
-        });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS support (Safari/iOS)
-        video.src = streamUrl;
-        video.play().catch(err => {
-          console.error('Autoplay failed:', err);
-        });
-      } else {
-        // Fallback to mpegts.js
-        tryMpegts();
-      }
-    }
-
-    function tryMpegts() {
+      // Use mpegts.js to play the proxied MPEG-TS stream from backend
       if (mpegts.getFeatureList().mseLivePlayback) {
         player = mpegts.createPlayer({
           type: 'mpegts',
@@ -3094,6 +3059,13 @@ app.get('/stream/:channelId', async (req, res) => {
     }
   }
 
+  // Get client info for logging
+  const clientIp = req.ip || req.connection.remoteAddress || 'unknown'
+  const userAgent = req.get('user-agent') || 'unknown'
+
+  console.log(`[stream] Client ${clientIp} requesting "${row.tvg_name}" (channel ${channelId})`)
+  console.log(`[stream] User-Agent: ${userAgent.substring(0, 80)}`)
+
   // Get all channel variants (ordered by availability and quality)
   const variants = getChannelVariants(channelId)
 
@@ -3132,7 +3104,7 @@ app.get('/stream/:channelId', async (req, res) => {
       return // Success!
     } catch (e) {
       lastError = e
-      console.log(`[stream] Variant ${i + 1} failed: ${e.message}`)
+      console.error(`[stream] Variant ${i + 1} failed:`, e)
       // Continue to next variant
     }
   }

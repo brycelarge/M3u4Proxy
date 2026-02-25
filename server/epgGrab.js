@@ -147,7 +147,12 @@ function mergeXmltvFiles(files, preserveExisting = false) {
   if (preserveExisting && existsSync(GUIDE_XML)) {
     try {
       const existingContent = readFileSync(GUIDE_XML, 'utf8')
-      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+
+      // Calculate 11pm yesterday (23:00 last night)
+      const now = new Date()
+      const yesterday = new Date(now)
+      yesterday.setDate(yesterday.getDate() - 1)
+      yesterday.setHours(23, 0, 0, 0)
 
       // Extract existing channels
       const chanRe = /<channel\b[^>]*>[\s\S]*?<\/channel>/g
@@ -161,7 +166,7 @@ function mergeXmltvFiles(files, preserveExisting = false) {
         }
       }
 
-      // Extract existing programmes that are not older than 2 days
+      // Extract existing programmes that ended after 11pm yesterday
       const progRe = /<programme\b[\s\S]*?<\/programme>/g
       while ((m = progRe.exec(existingContent)) !== null) {
         const stopMatch = m[0].match(/\bstop="([^"]*)"/)
@@ -170,8 +175,8 @@ function mergeXmltvFiles(files, preserveExisting = false) {
           const stopDate = new Date(
             `${stopTime.slice(0,4)}-${stopTime.slice(4,6)}-${stopTime.slice(6,8)}T${stopTime.slice(8,10)}:${stopTime.slice(10,12)}:${stopTime.slice(12,14)}Z`
           )
-          // Keep programmes that ended less than 2 days ago
-          if (stopDate >= twoDaysAgo) {
+          // Keep programmes that ended after 11pm yesterday
+          if (stopDate >= yesterday) {
             programmeBlocks.push(m[0])
           }
         }

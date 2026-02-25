@@ -89,14 +89,18 @@ function applyGroupRanges() {
     if (!range?.start) continue
     const step = Math.max(1, parseInt(range.step) || 1)
     let n = parseInt(range.start)
-    sorted.value.filter(ch => effectiveGroup(ch) === g).forEach(ch => {
-      // Apply to all variant IDs
-      const ids = ch.variantIds || [ch.id]
-      for (const id of ids) {
-        nums[id] = n
-      }
-      n += step
-    })
+    // Sort channels by name within each group before numbering
+    sorted.value
+      .filter(ch => effectiveGroup(ch) === g)
+      .sort((a, b) => (a.tvg_name || '').localeCompare(b.tvg_name || ''))
+      .forEach(ch => {
+        // Apply to all variant IDs
+        const ids = ch.variantIds || [ch.id]
+        for (const id of ids) {
+          nums[id] = n
+        }
+        n += step
+      })
   }
   emit('set-numbers', nums)
 }
@@ -494,7 +498,7 @@ function clearAllNumbers() {
               </div>
               <!-- Apply just this group -->
               <button
-                @click="() => { const r = groupRanges[g]; if (!r?.start) return; const step = Math.max(1, parseInt(r.step)||1); let n = parseInt(r.start); const nums = {}; sorted.filter(ch => effectiveGroup(ch) === g).forEach(ch => { nums[ch.id] = n; n += step }); emit('set-numbers', nums) }"
+                @click="() => { const r = groupRanges[g]; if (!r?.start) return; const step = Math.max(1, parseInt(r.step)||1); let n = parseInt(r.start); const nums = {}; sorted.filter(ch => effectiveGroup(ch) === g).sort((a, b) => (a.tvg_name || '').localeCompare(b.tvg_name || '')).forEach(ch => { nums[ch.id] = n; n += step }); emit('set-numbers', nums) }"
                 :disabled="!groupRanges[g]?.start"
                 class="px-3 py-1.5 text-[10px] bg-[#22263a] border border-[#2e3250] hover:border-amber-500 hover:text-amber-300 text-slate-400 rounded-lg transition-colors shrink-0 disabled:opacity-30"
               >Apply</button>

@@ -8,9 +8,20 @@
 
 import { EventEmitter } from 'node:events'
 import db from './db.js'
+import { shouldUseFFmpeg, createRemuxProcess, getContentType, getFFmpegSettings } from './ffmpegRemux.js'
 
 const MAX_RECONNECTS    = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY   = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
+
+// Helper: Check if buffer contains PES start code for video stream (0x00 0x00 0x01 + video stream ID 0xE0-0xEF)
+function hasPesStart(buf) {
+  for (let i = 0; i < buf.length - 4; i++) {
+    if (buf[i] === 0x00 && buf[i+1] === 0x00 && buf[i+2] === 0x01 && (buf[i+3] >= 0xE0 && buf[i+3] <= 0xEF)) {
+      return true
+    }
+  }
+  return false
+}
 
 // Buffer N seconds of stream data before sending to clients.
 // Default 3 seconds helps absorb network jitter and connection drops.
@@ -26,11 +37,22 @@ export function getBufferSeconds() {
   return parseFloat(process.env.PROXY_BUFFER_SECONDS || '3')
 }
 
+// Calculate rolling buffer size based on buffer seconds setting
+// Assumes ~2 Mbps average bitrate (250 KB/s)
+function getRollingBufferSize() {
+  const bufferSecs = getBufferSeconds()
+  if (bufferSecs === 0) return 0  // No rolling buffer if buffering disabled
+
+  // Calculate size: bufferSeconds * 250 KB/s, minimum 1MB, maximum 10MB
+  const calculatedSize = bufferSecs * 250 * 1024
+  return Math.max(1 * 1024 * 1024, Math.min(calculatedSize, 10 * 1024 * 1024))
+}
+
 // ── Session store ─────────────────────────────────────────────────────────────
 const sessions = new Map()
 
 class Session extends EventEmitter {
-  constructor(channelId, upstreamUrl, channelName, sourceId, username) {
+  constructor(channelId, upstreamUrl, channelName, sourceId, username, ffmpegRemux = false, transcodeReason = null) {
     super()
     this.setMaxListeners(200)
     this.channelId    = channelId
@@ -49,6 +71,11 @@ class Session extends EventEmitter {
     this.abortCtrl    = new AbortController()
     this.dead         = false
     this._bufferStarted = false  // Track if buffer has started streaming
+    this.ffmpegRemux  = ffmpegRemux  // Track if FFmpeg remuxing is enabled
+    this.transcodeReason = transcodeReason  // Why FFmpeg is being used (e.g., "HEVC → H.264 for Firefox")
+    this._recentChunks = []  // Rolling buffer of recent chunks for joining clients (burst-and-bridge)
+    this._currentBufferSize = 0  // Track buffer size efficiently without reduce()
+    this._rollingBufferStarted = false  // Only start collecting after finding a keyframe
   }
 
   // Rolling pre-buffer: array of { chunk: Uint8Array, ts: number }
@@ -105,6 +132,35 @@ function checkMaxStreams(sourceId) {
 
 // ── Upstream pump with reconnect ──────────────────────────────────────────────
 async function pump(session) {
+  // If FFmpeg is enabled, create remux process
+  let ffmpegResult = null
+
+  if (session.ffmpegRemux) {
+    try {
+      ffmpegResult = createRemuxProcess(null, { forWebPlayer: false })
+
+      // Pipe FFmpeg output to clients
+      ffmpegResult.outputStream.on('data', (chunk) => {
+        session.bytesOut += chunk.length
+        for (const client of session.clients) {
+          if (!client.writableEnded) {
+            client.write(chunk)
+          }
+        }
+        session.emit('chunk', chunk)
+      })
+
+      ffmpegResult.outputStream.on('error', (err) => {
+        console.error(`[stream] FFmpeg output error for "${session.channelName}":`, err.message)
+      })
+
+      console.log(`[stream] FFmpeg remux process started for "${session.channelName}"`)
+    } catch (err) {
+      console.error(`[stream] Failed to start FFmpeg for "${session.channelName}":`, err.message)
+      session.ffmpegRemux = false // Disable FFmpeg and continue with direct streaming
+    }
+  }
+
   while (!session.dead) {
     try {
       const upstream = await fetch(session.upstreamUrl, {
@@ -147,43 +203,111 @@ async function pump(session) {
           session._lastTick  = now
         }
 
-        // Buffer logic: collect data first, then flush and stream
-        const bufSecs = getBufferSeconds()
-        if (bufSecs > 0 && !session._bufferStarted) {
-          // ALWAYS push to preBuffer while filling
-          session.preBuffer.push({ chunk: value, ts: now })
+        // If FFmpeg is enabled, pipe data through it instead of directly to clients
+        if (session.ffmpegRemux && ffmpegResult) {
+          // Write to FFmpeg stdin - FFmpeg output handler will send to clients
+          if (!ffmpegResult.stdin.destroyed) {
+            ffmpegResult.stdin.write(value)
+          }
+        } else {
+          // Normal flow: Buffer logic for direct streaming
+          const bufSecs = getBufferSeconds()
+          if (bufSecs > 0 && !session._bufferStarted) {
+            // ALWAYS push to preBuffer while filling
+            session.preBuffer.push({ chunk: value, ts: now })
 
-          const bufferAge = session.preBuffer.length > 0 ? now - session.preBuffer[0].ts : 0
-          const targetMs = bufSecs * 1000
+            const bufferAge = session.preBuffer.length > 0 ? now - session.preBuffer[0].ts : 0
+            const targetMs = bufSecs * 1000
 
-          // Check if we've reached the 50% threshold
-          if (bufferAge >= (targetMs * 0.5)) {
-            console.log(`[stream] Buffer ready (${bufferAge}ms). Flushing ${session.preBuffer.length} chunks to clients.`)
+            // Check if we've reached the 50% threshold
+            if (bufferAge >= (targetMs * 0.5)) {
+              console.log(`[stream] Buffer ready (${bufferAge}ms). Flushing ${session.preBuffer.length} chunks to clients.`)
 
-            // FLUSH: Send everything we collected to the clients right now
-            for (const entry of session.preBuffer) {
-              for (const client of session.clients) {
-                if (!client.writableEnded) {
-                  client.write(entry.chunk)
-                  session.bytesOut += entry.chunk.length
+              // Simple PES start code detection (0x00 0x00 0x01) which often indicates a new frame/keyframe
+              const hasPesStart = (buf, startIdx) => {
+                for (let i = startIdx; i < Math.min(startIdx + 188 - 3, buf.length - 3); i++) {
+                  if (buf[i] === 0x00 && buf[i+1] === 0x00 && buf[i+2] === 0x01) {
+                    // Check if it's a video stream (0xE0 - 0xEF)
+                    if (buf[i+3] >= 0xE0 && buf[i+3] <= 0xEF) {
+                      return true
+                    }
+                  }
+                }
+                return false
+              }
+
+              // Find sync point in buffered data before flushing
+              const combined = Buffer.concat(session.preBuffer.map(e => e.chunk))
+              let syncOffset = 0
+              let foundKeyframe = false
+
+              // Look for valid MPEG-TS sync point (2 consecutive 0x47 at 188-byte intervals) AND a keyframe
+              for (let i = 0; i <= combined.length - 376; i++) {
+                if (combined[i] === 0x47 && combined[i + 188] === 0x47) {
+                  const pusi = (combined[i+1] & 0x40) !== 0
+
+                  if (pusi && hasPesStart(combined, i)) {
+                    syncOffset = i
+                    foundKeyframe = true
+                    if (i > 0) {
+                      console.log(`[stream] Found keyframe sync point at offset ${i} in buffer, trimming ${i} bytes`)
+                    }
+                    break
+                  }
                 }
               }
-              session.emit('chunk', entry.chunk)
+
+              // Fallback to basic sync if no keyframe found in buffer
+              if (!foundKeyframe) {
+                for (let i = 0; i <= combined.length - 376; i++) {
+                  if (combined[i] === 0x47 && combined[i + 188] === 0x47) {
+                    syncOffset = i
+                    console.log(`[stream] No keyframe in buffer, falling back to basic sync at offset ${i}`)
+                    break
+                  }
+                }
+              }
+
+              // FLUSH: Send from sync point onwards
+              const syncedData = combined.slice(syncOffset)
+
+              // Send via event emitter for consistency with normal flow
+              session.emit('chunk', syncedData)
+              session.bytesOut += (syncedData.length * session.clients.size)
+
+              session._bufferStarted = true
+              session._preBuffer = [] // Clear memory
+            }
+            // Don't write current chunk yet - it's in the buffer
+          } else {
+            // NORMAL FLOW: Only the event emitter sends data to clients
+            // This prevents double-writing to clients who joined via connectClient
+            session.emit('chunk', value)
+
+            // Update stats
+            session.bytesOut += (value.length * session.clients.size)
+
+            // ROLLING BUFFER: Build the bridge for joining clients
+            const isKeyframe = (value[1] & 0x40) !== 0 && hasPesStart(value)
+
+            // Start collecting only once we hit a keyframe to ensure the burst is decodable
+            if (!session._rollingBufferStarted && isKeyframe) {
+              session._rollingBufferStarted = true
+              console.log(`[stream] Keyframe found. Starting rolling buffer for "${session.channelName}"`)
             }
 
-            session._bufferStarted = true
-            session._preBuffer = [] // Clear memory
-          }
-          // Don't write current chunk yet - it's in the buffer
-        } else {
-          // NORMAL FLOW: Buffer is done (or disabled), just stream live
-          for (const client of session.clients) {
-            if (!client.writableEnded) {
-              client.write(value)
-              session.bytesOut += value.length
+            if (session._rollingBufferStarted) {
+              session._recentChunks.push(value)
+              session._currentBufferSize += value.length
+
+              // Maintain rolling buffer based on configured buffer seconds
+              const maxBufferSize = getRollingBufferSize()
+              while (session._currentBufferSize > maxBufferSize && session._recentChunks.length > 0) {
+                const removed = session._recentChunks.shift()
+                session._currentBufferSize -= removed.length
+              }
             }
           }
-          session.emit('chunk', value)
         }
       }
 
@@ -206,6 +330,17 @@ async function pump(session) {
     await new Promise(r => setTimeout(r, RECONNECT_DELAY))
   }
 
+  // Clean up FFmpeg process if it exists
+  if (ffmpegResult) {
+    console.log(`[stream] Stopping FFmpeg process for "${session.channelName}"`)
+    try {
+      ffmpegResult.stdin.end()
+      ffmpegResult.process.kill('SIGTERM')
+    } catch (e) {
+      // Process already dead
+    }
+  }
+
   session.destroy()
   for (const client of session.clients) {
     if (!client.writableEnded) client.end()
@@ -214,17 +349,25 @@ async function pump(session) {
 
 // ── Start or join a stream session ────────────────────────────────────────────
 export async function connectClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null) {
-  // Check max_streams limit
-  const limitErr = checkMaxStreams(sourceId)
-  if (limitErr) {
-    res.status(503).json({ error: limitErr })
-    return
+  console.log(`[stream] connectClient called: channelId=${channelId}, channelName=${channelName}`)
+
+  // Check if response is already sent
+  if (res.headersSent) {
+    console.log(`[stream] Response headers already sent, cannot connect client`)
+    throw new Error('Response headers already sent')
   }
 
-  // Reuse existing session
+  // Debug: Check if session exists
+  console.log(`[stream] Checking for existing session: channelId=${channelId}, exists=${sessions.has(channelId)}, total sessions=${sessions.size}`)
+  if (sessions.size > 0) {
+    console.log(`[stream] Active session IDs:`, [...sessions.keys()])
+  }
+
+  // Reuse existing session (no limit check needed - not creating new upstream connection)
   if (sessions.has(channelId)) {
     const session = sessions.get(channelId)
-    console.log(`[stream] Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
+    console.log(`[stream] ✓ SHARED SESSION: Client joining "${session.channelName}" (now ${session.clients.size + 1} clients total)`)
+    console.log(`[stream] Reusing existing upstream connection - no new source stream needed`)
 
     // Set streaming headers
     res.setHeader('Content-Type', 'video/mp2t')
@@ -233,58 +376,75 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
     res.setHeader('Connection', 'keep-alive')
     res.flushHeaders()
 
-    session.addClient(res)
-    // Flush pre-buffer so the joining client starts with data immediately
-    if (session._preBuffer?.length) {
-      // Send the buffer in order but with minimal delay to prevent jitter
-      // This helps ensure smooth playback start
-      const bufferChunks = [...session._preBuffer]
-      let i = 0
-
-      // Send first chunk immediately to start playback
-      if (!res.writableEnded && bufferChunks[0]) {
-        res.write(bufferChunks[0].chunk)
-        i++
-      }
-
-      // Send the rest of the buffer with minimal delay
-      const sendNextChunk = () => {
-        if (i < bufferChunks.length && !res.writableEnded) {
-          res.write(bufferChunks[i].chunk)
-          i++
-          if (i < bufferChunks.length) {
-            setImmediate(sendNextChunk)
-          }
-        }
-      }
-
-      // Start sending the rest of the buffer
-      if (i < bufferChunks.length) {
-        setImmediate(sendNextChunk)
-      }
+    // 1. Prepare the listener BUT don't attach it yet
+    const onChunk = (chunk) => {
+      if (!res.writableEnded) res.write(chunk)
     }
-    const onChunk = (chunk) => { if (!res.writableEnded) res.write(chunk) }
+
+    // 2. Send the Bridge Data (The Past)
+    if (session._recentChunks.length > 0) {
+      const bridgeData = Buffer.concat(session._recentChunks)
+      console.log(`[stream] Bursting ${bridgeData.length} bytes (${session._recentChunks.length} chunks) to joining client`)
+      res.write(bridgeData)
+    }
+
+    // 3. Start listening for the NEXT live chunks
     session.on('chunk', onChunk)
-    session.once('dead', () => { session.off('chunk', onChunk); if (!res.writableEnded) res.end() })
-    res.on('close', () => session.off('chunk', onChunk))
+
+    // 4. Register client ONLY for the "no clients left" logic
+    // DO NOT let the loop in pump() write to this 'res' object
+    session.clients.add(res)
+
+    res.on('close', () => {
+      session.off('chunk', onChunk)
+      session.removeClient(res)
+    })
     return
   }
 
-  // New session
+  // New session - check max_streams limit before creating
+  const limitErr = checkMaxStreams(sourceId)
+  if (limitErr) {
+    console.log(`[stream] Cannot create new session: ${limitErr}`)
+    res.status(503).json({ error: limitErr })
+    return
+  }
+
+  // Check if FFmpeg remuxing should be used
+  const useFFmpeg = shouldUseFFmpeg(false) // false = not web player, use IPTV settings
+  const ffmpegSettings = useFFmpeg ? getFFmpegSettings() : null
+
   const bufferSecs = getBufferSeconds()
   console.log(`[stream] Opening "${channelName}" → ${upstreamUrl}`)
   console.log(`[stream] Buffer: ${bufferSecs} seconds${bufferSecs === 0 ? ' (disabled)' : ''}`)
-  const session = new Session(channelId, upstreamUrl, channelName, sourceId, username)
+  if (useFFmpeg) {
+    console.log(`[stream] FFmpeg remuxing: ENABLED (${ffmpegSettings.outputFormat} format)`)
+  }
+
+  const session = new Session(channelId, upstreamUrl, channelName, sourceId, username, useFFmpeg)
   sessions.set(channelId, session)
 
-  // Set streaming headers
-  res.setHeader('Content-Type', 'video/mp2t')
+  // Set streaming headers based on FFmpeg settings
+  const contentType = useFFmpeg ? getContentType(ffmpegSettings.outputFormat) : 'video/mp2t'
+  res.setHeader('Content-Type', contentType)
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('X-Accel-Buffering', 'no')
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
 
-  session.addClient(res)
+  // First client also uses event listener pattern for consistency
+  const onChunk = (chunk) => {
+    if (!res.writableEnded) res.write(chunk)
+  }
+
+  session.on('chunk', onChunk)
+  session.clients.add(res)
+
+  res.on('close', () => {
+    session.off('chunk', onChunk)
+    session.removeClient(res)
+  })
+
   pump(session)
 }
 
@@ -302,6 +462,8 @@ export function getActiveSessions() {
     bitrate:     s.bitrate,
     reconnects:  s.reconnects,
     upstreamUrl: s.upstreamUrl,
+    ffmpegRemux: s.ffmpegRemux,
+    transcodeReason: s.transcodeReason,
   }))
 }
 

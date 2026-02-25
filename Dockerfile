@@ -1,6 +1,9 @@
 # ── Frontend build ───────────────────────────────────────────────────────────
 FROM node:22-alpine AS builder
 
+# Install build dependencies for better-sqlite3
+RUN apk add --no-cache python3 make g++
+
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -23,6 +26,7 @@ RUN apk add --no-cache \
         ca-certificates \
         curl \
         dos2unix \
+        ffmpeg \
         git \
         iproute2 \
         iptables \
@@ -41,7 +45,10 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev
+# Install build dependencies temporarily to compile better-sqlite3
+RUN apk add --no-cache --virtual .build-deps python3 make g++ && \
+    npm ci --omit=dev && \
+    apk del .build-deps
 COPY server/ ./server/
 COPY --from=builder /app/dist ./dist
 

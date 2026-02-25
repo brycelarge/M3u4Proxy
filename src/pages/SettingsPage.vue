@@ -243,10 +243,10 @@ function copyUrl(url, key) {
 }
 
 const TABS = [
-  { id: 'hdhr',        label: 'HDHomeRun',   icon: '📡' },
-  { id: 'scheduler',   label: 'Scheduler',    icon: '🕐' },
-  { id: 'proxy',       label: 'Proxy',        icon: '⚡' },
-  { id: 'backup',      label: 'Backup',       icon: '💾' },
+  { id: 'hdhr',         label: 'HDHomeRun',   icon: '📡' },
+  { id: 'streaming',    label: 'Streaming',   icon: '🎬' },
+  { id: 'scheduler',    label: 'Scheduler',   icon: '⏰' },
+  { id: 'backup',       label: 'Backup',      icon: '💾' },
   { id: 'diagnostics',  label: 'Diagnostics',  icon: '🔧' },
   { id: 'architecture', label: 'Architecture', icon: '🗺️' },
 ]
@@ -285,6 +285,66 @@ async function saveProxySettings() {
     proxyError.value = e.message
   } finally {
     proxySaving.value = false
+  }
+}
+
+// ── FFmpeg settings ──────────────────────────────────────────────────────────
+const ffmpegSettings = ref({
+  ffmpeg_enabled: 'false',
+  ffmpeg_web_player: 'true',
+  ffmpeg_output_format: 'mpegts',
+  ffmpeg_video_codec: 'libx264',
+  ffmpeg_audio_codec: 'aac',
+  ffmpeg_preset: 'veryfast',
+  ffmpeg_tune: 'zerolatency',
+  ffmpeg_gop_size: '60',
+  ffmpeg_video_bitrate: '4000k',
+  ffmpeg_pixel_format: 'yuv420p',
+  ffmpeg_custom_params: '',
+  ffmpeg_web_format: 'mp4',
+  ffmpeg_web_video_codec: 'copy',
+  ffmpeg_web_audio_codec: 'copy',
+  ffmpeg_web_params: '-movflags frag_keyframe+empty_moov+default_base_moof'
+})
+const ffmpegSaving = ref(false)
+const ffmpegSaved = ref(false)
+const ffmpegError = ref('')
+
+async function loadFfmpegSettings() {
+  try {
+    const s = await api.getSettings()
+    ffmpegSettings.value = {
+      ffmpeg_enabled: s.ffmpeg_enabled || 'false',
+      ffmpeg_web_player: s.ffmpeg_web_player || 'true',
+      ffmpeg_output_format: s.ffmpeg_output_format || 'mpegts',
+      ffmpeg_video_codec: s.ffmpeg_video_codec || 'libx264',
+      ffmpeg_audio_codec: s.ffmpeg_audio_codec || 'aac',
+      ffmpeg_preset: s.ffmpeg_preset || 'veryfast',
+      ffmpeg_tune: s.ffmpeg_tune || 'zerolatency',
+      ffmpeg_gop_size: s.ffmpeg_gop_size || '60',
+      ffmpeg_video_bitrate: s.ffmpeg_video_bitrate || '4000k',
+      ffmpeg_pixel_format: s.ffmpeg_pixel_format || 'yuv420p',
+      ffmpeg_custom_params: s.ffmpeg_custom_params || '',
+      ffmpeg_web_format: s.ffmpeg_web_format || 'mp4',
+      ffmpeg_web_video_codec: s.ffmpeg_web_video_codec || 'copy',
+      ffmpeg_web_audio_codec: s.ffmpeg_web_audio_codec || 'copy',
+      ffmpeg_web_params: s.ffmpeg_web_params || '-movflags frag_keyframe+empty_moov+default_base_moof'
+    }
+  } catch {}
+}
+
+async function saveFfmpegSettings() {
+  ffmpegSaving.value = true
+  ffmpegError.value = ''
+  ffmpegSaved.value = false
+  try {
+    await api.saveSettings(ffmpegSettings.value)
+    ffmpegSaved.value = true
+    setTimeout(() => { ffmpegSaved.value = false }, 2500)
+  } catch (e) {
+    ffmpegError.value = e.message
+  } finally {
+    ffmpegSaving.value = false
   }
 }
 
@@ -341,7 +401,7 @@ async function clearDeadChannels() {
   } finally { deadClearing.value = false }
 }
 
-onMounted(async () => { await load(); await loadProxySettings() })
+onMounted(async () => { await load(); await loadProxySettings(); await loadFfmpegSettings() })
 </script>
 
 <template>
@@ -490,6 +550,222 @@ onMounted(async () => { await load(); await loadProxySettings() })
     </div>
     </template> <!-- end hdhr tab -->
 
+    <!-- Streaming Tab -->
+    <template v-if="tab === 'streaming'">
+
+    <!-- Proxy Buffer Settings -->
+    <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6 mb-6">
+      <div class="flex items-center gap-3 mb-5">
+        <div class="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center text-lg shrink-0">⏱️</div>
+        <div>
+          <h2 class="text-sm font-bold text-slate-100">Stream Buffer</h2>
+          <p class="text-xs text-slate-500">Buffer seconds before streaming to clients (helps with network jitter)</p>
+        </div>
+      </div>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-2">Buffer Duration (seconds)</label>
+          <input v-model.number="proxyBufferInput" type="number" min="0" max="30" step="0.5"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50">
+          <p class="text-[10px] text-slate-600 mt-1.5">0 = disabled, 3 = recommended for stability, higher = more delay but better jitter protection</p>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <button @click="saveProxySettings" :disabled="proxySaving"
+            class="px-6 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors">
+            {{ proxySaving ? 'Saving…' : 'Save Buffer Settings' }}
+          </button>
+          <span v-if="proxySaved" class="text-xs text-green-400">✓ Saved</span>
+          <span v-if="proxyError" class="text-xs text-red-400">{{ proxyError }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- FFmpeg Settings -->
+    <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6">
+      <div class="flex items-center gap-3 mb-5">
+        <div class="w-9 h-9 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-lg shrink-0">🎬</div>
+        <div>
+          <h2 class="text-sm font-bold text-slate-100">FFmpeg Remuxing</h2>
+          <p class="text-xs text-slate-500">Convert streams to browser-compatible formats using FFmpeg</p>
+        </div>
+      </div>
+
+      <div class="space-y-4">
+        <div class="flex items-center gap-3 p-4 bg-[#22263a] rounded-xl">
+          <input type="checkbox" :checked="ffmpegSettings.ffmpeg_enabled === 'true'"
+            @change="ffmpegSettings.ffmpeg_enabled = $event.target.checked ? 'true' : 'false'"
+            class="w-4 h-4 rounded border-[#2e3250] bg-[#13151f] text-indigo-500 focus:ring-indigo-500/50">
+          <div class="flex-1">
+            <label class="text-sm text-slate-200 font-medium">Enable FFmpeg Remuxing</label>
+            <p class="text-[10px] text-slate-500 mt-0.5">Use FFmpeg to remux streams instead of direct proxy (keeps buffer/variant logic)</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 p-4 bg-[#22263a] rounded-xl">
+          <input type="checkbox" :checked="ffmpegSettings.ffmpeg_web_player === 'true'"
+            @change="ffmpegSettings.ffmpeg_web_player = $event.target.checked ? 'true' : 'false'"
+            :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+            class="w-4 h-4 rounded border-[#2e3250] bg-[#13151f] text-indigo-500 focus:ring-indigo-500/50 disabled:opacity-40">
+          <div class="flex-1">
+            <label class="text-sm text-slate-200 font-medium">Use FFmpeg for Web Player</label>
+            <p class="text-[10px] text-slate-500 mt-0.5">Remux to fMP4 for browser playback (works in all browsers)</p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-400 mb-2">Output Format</label>
+          <select v-model="ffmpegSettings.ffmpeg_output_format" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+            <option value="mp4">MP4 (Fragmented)</option>
+            <option value="mpegts">MPEG-TS</option>
+            <option value="matroska">Matroska (MKV)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-400 mb-2">Video Codec</label>
+          <select v-model="ffmpegSettings.ffmpeg_video_codec" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+            <option value="copy">Copy (No Re-encoding - Fast)</option>
+            <option value="libx264">H.264 (Re-encode)</option>
+            <option value="libx265">H.265 (Re-encode)</option>
+          </select>
+          <p class="text-[10px] text-slate-600 mt-1.5">Use "Copy" for remuxing without quality loss</p>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-400 mb-2">Audio Codec</label>
+          <select v-model="ffmpegSettings.ffmpeg_audio_codec" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+            <option value="copy">Copy (No Re-encoding - Fast)</option>
+            <option value="aac">AAC (Re-encode)</option>
+            <option value="mp3">MP3 (Re-encode)</option>
+          </select>
+        </div>
+
+        <!-- Encoding Settings (only when re-encoding) -->
+        <div v-if="ffmpegSettings.ffmpeg_video_codec !== 'copy'" class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-2">Preset</label>
+            <select v-model="ffmpegSettings.ffmpeg_preset" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+              class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+              <option value="ultrafast">Ultrafast</option>
+              <option value="superfast">Superfast</option>
+              <option value="veryfast">Very Fast (Recommended)</option>
+              <option value="faster">Faster</option>
+              <option value="fast">Fast</option>
+              <option value="medium">Medium</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-xs text-slate-400 mb-2">Tune</label>
+            <select v-model="ffmpegSettings.ffmpeg_tune" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+              class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+              <option value="zerolatency">Zero Latency (Live Streaming)</option>
+              <option value="film">Film</option>
+              <option value="animation">Animation</option>
+              <option value="grain">Grain</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-xs text-slate-400 mb-2">GOP Size (Keyframe Interval)</label>
+            <input v-model="ffmpegSettings.ffmpeg_gop_size" type="number" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+              class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40"
+              placeholder="60">
+            <p class="text-[10px] text-slate-600 mt-1.5">60 = keyframe every 2s @ 30fps</p>
+          </div>
+
+          <div>
+            <label class="block text-xs text-slate-400 mb-2">Video Bitrate</label>
+            <input v-model="ffmpegSettings.ffmpeg_video_bitrate" type="text" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+              class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40"
+              placeholder="4000k">
+            <p class="text-[10px] text-slate-600 mt-1.5">4000k-5000k for 1080p</p>
+          </div>
+
+          <div class="col-span-2">
+            <label class="block text-xs text-slate-400 mb-2">Pixel Format</label>
+            <select v-model="ffmpegSettings.ffmpeg_pixel_format" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+              class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+              <option value="yuv420p">YUV 4:2:0 (Maximum Compatibility)</option>
+              <option value="yuv422p">YUV 4:2:2</option>
+              <option value="yuv444p">YUV 4:4:4</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-400 mb-2">Custom IPTV Parameters</label>
+          <input v-model="ffmpegSettings.ffmpeg_custom_params" type="text" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 font-mono focus:outline-none focus:border-indigo-500/50 disabled:opacity-40"
+            placeholder="Additional FFmpeg flags">
+          <p class="text-[10px] text-slate-600 mt-1.5">Advanced: Additional FFmpeg flags for IPTV streaming</p>
+        </div>
+
+        <!-- Web Player Settings -->
+        <div class="border-t border-[#2e3250] pt-4 mt-2">
+          <h3 class="text-xs font-semibold text-slate-300 mb-3">Web Player Settings (Separate from IPTV)</h3>
+
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs text-slate-400 mb-2">Web Format</label>
+              <select v-model="ffmpegSettings.ffmpeg_web_format" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+                class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+                <option value="mp4">MP4 (Fragmented - Recommended)</option>
+                <option value="mpegts">MPEG-TS</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-xs text-slate-400 mb-2">Web Video Codec</label>
+              <select v-model="ffmpegSettings.ffmpeg_web_video_codec" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+                class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+                <option value="copy">Copy (Recommended - Fast)</option>
+                <option value="libx264">H.264 (Re-encode)</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-xs text-slate-400 mb-2">Web Audio Codec</label>
+              <select v-model="ffmpegSettings.ffmpeg_web_audio_codec" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+                class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50 disabled:opacity-40">
+                <option value="copy">Copy (Recommended - Fast)</option>
+                <option value="aac">AAC (Re-encode)</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="block text-xs text-slate-400 mb-2">Web Player Params</label>
+              <input v-model="ffmpegSettings.ffmpeg_web_params" type="text" :disabled="ffmpegSettings.ffmpeg_enabled === 'false'"
+                class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 font-mono focus:outline-none focus:border-indigo-500/50 disabled:opacity-40"
+                placeholder="-movflags frag_keyframe+empty_moov">
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <button @click="saveFfmpegSettings" :disabled="ffmpegSaving"
+            class="px-6 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors">
+            {{ ffmpegSaving ? 'Saving…' : 'Save FFmpeg Settings' }}
+          </button>
+          <span v-if="ffmpegSaved" class="text-xs text-green-400">✓ Saved</span>
+          <span v-if="ffmpegError" class="text-xs text-red-400">{{ ffmpegError }}</span>
+        </div>
+
+        <div class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+          <p class="text-xs text-amber-400">
+            <strong>Note:</strong> FFmpeg remuxing uses your existing buffer and variant fallback logic.
+            The stream is buffered first, then piped through FFmpeg for format conversion before sending to clients.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    </template> <!-- end streaming tab -->
 
     <!-- Scheduler Tab -->
     <template v-if="tab === 'scheduler'">
