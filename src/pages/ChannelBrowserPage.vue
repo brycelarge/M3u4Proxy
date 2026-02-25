@@ -132,14 +132,22 @@ async function findOtherSourcesBulk() {
   channelVariants.value = []
 
   try {
-    // Get all selected channels
-    const selected = getAllSelectedChannels()
+    // Get all selected channels (await since it's async)
+    const selected = await getAllSelectedChannels()
     const channelIds = selected.map(ch => ch.id)
 
     console.log(`[Find Other Sources] Searching for variants of ${channelIds.length} channels`)
+    console.log(`[Find Other Sources] Channel IDs:`, channelIds.slice(0, 5), '...')
 
     // Fetch variants for all selected channels
-    const response = await api.post('/api/source-channels/bulk-variants', { channelIds })
+    const response = await fetch('/api/source-channels/bulk-variants', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelIds })
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`)
+      return r.json()
+    })
 
     console.log(`[Find Other Sources] Found variants for ${response.length} channels`)
     channelVariants.value = response
@@ -151,10 +159,33 @@ async function findOtherSourcesBulk() {
   }
 }
 
+// Add a single variant to selection
+function addVariant(variant) {
+  // Variant is a source_channel, we need to add it to the selection
+  // Create a channel object that toggleChannel expects
+  toggleChannel({ id: variant.id, ...variant })
+}
+
+// Add all variants for a specific channel
+function addChannelVariants(variants) {
+  for (const variant of variants) {
+    toggleChannel({ id: variant.id, ...variant })
+  }
+}
+
+// Add all variants from all channels
+function addAllVariants() {
+  for (const item of channelVariants.value) {
+    for (const variant of item.variants) {
+      toggleChannel({ id: variant.id, ...variant })
+    }
+  }
+}
+
 function addVariantsToSelection(variants) {
   // Add selected variants to the current selection
   for (const variant of variants) {
-    toggleChannel(variant.id)
+    addVariant(variant)
   }
   showVariantsModal.value = false
 }
@@ -512,8 +543,9 @@ function onSetName(payload) {
           <!-- Content -->
           <div class="flex-1 overflow-y-auto p-5">
             <div v-if="variantsLoading" class="flex flex-col items-center justify-center gap-3 py-12 text-slate-500">
-              <span class="w-8 h-8 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></span>
-              <p class="text-sm">Searching for variants...</p>
+              <span class="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></span>
+              <p class="text-base font-medium text-slate-300">Searching for variants...</p>
+              <p class="text-xs text-slate-500">Looking for channels with the same name in other sources</p>
             </div>
 
             <div v-else-if="!channelVariants.length" class="flex flex-col items-center justify-center gap-3 py-12 text-slate-500">
@@ -522,7 +554,15 @@ function onSetName(payload) {
             </div>
 
             <div v-else class="space-y-4">
-              <p class="text-xs text-slate-500 mb-3">Found variants for {{ channelVariants.length }} channel(s)</p>
+              <div class="flex items-center justify-between mb-3">
+                <p class="text-xs text-slate-500">Found variants for {{ channelVariants.length }} channel(s)</p>
+                <button
+                  @click="addAllVariants"
+                  class="px-3 py-1.5 text-xs bg-cyan-500 hover:bg-cyan-400 text-white rounded-lg transition-colors whitespace-nowrap"
+                >
+                  Add All Variants
+                </button>
+              </div>
 
               <!-- Each channel with its variants -->
               <div v-for="item in channelVariants" :key="item.channel.id" class="space-y-2">
@@ -530,6 +570,12 @@ function onSetName(payload) {
                   <span class="font-semibold text-sm text-slate-200">{{ item.channel.tvg_name }}</span>
                   <span class="text-xs text-slate-600">•</span>
                   <span class="text-xs text-slate-500">{{ item.variants.length }} variant(s)</span>
+                  <button
+                    @click="addChannelVariants(item.variants)"
+                    class="ml-auto px-2 py-1 text-[10px] bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-cyan-300 rounded transition-colors whitespace-nowrap"
+                  >
+                    Add All
+                  </button>
                 </div>
 
                 <!-- Variants for this channel -->
@@ -561,7 +607,7 @@ function onSetName(payload) {
                       </div>
                     </div>
                     <button
-                      @click="toggleChannel(variant.id)"
+                      @click="addVariant(variant)"
                       class="px-3 py-1.5 text-xs bg-indigo-500 hover:bg-indigo-400 text-white rounded-lg transition-colors whitespace-nowrap"
                     >
                       Add

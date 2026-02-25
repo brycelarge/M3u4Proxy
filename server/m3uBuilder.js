@@ -8,6 +8,19 @@ import path from 'node:path'
  * @returns {string}
  */
 /**
+ * Remove quality suffix from channel name (HD, FHD, UHD, SD, 4K, etc.)
+ */
+function cleanChannelName(name) {
+  return name
+    .replace(/\s+(UHD|4K|2160p)(\s*\*)?$/i, '')
+    .replace(/\s+(FHD|1080p)(\s*\*)?$/i, '')
+    .replace(/\s+(HD|720p)(\s*\*)?$/i, '')
+    .replace(/\s+(SD|480p)(\s*\*)?$/i, '')
+    .replace(/\s+\*$/, '') // Remove trailing asterisk
+    .trim()
+}
+
+/**
  * Build M3U content from playlist channels.
  * @param {Array}  channels  - playlist_channels rows
  * @param {Map}    epgMap    - source_tvg_id -> target_tvg_id
@@ -20,6 +33,7 @@ export function buildM3U(channels, epgMap = new Map(), opts = {}) {
   const { baseUrl, catchupSrc, catchupDays = 7 } = opts
   const lines = ['#EXTM3U url-tvg="' + (opts.epgUrl || '') + '"']
   for (const ch of channels) {
+    const cleanName = cleanChannelName(ch.tvg_name)
     const tvgId  = ch.custom_tvg_id || epgMap.get(ch.tvg_id) || ch.tvg_id || ''
     const rawLogo = ch.custom_logo || ch.tvg_logo || ''
     const logo   = rawLogo ? ` tvg-logo="${baseUrl ? `${baseUrl}/api/logo?url=${encodeURIComponent(rawLogo)}` : rawLogo}"` : ''
@@ -29,7 +43,7 @@ export function buildM3U(channels, epgMap = new Map(), opts = {}) {
       ? ` catchup="default" catchup-source="${catchupSrc}" catchup-days="${catchupDays}"`
       : ''
     const streamUrl = baseUrl ? `${baseUrl}/stream/${ch.id}` : ch.url
-    lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${ch.tvg_name}"${chno}${logo}${group}${catchup},${ch.tvg_name}`)
+    lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${cleanName}"${chno}${logo}${group}${catchup},${cleanName}`)
     lines.push(streamUrl)
   }
   return lines.join('\n')

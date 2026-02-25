@@ -135,12 +135,12 @@ app.post('/api/sources', (req, res) => {
 })
 
 app.put('/api/sources/:id', (req, res) => {
-  const { name, type, url, username, password, refresh_cron, category, max_streams } = req.body
+  const { name, type, url, username, password, refresh_cron, category, max_streams, priority } = req.body
   const cat = category || 'playlist'
   const typ = cat === 'epg' ? 'epg' : (type || 'm3u')
   db.prepare(
-    'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=? WHERE id=?'
-  ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, req.params.id)
+    'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=?, priority=? WHERE id=?'
+  ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, Number(priority) || 999, req.params.id)
   res.json(db.prepare('SELECT * FROM sources WHERE id = ?').get(req.params.id))
 })
 
@@ -690,6 +690,7 @@ app.get('/api/source-channels/:id/variants', (req, res) => {
 // Bulk fetch variants for multiple channels
 app.post('/api/source-channels/bulk-variants', (req, res) => {
   const { channelIds } = req.body
+
   if (!Array.isArray(channelIds) || channelIds.length === 0) {
     return res.json([])
   }
@@ -697,15 +698,12 @@ app.post('/api/source-channels/bulk-variants', (req, res) => {
   const results = []
 
   for (const channelId of channelIds) {
-    // Get the channel from playlist_channels
-    const channel = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
-    if (!channel) continue
+    // Get the channel from source_channels (not playlist_channels)
+    const channel = db.prepare('SELECT * FROM source_channels WHERE id = ?').get(channelId)
+    if (!channel || !channel.normalized_name) continue
 
-    // Get the source channel to find normalized_name
-    const sourceChannel = db.prepare('SELECT normalized_name FROM source_channels WHERE url = ?').get(channel.url)
-    if (!sourceChannel || !sourceChannel.normalized_name) continue
-
-    // Find all variants with the same normalized name
+    // Find all variants with the same normalized name from DIFFERENT sources
+    // Ordered by source priority (lower = better), then quality
     const variants = db.prepare(`
       SELECT
         sc.id,
@@ -714,12 +712,14 @@ app.post('/api/source-channels/bulk-variants', (req, res) => {
         sc.url,
         sc.group_title,
         s.id as source_id,
-        s.name as source_name
+        s.name as source_name,
+        COALESCE(s.priority, 999) as source_priority
       FROM source_channels sc
       JOIN sources s ON sc.source_id = s.id
       WHERE sc.normalized_name = ?
-        AND sc.url != ?
+        AND sc.source_id != ?
       ORDER BY
+        COALESCE(s.priority, 999) ASC,
         CASE sc.quality
           WHEN 'UHD' THEN 1
           WHEN 'FHD' THEN 2
@@ -727,7 +727,7 @@ app.post('/api/source-channels/bulk-variants', (req, res) => {
           WHEN 'SD' THEN 4
           ELSE 5
         END
-    `).all(sourceChannel.normalized_name, channel.url)
+    `).all(channel.normalized_name, channel.source_id)
 
     if (variants.length > 0) {
       results.push({
@@ -873,12 +873,43 @@ app.post('/api/playlists/:id/build', (req, res) => {
   }
 })
 
-// Live M3U — served dynamically, stream URLs proxied through /stream/:id
 app.get('/api/playlists/:id/m3u', (req, res) => {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
 
-  let channels  = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id').all(playlist.id)
+  // Get all channels with their normalized names and deduplicate
+  const allChannels = db.prepare(`
+    SELECT
+      pc.id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.group_title,
+      pc.url, pc.sort_order, pc.source_id, pc.epg_source_id,
+      sc.normalized_name,
+      COALESCE(s.priority, 999) as source_priority,
+      CASE sc.quality
+        WHEN 'UHD' THEN 1
+        WHEN 'FHD' THEN 2
+        WHEN 'HD' THEN 3
+        WHEN 'SD' THEN 4
+        ELSE 5
+      END as quality_order
+    FROM playlist_channels pc
+    LEFT JOIN source_channels sc ON sc.url = pc.url
+    LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+    WHERE pc.playlist_id = ?
+    ORDER BY
+      sc.normalized_name,
+      source_priority ASC,
+      quality_order ASC,
+      pc.sort_order, pc.id
+  `).all(playlist.id)
+
+  // Deduplicate by normalized_name - keep only the first (best) variant
+  const seen = new Set()
+  let channels = allChannels.filter(ch => {
+    if (!ch.normalized_name || seen.has(ch.normalized_name)) return false
+    seen.add(ch.normalized_name)
+    return true
+  })
+
   const epgRows   = db.prepare('SELECT * FROM epg_mappings').all()
   const epgMap    = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
   if (playlist.group_order) {
@@ -1182,10 +1213,36 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
     const playlist = db.prepare('SELECT id, name FROM playlists WHERE id = ?').get(playlist_id)
     if (!playlist) return res.status(404).json({ error: `Playlist with ID ${playlist_id} not found` })
 
-    // Get playlist channels
-    const playlistChannels = db.prepare(
-      `SELECT id, tvg_id, tvg_name, tvg_logo, custom_logo, custom_tvg_id, epg_source_id FROM playlist_channels WHERE playlist_id = ? GROUP BY COALESCE(custom_tvg_id, tvg_id), tvg_name`
-    ).all(playlist_id)
+    // Get playlist channels, deduplicated by normalized_name (one channel per normalized name)
+    const allChannels = db.prepare(`
+      SELECT
+        pc.id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.custom_logo, pc.custom_tvg_id, pc.epg_source_id,
+        sc.normalized_name,
+        COALESCE(s.priority, 999) as source_priority,
+        CASE sc.quality
+          WHEN 'UHD' THEN 1
+          WHEN 'FHD' THEN 2
+          WHEN 'HD' THEN 3
+          WHEN 'SD' THEN 4
+          ELSE 5
+        END as quality_order
+      FROM playlist_channels pc
+      LEFT JOIN source_channels sc ON sc.url = pc.url
+      LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+      WHERE pc.playlist_id = ?
+      ORDER BY
+        sc.normalized_name,
+        source_priority ASC,
+        quality_order ASC
+    `).all(playlist_id)
+
+    // Deduplicate by normalized_name - keep only the first (best) variant
+    const seen = new Set()
+    const playlistChannels = allChannels.filter(ch => {
+      if (!ch.normalized_name || seen.has(ch.normalized_name)) return false
+      seen.add(ch.normalized_name)
+      return true
+    })
 
     if (!playlistChannels.length) {
       return res.json({
@@ -2455,19 +2512,21 @@ function getChannelVariants(channelId) {
     return [{ id: channel.id, url: channel.url, tvg_name: channel.tvg_name, quality: '', source_id: channel.source_id }]
   }
 
-  // Find all source channels with the same normalized_name, ordered by quality
-  const qualityOrder = { 'UHD': 1, 'FHD': 2, 'HD': 3, 'SD': 4, '': 5 }
+  // Find all source channels with the same normalized_name, ordered by source priority then quality
   const variants = db.prepare(`
-    SELECT id, url, tvg_name, quality, source_id
-    FROM source_channels
-    WHERE normalized_name = ?
-    ORDER BY CASE quality
-      WHEN 'UHD' THEN 1
-      WHEN 'FHD' THEN 2
-      WHEN 'HD' THEN 3
-      WHEN 'SD' THEN 4
-      ELSE 5
-    END
+    SELECT sc.id, sc.url, sc.tvg_name, sc.quality, sc.source_id
+    FROM source_channels sc
+    LEFT JOIN sources s ON sc.source_id = s.id
+    WHERE sc.normalized_name = ?
+    ORDER BY
+      COALESCE(s.priority, 999) ASC,
+      CASE sc.quality
+        WHEN 'UHD' THEN 1
+        WHEN 'FHD' THEN 2
+        WHEN 'HD' THEN 3
+        WHEN 'SD' THEN 4
+        ELSE 5
+      END
   `).all(sourceChannel.normalized_name)
 
   return variants.length > 0 ? variants : [{ id: channel.id, url: channel.url, tvg_name: channel.tvg_name, quality: '', source_id: channel.source_id }]
