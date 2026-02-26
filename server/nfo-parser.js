@@ -133,7 +133,7 @@ export function findNfoForChannel(channelId) {
 }
 
 export async function syncNfoToDatabase() {
-  const db = new Database(process.env.DB_PATH || '/data/db/m3u4prox.db')
+  const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
 
   // Create metadata table if it doesn't exist
   db.exec(`
@@ -238,14 +238,14 @@ export async function syncNfoToDatabase() {
 }
 
 export function getVodMetadata(channelId) {
-  const db = new Database(process.env.DB_PATH || '/data/db/m3u4prox.db')
+  const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
   const row = db.prepare('SELECT * FROM vod_metadata WHERE channel_id = ?').get(channelId)
   db.close()
   return row
 }
 
 export function getAllVodMetadata() {
-  const db = new Database(process.env.DB_PATH || '/data/db/m3u4prox.db')
+  const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
   const rows = db.prepare('SELECT * FROM vod_metadata').all()
   db.close()
   return rows

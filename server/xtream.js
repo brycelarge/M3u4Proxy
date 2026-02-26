@@ -287,8 +287,42 @@ export function registerXtreamRoutes(app) {
     if (!action) return res.json(buildUserInfo(user, base))
 
     const epgMap     = getEpgMap()
-    const liveChans  = user.playlist_id     ? getChannels(user.playlist_id)         : []
-    const vodChans   = user.vod_playlist_id ? getVodChannels(user.vod_playlist_id)  : []
+
+    // Get channels from all assigned live playlists
+    let liveChans = []
+    try {
+      const playlistIds = JSON.parse(user.playlist_ids || '[]')
+      if (playlistIds.length > 0) {
+        for (const id of playlistIds) {
+          liveChans.push(...getChannels(id))
+        }
+      } else if (user.playlist_id) {
+        // Fallback to old single playlist
+        liveChans = getChannels(user.playlist_id)
+      }
+    } catch {
+      if (user.playlist_id) {
+        liveChans = getChannels(user.playlist_id)
+      }
+    }
+
+    // Get channels from all assigned VOD playlists
+    let vodChans = []
+    try {
+      const vodPlaylistIds = JSON.parse(user.vod_playlist_ids || '[]')
+      if (vodPlaylistIds.length > 0) {
+        for (const id of vodPlaylistIds) {
+          vodChans.push(...getVodChannels(id))
+        }
+      } else if (user.vod_playlist_id) {
+        // Fallback to old single playlist
+        vodChans = getVodChannels(user.vod_playlist_id)
+      }
+    } catch {
+      if (user.vod_playlist_id) {
+        vodChans = getVodChannels(user.vod_playlist_id)
+      }
+    }
 
     switch (action) {
       case 'get_live_categories':

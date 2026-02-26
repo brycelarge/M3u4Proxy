@@ -131,10 +131,10 @@ networks:
 ## Quick Start
 
 ```bash
-# 1. Export VOD playlist (creates /data/vod-strm/{playlist-name}/)
-curl -X POST http://localhost:3005/api/strm/export/5
+# 1. Export ALL VOD playlists (creates /data/vod-strm/{playlist-name}/ for each)
+curl -X POST http://localhost:3005/api/strm/export-all
 
-# 2. Add library in Jellyfin pointing to /media/iptv-{playlist-name}
+# 2. Add libraries in Jellyfin pointing to /media/iptv-{playlist-name}
 
 # 3. Wait for Jellyfin to scan and create .nfo files
 
@@ -146,9 +146,49 @@ curl -X POST http://localhost:3005/api/nfo/sync
 
 ### 1. Export STRM Files from M3U4Proxy
 
-#### Manual Export (API)
+#### Export All VOD Playlists (Recommended)
 ```bash
-# Export playlist ID 5 to STRM files
+# Export ALL VOD playlists at once
+curl -X POST http://localhost:3005/api/strm/export-all
+```
+
+This automatically:
+- Finds all playlists with `playlist_type = 'vod'`
+- Creates a folder for each: `/data/vod-strm/{playlist-name}/`
+- Exports all VOD items to `.strm` files
+- Creates `.m3u4prox.json` metadata files
+
+**Example Response:**
+```json
+{
+  "success": true,
+  "playlists": [
+    {
+      "playlistId": 5,
+      "playlistName": "Movies",
+      "success": true,
+      "stats": { "created": 1250, "updated": 0, "deleted": 0 },
+      "directory": "/data/vod-strm/movies"
+    },
+    {
+      "playlistId": 6,
+      "playlistName": "TV Series",
+      "success": true,
+      "stats": { "created": 850, "updated": 0, "deleted": 0 },
+      "directory": "/data/vod-strm/tv-series"
+    }
+  ],
+  "summary": {
+    "totalPlaylists": 2,
+    "successful": 2,
+    "totalCreated": 2100
+  }
+}
+```
+
+#### Export Single Playlist (Optional)
+```bash
+# Export specific playlist by ID
 curl -X POST http://localhost:3005/api/strm/export/5
 ```
 
@@ -410,9 +450,9 @@ curl -X POST http://localhost:3005/api/nfo/sync
 ```bash
 #!/bin/bash
 
-# 1. Export STRM files for playlist ID 5
-echo "Exporting STRM files..."
-curl -X POST http://localhost:3005/api/strm/export/5
+# 1. Export ALL VOD playlists to STRM files
+echo "Exporting all VOD playlists..."
+curl -X POST http://localhost:3005/api/strm/export-all
 
 # 2. Wait for Jellyfin to scan (or trigger manually)
 echo "Waiting 60s for Jellyfin to scan..."
@@ -423,6 +463,7 @@ echo "Syncing NFO metadata..."
 curl -X POST http://localhost:3005/api/nfo/sync
 
 echo "Setup complete!"
+echo "Check folders: ls -la /data/vod-strm/"
 ```
 
 ## Support

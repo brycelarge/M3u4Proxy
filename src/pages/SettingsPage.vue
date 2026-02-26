@@ -129,6 +129,7 @@ const scheduleError  = ref({})   // { [id]: string }
 // EPG Scheduler
 const epgGrabSchedule = ref('0 23 * * *')
 const epgEnrichSchedule = ref('0 2 * * *')
+const strmExportSchedule = ref('0 3 * * *')
 const epgScheduleSaving = ref(false)
 
 const CRON_PRESETS = [
@@ -170,6 +171,7 @@ async function load() {
     // Load EPG schedules
     epgGrabSchedule.value = s.epg_grab_schedule || '0 23 * * *'
     epgEnrichSchedule.value = s.epg_enrich_schedule || '0 2 * * *'
+    strmExportSchedule.value = s.strm_export_schedule || '0 3 * * *'
     form.value = {
       hdhr_device_name: s.hdhr_device_name || 'M3u4Prox',
       hdhr_tuner_count: s.hdhr_tuner_count || '4',
@@ -204,7 +206,8 @@ async function saveAllSchedules() {
     // Save EPG schedules
     await api.saveSettings({
       epg_grab_schedule: epgGrabSchedule.value || '',
-      epg_enrich_schedule: epgEnrichSchedule.value || ''
+      epg_enrich_schedule: epgEnrichSchedule.value || '',
+      strm_export_schedule: strmExportSchedule.value || ''
     })
 
     // Save all playlist schedules
@@ -591,6 +594,35 @@ onMounted(async () => { await load(); await loadProxySettings() })
 
             <input
               v-model="epgEnrichSchedule"
+              placeholder="cron expression or leave blank to disable"
+              class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
+            />
+          </div>
+        </div>
+
+        <!-- STRM Export Schedule -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-sm font-semibold text-slate-100">STRM Export</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
+              Exports all VOD playlists to Jellyfin
+            </span>
+          </div>
+
+          <div class="flex items-center gap-2 flex-wrap">
+            <div class="flex gap-1 flex-wrap">
+              <button
+                v-for="p in CRON_PRESETS" :key="'strm-' + p.label"
+                @click="strmExportSchedule = p.value"
+                :class="['text-[10px] px-2 py-1 rounded border transition-colors',
+                  strmExportSchedule === p.value
+                    ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                    : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
+              >{{ p.label }}</button>
+            </div>
+
+            <input
+              v-model="strmExportSchedule"
               placeholder="cron expression or leave blank to disable"
               class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
             />

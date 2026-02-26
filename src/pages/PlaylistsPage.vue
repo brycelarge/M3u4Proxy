@@ -14,6 +14,8 @@ const filterSourceId = ref('')
 const copied         = ref(null)
 const showAdvanced   = ref(false)
 const showGroupOrder = ref(null)  // playlist object or null
+const exporting      = ref(null)  // playlist ID being exported
+const exportResult   = ref(null)
 
 function proxyUrl(p) {
   // Check if window is defined (client-side only)
@@ -112,6 +114,23 @@ async function build(p) {
   }
 }
 
+async function exportStrm(p) {
+  exporting.value = p.id
+  exportResult.value = null
+  error.value = ''
+  try {
+    const res = await fetch(`/api/strm/export/${p.id}`, { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Export failed')
+    exportResult.value = data
+    setTimeout(() => { exportResult.value = null }, 5000)
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    exporting.value = null
+  }
+}
+
 const emit = defineEmits(['open-editor'])
 
 onMounted(load)
@@ -142,6 +161,13 @@ onMounted(load)
     </div>
 
     <p v-if="error" class="text-xs text-red-400 mb-4">⚠ {{ error }}</p>
+    <div v-if="exportResult" class="bg-green-500/10 border border-green-500/30 rounded-lg p-3 mb-4">
+      <p class="text-xs text-green-300 font-semibold">✓ {{ exportResult.message }}</p>
+      <p class="text-[10px] text-green-400/70 mt-1">
+        Created: {{ exportResult.stats.created }} · Updated: {{ exportResult.stats.updated }} · Deleted: {{ exportResult.stats.deleted }}
+      </p>
+      <p v-if="exportResult.stats.directory" class="text-[10px] text-slate-500 mt-1 font-mono">{{ exportResult.stats.directory }}</p>
+    </div>
 
     <!-- Empty state -->
     <div v-if="!playlists.length" class="text-center py-16 text-slate-500">
@@ -238,8 +264,9 @@ onMounted(load)
             <!-- Actions -->
             <td class="px-5 py-4">
               <div class="flex items-center gap-1.5 justify-end flex-wrap">
-                <!-- Build -->
+                <!-- Build (Live only) -->
                 <button
+                  v-if="p.playlist_type !== 'vod'"
                   @click="build(p)"
                   :disabled="building === p.id || !p.output_path"
                   class="px-2.5 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg hover:border-emerald-500 text-slate-300 disabled:opacity-40 transition-colors"
@@ -247,6 +274,18 @@ onMounted(load)
                 >
                   <span v-if="building === p.id" class="w-3 h-3 border-2 border-slate-400/30 border-t-slate-300 rounded-full animate-spin inline-block"></span>
                   <span v-else>⚙</span>
+                </button>
+
+                <!-- Export STRM (VOD only) -->
+                <button
+                  v-if="p.playlist_type === 'vod'"
+                  @click="exportStrm(p)"
+                  :disabled="exporting === p.id || !p.channel_count"
+                  class="px-2.5 py-1.5 text-xs bg-green-500/15 border border-green-500/30 rounded-lg hover:border-green-400 text-green-300 disabled:opacity-40 transition-colors"
+                  title="Export STRM files for Jellyfin"
+                >
+                  <span v-if="exporting === p.id" class="w-3 h-3 border-2 border-green-400/30 border-t-green-300 rounded-full animate-spin inline-block"></span>
+                  <span v-else>📁</span>
                 </button>
 
                 <!-- Group order -->

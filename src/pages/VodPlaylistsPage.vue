@@ -20,6 +20,10 @@ const selGroups  = ref(new Set())
 const groupSearch = ref('')
 const saving     = ref(false)
 
+// STRM export
+const exporting  = ref(null)  // playlist ID being exported
+const exportResult = ref(null)
+
 const filteredGroups = computed(() => {
   const q = groupSearch.value.toLowerCase()
   return q ? allGroups.value.filter(g => g.group_title.toLowerCase().includes(q)) : allGroups.value
@@ -149,6 +153,23 @@ async function applyGroups() {
   } catch (e) { error.value = e.message } finally { saving.value = false }
 }
 
+async function exportStrm(p) {
+  exporting.value = p.id
+  exportResult.value = null
+  error.value = ''
+  try {
+    const res = await fetch(`/api/strm/export/${p.id}`, { method: 'POST' })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Export failed')
+    exportResult.value = data
+    setTimeout(() => { exportResult.value = null }, 5000)
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    exporting.value = null
+  }
+}
+
 function copyUrl(url, key) {
   // Check if navigator.clipboard is available (client-side only)
   if (typeof navigator !== 'undefined' && navigator.clipboard) {
@@ -189,6 +210,13 @@ onMounted(load)
     </div>
 
     <p v-if="error" class="text-xs text-red-400 mb-4">⚠ {{ error }}</p>
+    <div v-if="exportResult" class="bg-green-500/10 border border-green-500/30 rounded-lg p-3 mb-4">
+      <p class="text-xs text-green-300 font-semibold">✓ {{ exportResult.message }}</p>
+      <p class="text-[10px] text-green-400/70 mt-1">
+        Created: {{ exportResult.stats.created }} · Updated: {{ exportResult.stats.updated }} · Deleted: {{ exportResult.stats.deleted }}
+      </p>
+      <p v-if="exportResult.stats.directory" class="text-[10px] text-slate-500 mt-1 font-mono">{{ exportResult.stats.directory }}</p>
+    </div>
 
     <!-- Empty state -->
     <div v-if="!loading && !playlists.length" class="flex flex-col items-center justify-center py-20 text-slate-500 gap-3">
@@ -218,10 +246,14 @@ onMounted(load)
               </a>
             </div>
           </div>
-          <div class="flex items-center gap-2 shrink-0">
+          <div class="flex items-center gap-2 shrink-0 flex-wrap">
             <button @click="openPicker(p)" :disabled="!p.source_id"
               class="px-3 py-1.5 text-xs bg-purple-500/15 border border-purple-500/30 hover:border-purple-400 text-purple-300 rounded-lg transition-colors disabled:opacity-40">
               📂 Select Groups
+            </button>
+            <button @click="exportStrm(p)" :disabled="exporting === p.id || !p.channel_count"
+              class="px-3 py-1.5 text-xs bg-green-500/15 border border-green-500/30 hover:border-green-400 text-green-300 rounded-lg transition-colors disabled:opacity-40">
+              {{ exporting === p.id ? '⏳ Exporting...' : '📁 Export STRM' }}
             </button>
             <button @click="openEdit(p)"
               class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] hover:border-slate-500 text-slate-400 rounded-lg transition-colors">

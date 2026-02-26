@@ -17,7 +17,7 @@ const history        = ref([])
 const historyLoading = ref(false)
 
 const emptyForm = () => ({
-  username: '', password: '', playlist_id: '', vod_playlist_id: '', max_connections: 1,
+  username: '', password: '', playlist_ids: [], vod_playlist_ids: [], max_connections: 1,
   expires_at: '3000-01-01', active: true, notes: '',
 })
 const form = ref(emptyForm())
@@ -83,11 +83,32 @@ function openCreate() {
 
 function openEdit(u) {
   editing.value = u
+
+  // Parse playlist_ids from JSON, or migrate from old playlist_id
+  let liveIds = []
+  try {
+    liveIds = JSON.parse(u.playlist_ids || '[]')
+  } catch {
+    if (u.playlist_id) {
+      liveIds = [u.playlist_id]
+    }
+  }
+
+  // Parse vod_playlist_ids from JSON, or migrate from old vod_playlist_id
+  let vodIds = []
+  try {
+    vodIds = JSON.parse(u.vod_playlist_ids || '[]')
+  } catch {
+    if (u.vod_playlist_id) {
+      vodIds = [u.vod_playlist_id]
+    }
+  }
+
   form.value = {
     username:          u.username,
     password:          '',
-    playlist_id:       u.playlist_id || '',
-    vod_playlist_id:   u.vod_playlist_id || '',
+    playlist_ids:      liveIds,
+    vod_playlist_ids:  vodIds,
     max_connections:   u.max_connections,
     expires_at:        u.expires_at ? u.expires_at.slice(0, 10) : '3000-01-01',
     active:            !!u.active,
@@ -473,33 +494,49 @@ onMounted(load)
               </div>
             </div>
 
-            <!-- Live Playlist -->
+            <!-- Live Playlists (Multi-select) -->
             <div>
-              <label class="block text-xs text-slate-500 mb-1.5">Live Playlist</label>
-              <div class="relative">
-                <select
-                  v-model="form.playlist_id"
-                  class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl pl-3 pr-7 py-2.5 text-sm text-slate-200 outline-none focus:border-indigo-500 appearance-none cursor-pointer"
+              <label class="block text-xs text-slate-500 mb-1.5">Live Playlists <span class="text-slate-600">(optional, select multiple)</span></label>
+              <div class="bg-[#22263a] border border-[#2e3250] rounded-xl p-3 max-h-32 overflow-y-auto">
+                <div v-if="!playlists.filter(p => p.playlist_type !== 'vod').length" class="text-xs text-slate-600 text-center py-2">
+                  No live playlists available
+                </div>
+                <label
+                  v-for="p in playlists.filter(p => p.playlist_type !== 'vod')"
+                  :key="p.id"
+                  class="flex items-center gap-2 py-1.5 cursor-pointer hover:text-slate-200 transition-colors"
                 >
-                  <option value="">— None —</option>
-                  <option v-for="p in playlists.filter(p => p.playlist_type !== 'vod')" :key="p.id" :value="p.id">{{ p.name }}</option>
-                </select>
-                <span class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] pointer-events-none">▾</span>
+                  <input
+                    type="checkbox"
+                    :value="p.id"
+                    v-model="form.playlist_ids"
+                    class="accent-indigo-500"
+                  />
+                  <span class="text-sm text-slate-300">{{ p.name }}</span>
+                </label>
               </div>
             </div>
 
-            <!-- VOD Playlist -->
+            <!-- VOD Playlists (Multi-select) -->
             <div>
-              <label class="block text-xs text-slate-500 mb-1.5">VOD Playlist <span class="text-slate-600">(optional)</span></label>
-              <div class="relative">
-                <select
-                  v-model="form.vod_playlist_id"
-                  class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl pl-3 pr-7 py-2.5 text-sm text-slate-200 outline-none focus:border-indigo-500 appearance-none cursor-pointer"
+              <label class="block text-xs text-slate-500 mb-1.5">VOD Playlists <span class="text-slate-600">(optional, select multiple)</span></label>
+              <div class="bg-[#22263a] border border-[#2e3250] rounded-xl p-3 max-h-32 overflow-y-auto">
+                <div v-if="!playlists.filter(p => p.playlist_type === 'vod').length" class="text-xs text-slate-600 text-center py-2">
+                  No VOD playlists available
+                </div>
+                <label
+                  v-for="p in playlists.filter(p => p.playlist_type === 'vod')"
+                  :key="p.id"
+                  class="flex items-center gap-2 py-1.5 cursor-pointer hover:text-slate-200 transition-colors"
                 >
-                  <option value="">— None —</option>
-                  <option v-for="p in playlists.filter(p => p.playlist_type === 'vod')" :key="p.id" :value="p.id">{{ p.name }}</option>
-                </select>
-                <span class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] pointer-events-none">▾</span>
+                  <input
+                    type="checkbox"
+                    :value="p.id"
+                    v-model="form.vod_playlist_ids"
+                    class="accent-indigo-500"
+                  />
+                  <span class="text-sm text-slate-300">{{ p.name }}</span>
+                </label>
               </div>
             </div>
 

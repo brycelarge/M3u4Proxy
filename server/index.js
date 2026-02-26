@@ -1028,7 +1028,7 @@ app.post('/api/playlists/:id/build', async (req, res) => {
   const content = buildM3U(channels, epgMap, { vodMetadata })
   try {
     writeM3U(playlist.output_path, content)
-    db.prepare('UPDATE playlists SET last_built = datetime("now") WHERE id = ?').run(playlist.id)
+    db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(playlist.id)
     res.json({ ok: true, path: playlist.output_path, channels: channels.length })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -2664,20 +2664,40 @@ app.post('/api/strm/export/:playlistId', async (req, res) => {
     return res.status(400).json({ error: 'Only VOD playlists can be exported to STRM' })
   }
 
-  // Get user credentials for this playlist (use first user with vod_playlist_id)
-  const user = db.prepare('SELECT * FROM users WHERE vod_playlist_id = ? LIMIT 1').get(playlistId)
+  const baseUrl = `${req.protocol}://${req.get('host')}`
 
-  if (!user) {
-    return res.status(400).json({ error: 'No user configured for this VOD playlist' })
+  // Get or create jellyfin user for STRM authentication
+  let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+  let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
+
+  if (!jellyfinUser) {
+    console.log('[strm] Creating default "jellyfin" user for STRM authentication')
+    // Generate random secure password
+    const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
+    jellyfinPassword = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+
+    const hashed = await hashPassword(jellyfinPassword)
+    db.prepare(
+      `INSERT INTO users (username, password, max_connections, active, notes)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
+
+    // Store password in settings for retrieval
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
+
+    jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+    console.log('[strm] Created jellyfin user with random password (stored in settings)')
   }
 
-  const baseUrl = `${req.protocol}://${req.get('host')}`
+  if (!jellyfinPassword) {
+    jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value || 'jellyfin'
+  }
 
   try {
     const { exportVodToStrm } = await import('./strm-exporter.js')
-    const stats = await exportVodToStrm(playlistId, baseUrl, user.username, user.password)
+    const stats = await exportVodToStrm(playlistId, baseUrl, jellyfinUser.username, jellyfinPassword)
 
-    db.prepare('UPDATE playlists SET last_built = datetime("now") WHERE id = ?').run(playlistId)
+    db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(playlistId)
 
     res.json({
       success: true,
@@ -2688,6 +2708,100 @@ app.post('/api/strm/export/:playlistId', async (req, res) => {
     console.error('[strm] Export failed:', e)
     res.status(500).json({ error: e.message })
   }
+})
+
+app.post('/api/strm/export-all', async (req, res) => {
+  const vodPlaylists = db.prepare('SELECT * FROM playlists WHERE playlist_type = ?').all('vod')
+
+  if (vodPlaylists.length === 0) {
+    return res.json({
+      success: true,
+      playlists: [],
+      message: 'No VOD playlists found'
+    })
+  }
+
+  const baseUrl = `${req.protocol}://${req.get('host')}`
+  const results = []
+  let totalCreated = 0
+  let totalUpdated = 0
+  let totalDeleted = 0
+  let totalErrors = 0
+
+  // Get or create jellyfin user for STRM authentication
+  let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+  let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
+
+  if (!jellyfinUser) {
+    console.log('[strm] Creating default "jellyfin" user for STRM authentication')
+    // Generate random secure password
+    const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
+    jellyfinPassword = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+
+    const hashed = await hashPassword(jellyfinPassword)
+    db.prepare(
+      `INSERT INTO users (username, password, max_connections, active, notes)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
+
+    // Store password in settings for retrieval
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
+
+    jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+    console.log('[strm] Created jellyfin user with random password (stored in settings)')
+  }
+
+  if (!jellyfinPassword) {
+    jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value || 'jellyfin'
+  }
+
+  for (const playlist of vodPlaylists) {
+    try {
+      const { exportVodToStrm } = await import('./strm-exporter.js')
+      const stats = await exportVodToStrm(playlist.id, baseUrl, jellyfinUser.username, jellyfinPassword)
+
+      db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(playlist.id)
+
+      totalCreated += stats.created
+      totalUpdated += stats.updated
+      totalDeleted += stats.deleted
+      totalErrors += stats.errors
+
+      results.push({
+        playlistId: playlist.id,
+        playlistName: playlist.name,
+        success: true,
+        stats,
+        directory: stats.directory
+      })
+
+      console.log(`[strm] Exported playlist "${playlist.name}": ${stats.created} created, ${stats.updated} updated`)
+    } catch (e) {
+      console.error(`[strm] Export failed for "${playlist.name}":`, e.message)
+      results.push({
+        playlistId: playlist.id,
+        playlistName: playlist.name,
+        success: false,
+        error: e.message
+      })
+      totalErrors++
+    }
+  }
+
+  res.json({
+    success: true,
+    playlists: results,
+    summary: {
+      totalPlaylists: vodPlaylists.length,
+      successful: results.filter(r => r.success).length,
+      failed: results.filter(r => !r.success).length,
+      totalCreated,
+      totalUpdated,
+      totalDeleted,
+      totalErrors
+    },
+    message: `Exported ${results.filter(r => r.success).length}/${vodPlaylists.length} VOD playlists`
+  })
 })
 
 app.post('/api/nfo/sync', async (req, res) => {
@@ -2743,7 +2857,7 @@ function schedulePlaylists() {
         const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
         const content = buildM3U(channels, epgMap)
         writeM3U(p.output_path, content)
-        db.prepare('UPDATE playlists SET last_built = datetime("now") WHERE id = ?').run(p.id)
+        db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(p.id)
         console.log(`[cron] Built "${p.name}" -> ${p.output_path} (${channels.length} channels)`)
       } catch (e) {
         console.error(`[cron] Failed to build "${p.name}":`, e.message)
@@ -2871,18 +2985,41 @@ function startStrmExportCron() {
       // Export all VOD playlists
       const vodPlaylists = db.prepare('SELECT * FROM playlists WHERE playlist_type = ?').all('vod')
 
-      for (const playlist of vodPlaylists) {
-        const user = db.prepare('SELECT * FROM users WHERE vod_playlist_id = ? LIMIT 1').get(playlist.id)
-        if (!user) {
-          console.log(`[cron] Skipping playlist "${playlist.name}" - no user configured`)
-          continue
-        }
+      // Get or create jellyfin user for STRM authentication
+      let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+      let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
 
+      if (!jellyfinUser) {
+        console.log('[cron] Creating default "jellyfin" user for STRM authentication')
+        const { hashPassword } = await import('./auth.js')
+
+        // Generate random secure password
+        const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
+        jellyfinPassword = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+
+        const hashed = await hashPassword(jellyfinPassword)
+        db.prepare(
+          `INSERT INTO users (username, password, max_connections, active, notes)
+           VALUES (?, ?, ?, ?, ?)`
+        ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
+
+        // Store password in settings for retrieval
+        db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
+
+        jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+        console.log('[cron] Created jellyfin user with random password (stored in settings)')
+      }
+
+      if (!jellyfinPassword) {
+        jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value || 'jellyfin'
+      }
+
+      for (const playlist of vodPlaylists) {
         try {
           const baseUrl = process.env.BASE_URL || 'http://localhost:3005'
           const { exportVodToStrm } = await import('./strm-exporter.js')
-          const stats = await exportVodToStrm(playlist.id, baseUrl, user.username, user.password)
-          db.prepare('UPDATE playlists SET last_built = datetime("now") WHERE id = ?').run(playlist.id)
+          const stats = await exportVodToStrm(playlist.id, baseUrl, jellyfinUser.username, jellyfinPassword)
+          db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(playlist.id)
           console.log(`[cron] Exported STRM for "${playlist.name}":`, stats)
         } catch (e) {
           console.error(`[cron] STRM export failed for "${playlist.name}":`, e.message)
@@ -3624,18 +3761,20 @@ app.get('/api/users', (req, res) => {
 })
 
 app.post('/api/users', async (req, res) => {
-  const { username, password, playlist_id, vod_playlist_id, max_connections, expires_at, active, notes } = req.body
+  const { username, password, playlist_ids, vod_playlist_ids, max_connections, expires_at, active, notes } = req.body
   if (!username || !password) return res.status(400).json({ error: 'username and password required' })
   try {
     const hashed = await hashPassword(password)
+    const liveIds = Array.isArray(playlist_ids) ? JSON.stringify(playlist_ids) : '[]'
+    const vodIds = Array.isArray(vod_playlist_ids) ? JSON.stringify(vod_playlist_ids) : '[]'
     const result = db.prepare(
-      `INSERT INTO users (username, password, playlist_id, vod_playlist_id, max_connections, expires_at, active, notes)
+      `INSERT INTO users (username, password, playlist_ids, vod_playlist_ids, max_connections, expires_at, active, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       username.trim(),
       hashed,
-      playlist_id || null,
-      vod_playlist_id || null,
+      liveIds,
+      vodIds,
       Number(max_connections) || 1,
       expires_at || null,
       active === false ? 0 : 1,
@@ -3649,20 +3788,22 @@ app.post('/api/users', async (req, res) => {
 })
 
 app.put('/api/users/:id', async (req, res) => {
-  const { username, password, playlist_id, vod_playlist_id, max_connections, expires_at, active, notes } = req.body
+  const { username, password, playlist_ids, vod_playlist_ids, max_connections, expires_at, active, notes } = req.body
   if (!username) return res.status(400).json({ error: 'username required' })
   const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id)
   if (!existing) return res.status(404).json({ error: 'User not found' })
   try {
     const newPassword = password ? await hashPassword(password) : existing.password
+    const liveIds = Array.isArray(playlist_ids) ? JSON.stringify(playlist_ids) : '[]'
+    const vodIds = Array.isArray(vod_playlist_ids) ? JSON.stringify(vod_playlist_ids) : '[]'
     db.prepare(
-      `UPDATE users SET username=?, password=?, playlist_id=?, vod_playlist_id=?, max_connections=?, expires_at=?, active=?, notes=?
+      `UPDATE users SET username=?, password=?, playlist_ids=?, vod_playlist_ids=?, max_connections=?, expires_at=?, active=?, notes=?
        WHERE id=?`
     ).run(
       username.trim(),
       newPassword,
-      playlist_id || null,
-      vod_playlist_id || null,
+      liveIds,
+      vodIds,
       Number(max_connections) || 1,
       expires_at || null,
       active === false ? 0 : 1,
