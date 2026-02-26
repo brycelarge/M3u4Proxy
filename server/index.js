@@ -652,7 +652,54 @@ app.get('/api/playlists/schedules', (req, res) => {
 
 // Get channels in a playlist
 app.get('/api/playlists/:id/channels', (req, res) => {
-  res.json(db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id').all(req.params.id))
+  const dedupe = req.query.dedupe === 'true'
+
+  if (!dedupe) {
+    // Return all channels without deduplication
+    res.json(db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id').all(req.params.id))
+    return
+  }
+
+  // Return deduplicated channels using SAME logic as M3U export and EPG Mappings
+  const allChannels = db.prepare(`
+    SELECT
+      pc.*,
+      sc.normalized_name,
+      COALESCE(s.priority, 999) as source_priority,
+      CASE sc.quality
+        WHEN 'UHD' THEN 1
+        WHEN 'FHD' THEN 2
+        WHEN 'HD' THEN 3
+        WHEN 'SD' THEN 4
+        ELSE 5
+      END as quality_order
+    FROM playlist_channels pc
+    LEFT JOIN source_channels sc ON sc.url = pc.url
+    LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+    WHERE pc.playlist_id = ?
+    ORDER BY
+      sc.normalized_name,
+      source_priority ASC,
+      quality_order ASC,
+      pc.sort_order, pc.id
+  `).all(req.params.id)
+
+  // Deduplicate by normalized_name - keep only the first (best) variant
+  const seen = new Set()
+  const channels = allChannels.filter(ch => {
+    if (!ch.normalized_name) return true
+    if (seen.has(ch.normalized_name)) return false
+    seen.add(ch.normalized_name)
+    return true
+  })
+
+  // Re-sort by sort_order after deduplication
+  channels.sort((a, b) => {
+    if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
+    return a.id - b.id
+  })
+
+  res.json(channels)
 })
 
 // Get selection map for a playlist — returns { groups: {groupName: [sourceChannelId,...]}, overrides: {...} }
@@ -988,6 +1035,7 @@ app.get('/api/playlists/:id/m3u', (req, res) => {
     SELECT
       pc.id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.group_title,
       pc.url, pc.sort_order, pc.source_id, pc.epg_source_id,
+      pc.custom_tvg_id, pc.custom_logo,
       sc.normalized_name,
       COALESCE(s.priority, 999) as source_priority,
       CASE sc.quality
@@ -1082,13 +1130,15 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
       pc.sort_order, pc.id
   `).all(playlist.id)
 
-  // Deduplicate by normalized_name - keep only the first (best) variant
-  // Channels without normalized_name are kept as-is (no deduplication)
+  // For XMLTV, deduplicate by BOTH normalized_name AND epg_id
+  // This ensures channels with different EPG mappings are kept separate
+  // even if they're variants of the same channel
   const seen = new Set()
   const channels = allChannels.filter(ch => {
     if (!ch.normalized_name) return true // Keep channels without normalized_name
-    if (seen.has(ch.normalized_name)) return false // Skip duplicates
-    seen.add(ch.normalized_name)
+    const key = `${ch.normalized_name}|${ch.epg_id || ''}`
+    if (seen.has(key)) return false // Skip duplicates
+    seen.add(key)
     return true
   })
 
@@ -1098,7 +1148,7 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
     return a.id - b.id
   })
 
-  // Filter to channels with EPG data
+  // Only include channels that have EPG mappings
   const mappedChannels = channels.filter(ch => ch.epg_id && ch.epg_id.trim())
 
   if (!mappedChannels.length) {
@@ -1122,21 +1172,16 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
     const displayName = ch.tvg_name || ch.name || 'Unknown'
     const logo = ch.tvg_logo || ch.custom_logo || ''
 
-    // Use the original tvg_id from the M3U file as the primary ID
-    // This ensures consistency between M3U and XMLTV
-    const primaryId = ch.tvg_id || ch.custom_tvg_id || ch.epg_id
+    // Use epg_id which is already calculated in the SQL query
+    // This is either custom_tvg_id, mapped tvg_id, or original tvg_id
+    const channelId = ch.epg_id
 
-    let xml = `  <channel id="${primaryId}">`
+    let xml = `  <channel id="${channelId}">`
     xml += `\n    <display-name>${escapeXml(displayName)}</display-name>`
     if (logo) {
       // Proxy the logo URL through our server for Plex compatibility
       const proxyLogoUrl = `http://${req.headers.host}/api/logo?url=${encodeURIComponent(logo)}`
       xml += `\n    <icon src="${escapeXml(proxyLogoUrl)}" />`
-    }
-
-    // If the EPG ID is different from the primary ID, add it as an alias
-    if (ch.epg_id && ch.epg_id !== primaryId) {
-      xml += `\n    <alias>${escapeXml(ch.epg_id)}</alias>`
     }
 
     xml += `\n  </channel>`
@@ -1376,6 +1421,7 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
     if (!playlist) return res.status(404).json({ error: `Playlist with ID ${playlist_id} not found` })
 
     // Get playlist channels, deduplicated by normalized_name (one channel per normalized name)
+    // Use SAME ordering as M3U export to ensure we show the same channels
     const allChannels = db.prepare(`
       SELECT
         pc.id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.custom_logo, pc.custom_tvg_id, pc.epg_source_id, pc.sort_order,
@@ -1393,8 +1439,10 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
       LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
       WHERE pc.playlist_id = ?
       ORDER BY
-        pc.sort_order ASC,
-        pc.id ASC
+        sc.normalized_name,
+        source_priority ASC,
+        quality_order ASC,
+        pc.sort_order, pc.id
     `).all(playlist_id)
 
     // Deduplicate by normalized_name - keep only the first (best) variant
@@ -1470,10 +1518,22 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
     `).all(...channelIds)
 
     // Build variants lookup map
+    // Group by the FIRST channel_id (the one we're looking up), but include ALL variant channel_ids
     const variantsMap = new Map()
+    const seenPairs = new Set()
+
     for (const v of allVariants) {
+      const key = `${v.channel_id}|${v.url}`
+      if (seenPairs.has(key)) continue // Skip duplicate url for same channel
+      seenPairs.add(key)
+
       if (!variantsMap.has(v.channel_id)) variantsMap.set(v.channel_id, [])
+
+      // Find the playlist_channel ID for this variant's URL
+      const variantChannel = allChannels.find(ch => ch.url === v.url)
+
       variantsMap.get(v.channel_id).push({
+        channel_id: variantChannel?.id || null,
         tvg_name: v.tvg_name,
         quality: v.quality,
         url: v.url,
@@ -1515,6 +1575,7 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
         tvg_name:      ch.tvg_name,
         tvg_logo:      ch.tvg_logo || null,
         custom_logo:   ch.custom_logo || null,
+        sort_order:    ch.sort_order || null,
         mapped_to:     alreadyMapped || null,
         exact_match:   exactMatch || null,
         suggestions:   scored,
@@ -1555,8 +1616,9 @@ app.patch('/api/playlist-channels/:id/custom-logo', (req, res) => {
 app.patch('/api/playlist-channels/:id/custom-tvg-id', (req, res) => {
   const { custom_tvg_id } = req.body
   if (custom_tvg_id === undefined) return res.status(400).json({ error: 'custom_tvg_id required' })
-  db.prepare('UPDATE playlist_channels SET custom_tvg_id = ? WHERE id = ?').run(custom_tvg_id || '', req.params.id)
-  res.json({ ok: true })
+  const result = db.prepare('UPDATE playlist_channels SET custom_tvg_id = ? WHERE id = ?').run(custom_tvg_id || '', req.params.id)
+  console.log(`[epg] Set custom_tvg_id="${custom_tvg_id}" for playlist_channel id=${req.params.id}, rows affected: ${result.changes}`)
+  res.json({ ok: true, changes: result.changes })
 })
 
 // Bulk accept auto-matches

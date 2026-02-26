@@ -76,7 +76,7 @@ export const api = {
   createPlaylist:      (data)       => request('POST',   '/playlists', data),
   updatePlaylist:      (id, data)   => request('PUT',    `/playlists/${id}`, data),
   deletePlaylist:      (id)         => request('DELETE', `/playlists/${id}`),
-  getPlaylistChannels: (id)         => request('GET',    `/playlists/${id}/channels`),
+  getPlaylistChannels: (id, dedupe) => request('GET',    `/playlists/${id}/channels${dedupe ? '?dedupe=true' : ''}`),
   getPlaylistSelection:(id)         => request('GET',    `/playlists/${id}/selection`),
   savePlaylistChannels:(id, channels) => request('PUT',  `/playlists/${id}/channels`, { channels }),
   savePlaylistByGroups:(id, data)     => request('PUT',  `/playlists/${id}/channels-by-groups`, data),

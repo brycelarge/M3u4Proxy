@@ -88,18 +88,31 @@ async function pickEpgChannel(epgCh) {
   const m = editRow.value
   if (!m) return
 
+  // Apply EPG mapping to ALL variants of this channel (all sources)
+  // Variants are channels with the same normalized_name
+  const variantIds = m.variants?.map(v => v.channel_id).filter(Boolean) || []
+  const allChannelIds = [m.channel_id, ...variantIds].filter(Boolean)
+
   // Channels WITH tvg_id → save to epg_mappings table
   if (m.tvg_id) {
     await api.bulkCreateMappings([{ source_tvg_id: m.tvg_id, target_tvg_id: epgCh.id }])
     mappings.value = await api.getEpgMappings()
   }
-  // Channels WITHOUT tvg_id → save custom_tvg_id on playlist_channels row
-  else if (m.channel_id) {
-    await api.patchChannelCustomTvgId(m.channel_id, epgCh.id)
+
+  // For ALL channel variants (including those without tvg_id), set custom_tvg_id
+  // This ensures all variants get the same EPG mapping
+  for (const channelId of allChannelIds) {
+    await api.patchChannelCustomTvgId(channelId, epgCh.id)
   }
 
-  m.mapped_to   = epgCh.id
-  m.exact_match = epgCh
+  // Update UI for all matching channels
+  for (const match of matches.value) {
+    if (allChannelIds.includes(match.channel_id)) {
+      match.mapped_to = epgCh.id
+      match.exact_match = epgCh
+    }
+  }
+
   closeEdit()
 }
 
@@ -124,12 +137,15 @@ const filtered = computed(() => {
   const dir = sortDir.value === 'asc' ? 1 : -1
   return [...list].sort((a, b) => {
     if (sortCol.value === 'name')   return dir * a.tvg_name.localeCompare(b.tvg_name)
-    if (sortCol.value === 'score')  return dir * (sortScore(a) - sortScore(b))
     if (sortCol.value === 'status') {
       const rank = m => m.exact_match ? 0 : m.mapped_to ? 1 : m.suggestions.length ? 2 : 3
       return dir * (rank(a) - rank(b))
     }
-    return 0
+    // Default and 'score': sort by channel number (sort_order), then by channel ID
+    const aNum = a.sort_order || 999999
+    const bNum = b.sort_order || 999999
+    if (aNum !== bNum) return aNum - bNum
+    return a.channel_id - b.channel_id
   })
 })
 
@@ -718,14 +734,15 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
               <th class="w-8 px-3 py-2.5">
                 <input type="checkbox" :checked="allChecked" :indeterminate="someChecked" @change="toggleAll" class="accent-indigo-500 cursor-pointer" />
               </th>
-              <th class="px-3 py-2.5 text-center text-slate-400 font-medium w-12">#</th>
+              <th class="px-3 py-2.5 text-center text-slate-400 font-medium w-16">Ch #</th>
+              <th class="px-3 py-2.5 text-center text-slate-400 font-medium w-20 hidden xl:table-cell">ID</th>
               <th @click="setSort('name')" class="px-3 py-2.5 text-left text-slate-400 font-medium cursor-pointer hover:text-slate-200 select-none">
                 Channel <span class="text-slate-600">{{ sortCol === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}</span>
               </th>
               <th class="px-3 py-2.5 text-left text-slate-400 font-medium w-36">Source tvg-id</th>
               <th class="px-3 py-2.5 text-left text-slate-400 font-medium w-32 hidden lg:table-cell">Variants</th>
-              <th @click="setSort('score')" class="px-3 py-2.5 text-center text-slate-400 font-medium w-16 cursor-pointer hover:text-slate-200 select-none">
-                Match % <span class="text-slate-600">{{ sortCol === 'score' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}</span>
+              <th class="px-3 py-2.5 text-center text-slate-400 font-medium w-16">
+                Match %
               </th>
               <th @click="setSort('status')" class="px-3 py-2.5 text-left text-slate-400 font-medium cursor-pointer hover:text-slate-200 select-none">
                 Best EPG Match <span class="text-slate-600">{{ sortCol === 'status' ? (sortDir === 'asc' ? '↑' : '↓') : '↕' }}</span>
@@ -747,6 +764,10 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
 
               <td class="px-3 py-2 text-center font-mono text-slate-500 text-xs">
                 {{ m.sort_order ? m.sort_order : '—' }}
+              </td>
+
+              <td class="px-3 py-2 text-center font-mono text-slate-600 text-[10px] hidden xl:table-cell">
+                {{ m.channel_id }}
               </td>
 
               <td class="px-3 py-2">
@@ -782,17 +803,22 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
 
               <!-- Variants (quality versions) -->
               <td class="px-3 py-2 hidden lg:table-cell">
-                <div v-if="m.variants && m.variants.length > 0" class="flex flex-wrap gap-1">
-                  <span v-for="(v, idx) in m.variants" :key="idx"
-                    :title="`${v.source_name}: ${v.tvg_name}`"
-                    :class="['text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap',
-                      v.quality === 'UHD' ? 'bg-purple-500/15 border-purple-500/30 text-purple-400' :
-                      v.quality === 'FHD' ? 'bg-blue-500/15 border-blue-500/30 text-blue-400' :
-                      v.quality === 'HD' ? 'bg-green-500/15 border-green-500/30 text-green-400' :
-                      v.quality === 'SD' ? 'bg-yellow-500/15 border-yellow-500/30 text-yellow-400' :
-                      'bg-slate-500/15 border-slate-500/30 text-slate-400']">
-                    {{ v.quality || '?' }}
+                <div v-if="m.variants && m.variants.length > 0" class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 bg-indigo-500/20 text-indigo-300 rounded text-[10px] font-semibold" :title="`${m.variants.length} variant(s) will be updated together`">
+                    🔗 {{ m.variants.length }}
                   </span>
+                  <div class="flex flex-wrap gap-1">
+                    <span v-for="(v, idx) in m.variants.slice(0, 3)" :key="idx"
+                      :title="`${v.source_name}: ${v.tvg_name}`"
+                      :class="['text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap',
+                        v.quality === 'UHD' ? 'bg-purple-500/15 border-purple-500/30 text-purple-400' :
+                        v.quality === 'FHD' ? 'bg-blue-500/15 border-blue-500/30 text-blue-400' :
+                        v.quality === 'HD' ? 'bg-green-500/15 border-green-500/30 text-green-400' :
+                        v.quality === 'SD' ? 'bg-yellow-500/15 border-yellow-500/30 text-yellow-400' :
+                        'bg-slate-500/15 border-slate-500/30 text-slate-400']">
+                      {{ v.quality || '?' }}
+                    </span>
+                  </div>
                 </div>
                 <span v-else class="text-slate-700 text-[10px]">—</span>
               </td>
