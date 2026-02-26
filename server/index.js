@@ -112,12 +112,24 @@ app.get('/api/proxy', async (req, res) => {
 // ── Sources ───────────────────────────────────────────────────────────────────
 app.get('/api/sources', (req, res) => {
   const sources = db.prepare('SELECT * FROM sources ORDER BY name').all()
+
+  // Batch query for all source channel counts
+  const counts = db.prepare(`
+    SELECT source_id, COUNT(*) as c
+    FROM source_channels
+    GROUP BY source_id
+  `).all()
+  const countMap = new Map(counts.map(r => [r.source_id, r.c]))
+
+  // Batch query for EPG channel counts
+  const epgCounts = db.prepare('SELECT source_id, channel_count FROM epg_cache').all()
+  const epgCountMap = new Map(epgCounts.map(r => [r.source_id, r.channel_count]))
+
   for (const s of sources) {
     if (s.category === 'epg') {
-      const epg = db.prepare('SELECT channel_count FROM epg_cache WHERE source_id = ?').get(s.id)
-      s.channel_count = epg?.channel_count || 0
+      s.channel_count = epgCountMap.get(s.id) || 0
     } else {
-      s.channel_count = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ?').get(s.id).c
+      s.channel_count = countMap.get(s.id) || 0
     }
   }
   res.json(sources)
@@ -494,6 +506,28 @@ app.get('/api/sources/:id/channels', (req, res) => {
 
   setCache(cacheKey, result)
   res.json(result)
+})
+
+// Bulk fetch specific channel IDs (for review modal / export)
+app.post('/api/source-channels/by-ids', (req, res) => {
+  const { channelIds } = req.body
+  if (!Array.isArray(channelIds) || channelIds.length === 0) {
+    return res.json([])
+  }
+
+  // Limit to prevent abuse
+  const MAX_IDS = 50000
+  const ids = channelIds.slice(0, MAX_IDS)
+
+  // Build placeholders for SQL IN clause
+  const placeholders = ids.map(() => '?').join(',')
+  const channels = db.prepare(
+    `SELECT id, tvg_id, tvg_name, tvg_logo, group_title, url, source_id, normalized_name, quality
+     FROM source_channels
+     WHERE id IN (${placeholders})`
+  ).all(...ids)
+
+  res.json(channels)
 })
 
 // ── Playlists ─────────────────────────────────────────────────────────────────
