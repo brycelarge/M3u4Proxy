@@ -13,9 +13,10 @@ cd /app || exit 1
 # Create symlink to node_modules so config files can import dependencies
 [ ! -L /data/epg-sites/node_modules ] && /bin/ln -sf /app/node_modules /data/epg-sites/node_modules
 
-# Set proper ownership - do this EVERY time to fix any root-owned subdirectories
-/bin/chown -R m3u4prox:m3u4prox /data 2>/dev/null || true
-/bin/chmod -R u+w /data/epg-sites /data/vod-strm 2>/dev/null || true
+# Set proper ownership on key directories only (avoid recursing through 480k+ STRM files)
+/bin/chown -R m3u4prox:m3u4prox /data/db /data/epg /data/epg-sites /data/config 2>/dev/null || true
+/bin/chown m3u4prox:m3u4prox /data/vod-strm 2>/dev/null || true
+/bin/chmod -R u+w /data/epg-sites 2>/dev/null || true
 
 echo "[m3u4prox] starting on port ${PORT:-3005}"
 
