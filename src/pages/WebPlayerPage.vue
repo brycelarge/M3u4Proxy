@@ -8,10 +8,13 @@ const channelName = route.query.name || 'Live Stream'
 const error = ref('')
 const loading = ref(true)
 const videoRef = ref(null)
-const streamUrl = `/stream/${channelId}?remux=1`
+const streamUrl = ref('')
 
 onMounted(() => {
   if (videoRef.value) {
+    // Set stream URL for browser playback (uses FFmpeg remuxing)
+    streamUrl.value = '/stream-web/' + channelId
+
     // Add event listeners for better error handling
     videoRef.value.addEventListener('loadstart', () => {
       loading.value = true

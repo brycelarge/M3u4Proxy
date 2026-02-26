@@ -127,7 +127,7 @@ function progProgress(prog) {
 function playStream() {
   if (!selected.value?.channelId) return
   const channelName = encodeURIComponent(selected.value.channelName)
-  const url = `/player/${selected.value.channelId}?name=${channelName}`
+  const url = `/web-player/${selected.value.channelId}?name=${channelName}`
   window.open(url, '_blank', 'width=1280,height=720,menubar=no,toolbar=no,location=no,status=no')
 }
 

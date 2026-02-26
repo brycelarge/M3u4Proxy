@@ -2858,14 +2858,14 @@ app.get('/api/hdhr/status', (req, res) => {
 })
 
 // ── Player page ───────────────────────────────────────────────────────────────
-// GET /player/:channelId  — simple HTML5 video player
-app.get('/player/:channelId', (req, res) => {
+// GET /web-player/:channelId  — simple HTML5 video player with FFmpeg remuxing
+app.get('/web-player/:channelId', (req, res) => {
   const { channelId } = req.params
   const channelName = req.query.name || 'Live Stream'
   // Use absolute URL for mpegts.js worker compatibility
   const protocol = req.protocol
   const host = req.get('host')
-  const streamUrl = `${protocol}://${host}/stream/${channelId}`
+  const streamUrl = `${protocol}://${host}/stream-web/${channelId}`
 
   res.send(`
 <!DOCTYPE html>
@@ -2874,8 +2874,6 @@ app.get('/player/:channelId', (req, res) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${channelName}</title>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -2946,42 +2944,39 @@ app.get('/player/:channelId', (req, res) => {
     const streamUrl = '${streamUrl}';
     const errorDiv = document.getElementById('error');
     const video = document.getElementById('video');
-    let player = null;
 
-    function playStream() {
-      // Use mpegts.js to play the proxied MPEG-TS stream from backend
-      if (mpegts.getFeatureList().mseLivePlayback) {
-        player = mpegts.createPlayer({
-          type: 'mpegts',
-          isLive: true,
-          url: streamUrl
-        }, {
-          enableWorker: true,
-          enableStashBuffer: true,
-          stashInitialSize: 128
-        });
+    // Use native HTML5 video for MP4 stream (FFmpeg remuxed)
+    video.src = streamUrl;
 
-        player.attachMediaElement(video);
-        player.load();
-
-        player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-          errorDiv.textContent = 'Stream error: ' + errorType + ' - ' + errorDetail;
-          errorDiv.style.display = 'block';
-          console.error('mpegts.js error:', errorType, errorDetail, errorInfo);
-        });
-
-        video.addEventListener('loadedmetadata', () => {
-          video.play().catch(e => {
-            console.error('Autoplay failed:', e);
-          });
-        });
-      } else {
-        errorDiv.textContent = 'Your browser does not support streaming';
-        errorDiv.style.display = 'block';
+    video.addEventListener('error', (e) => {
+      const error = video.error;
+      let errorMsg = 'Stream error';
+      if (error) {
+        switch(error.code) {
+          case error.MEDIA_ERR_ABORTED:
+            errorMsg = 'Playback aborted';
+            break;
+          case error.MEDIA_ERR_NETWORK:
+            errorMsg = 'Network error';
+            break;
+          case error.MEDIA_ERR_DECODE:
+            errorMsg = 'Decode error';
+            break;
+          case error.MEDIA_ERR_SRC_NOT_SUPPORTED:
+            errorMsg = 'Stream format not supported';
+            break;
+        }
       }
-    }
+      errorDiv.textContent = errorMsg;
+      errorDiv.style.display = 'block';
+      console.error('Video error:', error);
+    });
 
-    playStream();
+    video.addEventListener('loadedmetadata', () => {
+      video.play().catch(e => {
+        console.error('Autoplay failed:', e);
+      });
+    });
   </script>
 </body>
 </html>
@@ -3139,11 +3134,9 @@ async function tryConnectWithTimeout(channelId, url, name, res, sourceId, userna
 }
 
 // ── Stream proxy ──────────────────────────────────────────────────────────────
-// GET /stream/:channelId  — proxy upstream IPTV stream, reuse for multiple clients
+// GET /stream/:channelId  — proxy upstream IPTV stream, reuse for multiple clients (direct stream)
 app.get('/stream/:channelId', async (req, res) => {
   const { channelId } = req.params
-  const remux = req.query.remux === '1'
-  console.log(`[stream] Remux flag: ${remux} (query param: ${req.query.remux})`)
   const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
   if (!row) return res.status(404).send('Channel not found')
 
@@ -3206,72 +3199,8 @@ app.get('/stream/:channelId', async (req, res) => {
     console.log(`[stream] Trying variant ${i + 1}/${variants.length}: ${variant.tvg_name}${qualityLabel}`)
 
     try {
-      // If remux flag is set, wrap response with FFmpeg to convert to MP4 container
-      if (remux) {
-        console.log(`[stream] ⚡ FFMPEG REMUX ENABLED - Converting stream to MP4 container for browser`)
-
-        // Set headers for MP4 streaming
-        res.setHeader('Content-Type', 'video/mp4')
-        res.setHeader('Cache-Control', 'no-cache')
-
-        // Create FFmpeg process to remux stream to MP4 container
-        // Video: copy (no re-encoding)
-        // Audio: re-encode to AAC for browser compatibility
-        const ffmpegArgs = [
-          '-i', 'pipe:0',           // Input from stdin
-          '-c:v', 'copy',           // Copy video codec (no re-encoding)
-          '-c:a', 'aac',            // Re-encode audio to AAC (browser-compatible)
-          '-b:a', '128k',           // Audio bitrate
-          '-f', 'mp4',              // Output format: MP4
-          '-movflags', 'frag_keyframe+empty_moov+default_base_moof', // Enable streaming MP4
-          'pipe:1'                  // Output to stdout
-        ]
-        console.log(`[ffmpeg] Starting FFmpeg with args: ${ffmpegArgs.join(' ')}`)
-
-        const ffmpeg = spawn('ffmpeg', ffmpegArgs)
-        let ffmpegStarted = false
-
-        // Pipe FFmpeg output to client
-        ffmpeg.stdout.pipe(res)
-
-        // Handle FFmpeg errors and info
-        ffmpeg.stderr.on('data', (data) => {
-          const msg = data.toString().trim()
-          if (!ffmpegStarted && msg.includes('Stream mapping:')) {
-            console.log(`[ffmpeg] ✓ Stream processing started`)
-            ffmpegStarted = true
-          }
-          // Only log important FFmpeg messages (errors, warnings, stream info)
-          if (msg.includes('error') || msg.includes('Error') || msg.includes('Stream #') || msg.includes('Duration:')) {
-            console.log(`[ffmpeg] ${msg}`)
-          }
-        })
-
-        ffmpeg.on('error', (err) => {
-          console.error(`[ffmpeg] ✗ Process error:`, err)
-          if (!res.headersSent) {
-            res.status(500).send('Transcoding error')
-          }
-        })
-
-        ffmpeg.on('exit', (code) => {
-          console.log(`[ffmpeg] Process exited with code ${code}`)
-        })
-
-        // Clean up on client disconnect
-        res.on('close', () => {
-          console.log(`[ffmpeg] Client disconnected, killing FFmpeg process`)
-          ffmpeg.kill('SIGKILL')
-        })
-
-        // Connect to upstream stream and pipe to FFmpeg stdin
-        console.log(`[stream] Connecting upstream stream to FFmpeg stdin...`)
-        await connectClient(channelId, variant.url, variant.tvg_name, ffmpeg.stdin, variant.source_id || null, username)
-      } else {
-        // Direct stream without remuxing
-        await connectClient(channelId, variant.url, variant.tvg_name, res, variant.source_id || null, username)
-      }
-
+      // Direct stream without remuxing
+      await connectClient(channelId, variant.url, variant.tvg_name, res, variant.source_id || null, username)
       console.log(`[stream] Successfully connected to variant ${i + 1}`)
       return // Success!
     } catch (e) {
@@ -3283,6 +3212,183 @@ app.get('/stream/:channelId', async (req, res) => {
 
   // All variants failed
   console.log(`[stream] All ${variants.length} variant(s) failed for channel ${channelId}`)
+  if (!res.headersSent) {
+    res.status(502).send(`Stream unavailable - all ${variants.length} source(s) failed`)
+  }
+})
+
+// ── Stream proxy for web browsers ─────────────────────────────────────────────
+// GET /stream-web/:channelId  — proxy upstream IPTV stream with FFmpeg remuxing for browser compatibility
+app.get('/stream-web/:channelId', async (req, res) => {
+  const { channelId } = req.params
+  const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
+  if (!row) return res.status(404).send('Channel not found')
+
+  // Resolve username from query creds so max_connections is enforced on this path too
+  let username = null
+  const u = req.query.username, p = req.query.password
+  if (u && p) {
+    const userRow = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(u)
+    const authed  = userRow && await verifyPassword(p, userRow.password)
+    if (authed) {
+      if (userRow.expires_at && new Date(userRow.expires_at) < new Date()) {
+        return res.status(403).send('Account expired')
+      }
+      const active = getActiveSessions().filter(s => s.username === u).length
+      if (userRow.max_connections > 0 && active >= userRow.max_connections) {
+        return res.status(429).send(`Stream limit reached (${userRow.max_connections} max)`)
+      }
+      username = u
+      db.prepare(`UPDATE users SET last_connected_at = datetime('now') WHERE username = ?`).run(u)
+    }
+  }
+
+  // Get client info for logging
+  const clientIp = req.ip || req.connection.remoteAddress || 'unknown'
+  const userAgent = req.get('user-agent') || 'unknown'
+
+  console.log(`[stream-web] Client ${clientIp} requesting "${row.tvg_name}" (channel ${channelId})`)
+  console.log(`[stream-web] User-Agent: ${userAgent.substring(0, 80)}`)
+
+  // Get all channel variants (ordered by availability and quality)
+  const variants = getChannelVariants(channelId)
+
+  // Log variant selection with source capacity info
+  const activeSessions = getActiveSessions()
+  const activeBySource = new Map()
+  for (const session of activeSessions) {
+    if (session.sourceId) {
+      activeBySource.set(session.sourceId, (activeBySource.get(session.sourceId) || 0) + 1)
+    }
+  }
+
+  console.log(`[stream-web] Found ${variants.length} variant(s) for channel ${channelId}`)
+  for (let i = 0; i < variants.length; i++) {
+    const v = variants[i]
+    if (v.source_id) {
+      const source = db.prepare('SELECT name, max_streams FROM sources WHERE id = ?').get(v.source_id)
+      const active = activeBySource.get(v.source_id) || 0
+      const max = source?.max_streams || 0
+      const capacityInfo = max > 0 ? ` [${active}/${max} streams]` : ` [${active} streams, unlimited]`
+      console.log(`[stream-web]   ${i + 1}. ${v.tvg_name} (${v.quality || 'unknown'}) from ${source?.name || 'unknown'}${capacityInfo}`)
+    }
+  }
+
+  // Try each variant in order until one succeeds
+  let lastError = null
+
+  for (let i = 0; i < variants.length; i++) {
+    const variant = variants[i]
+    const qualityLabel = variant.quality ? ` (${variant.quality})` : ''
+    console.log(`[stream-web] Trying variant ${i + 1}/${variants.length}: ${variant.tvg_name}${qualityLabel}`)
+
+    try {
+      console.log(`[stream-web] ⚡ FFMPEG REMUX ENABLED - Converting stream to MP4 container for browser`)
+
+      // Set headers for MP4 streaming
+      res.setHeader('Content-Type', 'video/mp4')
+      res.setHeader('Cache-Control', 'no-cache')
+
+      // Create FFmpeg process to remux stream to MP4 container
+      // Video: copy (no re-encoding)
+      // Audio: re-encode to AAC for browser compatibility
+      const ffmpegArgs = [
+        '-i', 'pipe:0',           // Input from stdin
+        '-c:v', 'copy',           // Copy video codec (no re-encoding)
+        '-c:a', 'aac',            // Re-encode audio to AAC (browser-compatible)
+        '-b:a', '128k',           // Audio bitrate
+        '-f', 'mp4',              // Output format: MP4
+        '-movflags', 'frag_keyframe+empty_moov+default_base_moof', // Enable streaming MP4
+        'pipe:1'                  // Output to stdout
+      ]
+      console.log(`[ffmpeg] Starting FFmpeg with args: ${ffmpegArgs.join(' ')}`)
+
+      const ffmpeg = spawn('ffmpeg', ffmpegArgs)
+      let ffmpegStarted = false
+      let ffmpegKilled = false
+
+      // Pipe FFmpeg output to client
+      ffmpeg.stdout.pipe(res)
+
+      // Handle FFmpeg stdin errors (e.g., EPIPE when writing to closed pipe)
+      ffmpeg.stdin.on('error', (err) => {
+        if (err.code !== 'EPIPE') {
+          console.error(`[ffmpeg] stdin error:`, err)
+        }
+      })
+
+      // Handle FFmpeg errors and info
+      ffmpeg.stderr.on('data', (data) => {
+        const msg = data.toString().trim()
+        if (!ffmpegStarted && msg.includes('Stream mapping:')) {
+          console.log(`[ffmpeg] ✓ Stream processing started`)
+          ffmpegStarted = true
+        }
+        // Only log important FFmpeg messages (errors, warnings, stream info)
+        if (msg.includes('error') || msg.includes('Error') || msg.includes('Stream #') || msg.includes('Duration:')) {
+          console.log(`[ffmpeg] ${msg}`)
+        }
+      })
+
+      ffmpeg.on('error', (err) => {
+        console.error(`[ffmpeg] ✗ Process error:`, err)
+        if (!res.headersSent) {
+          res.status(500).send('Transcoding error')
+        }
+      })
+
+      ffmpeg.on('exit', (code) => {
+        ffmpegKilled = true
+        console.log(`[ffmpeg] Process exited with code ${code}`)
+      })
+
+      // Clean up on client disconnect
+      res.on('close', () => {
+        if (!ffmpegKilled) {
+          console.log(`[ffmpeg] Client disconnected, killing FFmpeg process`)
+          ffmpegKilled = true
+          ffmpeg.kill('SIGKILL')
+        }
+      })
+
+      // Create a wrapper that mimics HTTP response interface but pipes to FFmpeg stdin
+      const ffmpegWrapper = {
+        write: (chunk) => {
+          if (!ffmpegKilled && !ffmpeg.stdin.destroyed) {
+            return ffmpeg.stdin.write(chunk)
+          }
+          return false
+        },
+        end: () => {
+          if (!ffmpegKilled && !ffmpeg.stdin.destroyed) {
+            ffmpeg.stdin.end()
+          }
+        },
+        setHeader: () => {}, // No-op for FFmpeg stdin
+        flushHeaders: () => {}, // No-op for FFmpeg stdin
+        writableEnded: false,
+        on: (event, handler) => {
+          if (event === 'close') {
+            res.on('close', handler)
+          }
+        }
+      }
+
+      // Connect to upstream stream and pipe to FFmpeg stdin via wrapper
+      console.log(`[stream-web] Connecting upstream stream to FFmpeg stdin...`)
+      await connectClient(channelId, variant.url, variant.tvg_name, ffmpegWrapper, variant.source_id || null, username)
+
+      console.log(`[stream-web] Successfully connected to variant ${i + 1}`)
+      return // Success!
+    } catch (e) {
+      lastError = e
+      console.error(`[stream-web] Variant ${i + 1} failed:`, e)
+      // Continue to next variant
+    }
+  }
+
+  // All variants failed
+  console.log(`[stream-web] All ${variants.length} variant(s) failed for channel ${channelId}`)
   if (!res.headersSent) {
     res.status(502).send(`Stream unavailable - all ${variants.length} source(s) failed`)
   }
