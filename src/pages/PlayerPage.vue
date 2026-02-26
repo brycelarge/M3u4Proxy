@@ -8,7 +8,7 @@ const channelName = route.query.name || 'Live Stream'
 const error = ref('')
 const loading = ref(true)
 const videoRef = ref(null)
-const streamUrl = `/stream/${channelId}`
+const streamUrl = `/stream/${channelId}?remux=1`
 
 onMounted(() => {
   if (videoRef.value) {

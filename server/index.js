@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import { randomBytes } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import db from './db.js'
 import { runMigrations } from './migrate.js'
 import { buildM3U, writeM3U, fetchAndParseM3U, fetchXtreamChannels } from './m3uBuilder.js'
@@ -3141,6 +3142,8 @@ async function tryConnectWithTimeout(channelId, url, name, res, sourceId, userna
 // GET /stream/:channelId  — proxy upstream IPTV stream, reuse for multiple clients
 app.get('/stream/:channelId', async (req, res) => {
   const { channelId } = req.params
+  const remux = req.query.remux === '1'
+  console.log(`[stream] Remux flag: ${remux} (query param: ${req.query.remux})`)
   const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
   if (!row) return res.status(404).send('Channel not found')
 
@@ -3203,7 +3206,72 @@ app.get('/stream/:channelId', async (req, res) => {
     console.log(`[stream] Trying variant ${i + 1}/${variants.length}: ${variant.tvg_name}${qualityLabel}`)
 
     try {
-      await connectClient(channelId, variant.url, variant.tvg_name, res, variant.source_id || null, username)
+      // If remux flag is set, wrap response with FFmpeg to convert to MP4 container
+      if (remux) {
+        console.log(`[stream] ⚡ FFMPEG REMUX ENABLED - Converting stream to MP4 container for browser`)
+
+        // Set headers for MP4 streaming
+        res.setHeader('Content-Type', 'video/mp4')
+        res.setHeader('Cache-Control', 'no-cache')
+
+        // Create FFmpeg process to remux stream to MP4 container
+        // Video: copy (no re-encoding)
+        // Audio: re-encode to AAC for browser compatibility
+        const ffmpegArgs = [
+          '-i', 'pipe:0',           // Input from stdin
+          '-c:v', 'copy',           // Copy video codec (no re-encoding)
+          '-c:a', 'aac',            // Re-encode audio to AAC (browser-compatible)
+          '-b:a', '128k',           // Audio bitrate
+          '-f', 'mp4',              // Output format: MP4
+          '-movflags', 'frag_keyframe+empty_moov+default_base_moof', // Enable streaming MP4
+          'pipe:1'                  // Output to stdout
+        ]
+        console.log(`[ffmpeg] Starting FFmpeg with args: ${ffmpegArgs.join(' ')}`)
+
+        const ffmpeg = spawn('ffmpeg', ffmpegArgs)
+        let ffmpegStarted = false
+
+        // Pipe FFmpeg output to client
+        ffmpeg.stdout.pipe(res)
+
+        // Handle FFmpeg errors and info
+        ffmpeg.stderr.on('data', (data) => {
+          const msg = data.toString().trim()
+          if (!ffmpegStarted && msg.includes('Stream mapping:')) {
+            console.log(`[ffmpeg] ✓ Stream processing started`)
+            ffmpegStarted = true
+          }
+          // Only log important FFmpeg messages (errors, warnings, stream info)
+          if (msg.includes('error') || msg.includes('Error') || msg.includes('Stream #') || msg.includes('Duration:')) {
+            console.log(`[ffmpeg] ${msg}`)
+          }
+        })
+
+        ffmpeg.on('error', (err) => {
+          console.error(`[ffmpeg] ✗ Process error:`, err)
+          if (!res.headersSent) {
+            res.status(500).send('Transcoding error')
+          }
+        })
+
+        ffmpeg.on('exit', (code) => {
+          console.log(`[ffmpeg] Process exited with code ${code}`)
+        })
+
+        // Clean up on client disconnect
+        res.on('close', () => {
+          console.log(`[ffmpeg] Client disconnected, killing FFmpeg process`)
+          ffmpeg.kill('SIGKILL')
+        })
+
+        // Connect to upstream stream and pipe to FFmpeg stdin
+        console.log(`[stream] Connecting upstream stream to FFmpeg stdin...`)
+        await connectClient(channelId, variant.url, variant.tvg_name, ffmpeg.stdin, variant.source_id || null, username)
+      } else {
+        // Direct stream without remuxing
+        await connectClient(channelId, variant.url, variant.tvg_name, res, variant.source_id || null, username)
+      }
+
       console.log(`[stream] Successfully connected to variant ${i + 1}`)
       return // Success!
     } catch (e) {
