@@ -960,7 +960,7 @@ app.put('/api/playlists/:id/group-order', (req, res) => {
 })
 
 // Build and save M3U to disk for a playlist
-app.post('/api/playlists/:id/build', (req, res) => {
+app.post('/api/playlists/:id/build', async (req, res) => {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
 
@@ -1009,15 +1009,23 @@ app.post('/api/playlists/:id/build', (req, res) => {
 
   const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
   const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
-  if (playlist.group_order) {
-    const order = JSON.parse(playlist.group_order)
-    channels = [...channels].sort((a, b) => {
-      const ai = order.indexOf(a.group_title); const bi = order.indexOf(b.group_title)
-      return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi) || a.sort_order - b.sort_order
-    })
+
+  // Load VOD metadata if this is a VOD playlist
+  let vodMetadata = null
+  if (playlist.playlist_type === 'vod') {
+    const { getAllVodMetadata } = await import('./nfo-parser.js')
+    const metadataRows = getAllVodMetadata()
+    vodMetadata = new Map(metadataRows.map(m => [String(m.channel_id), m]))
   }
 
-  const content = buildM3U(channels, epgMap)
+  if (!playlist.output_path) {
+    const content = buildM3U(channels, epgMap, { vodMetadata })
+    res.setHeader('Content-Type', 'application/x-mpegurl; charset=utf-8')
+    res.setHeader('Content-Disposition', `inline; filename="${playlist.name}.m3u"`)
+    return res.send(content)
+  }
+
+  const content = buildM3U(channels, epgMap, { vodMetadata })
   try {
     writeM3U(playlist.output_path, content)
     db.prepare('UPDATE playlists SET last_built = datetime("now") WHERE id = ?').run(playlist.id)
@@ -1027,7 +1035,7 @@ app.post('/api/playlists/:id/build', (req, res) => {
   }
 })
 
-app.get('/api/playlists/:id/m3u', (req, res) => {
+app.get('/api/playlists/:id/m3u', async (req, res) => {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
 
@@ -1070,6 +1078,14 @@ app.get('/api/playlists/:id/m3u', (req, res) => {
   const epgRows   = db.prepare('SELECT * FROM epg_mappings').all()
   const epgMap    = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
 
+  // Load VOD metadata if this is a VOD playlist
+  let vodMetadata = null
+  if (playlist.playlist_type === 'vod') {
+    const { getAllVodMetadata } = await import('./nfo-parser.js')
+    const metadataRows = getAllVodMetadata()
+    vodMetadata = new Map(metadataRows.map(m => [String(m.channel_id), m]))
+  }
+
   // Always sort by channel number (sort_order) after deduplication
   if (playlist.group_order) {
     const order = JSON.parse(playlist.group_order)
@@ -1090,7 +1106,7 @@ app.get('/api/playlists/:id/m3u', (req, res) => {
   const catchupSrc  = process.env.CATCHUP_SOURCE  || ''
   const catchupDays = parseInt(process.env.CATCHUP_DAYS || '7')
 
-  const content = buildM3U(channels, epgMap, { baseUrl, epgUrl, catchupSrc: catchupSrc || undefined, catchupDays })
+  const content = buildM3U(channels, epgMap, { baseUrl, epgUrl, catchupSrc: catchupSrc || undefined, catchupDays, vodMetadata })
 
   res.setHeader('Content-Type', 'application/x-mpegurl; charset=utf-8')
   res.setHeader('Content-Disposition', `inline; filename="${playlist.name}.m3u"`)
@@ -2622,7 +2638,96 @@ app.put('/api/settings', (req, res) => {
     startEnrichCron()
   }
 
+  if ('strm_export_schedule' in req.body) {
+    console.log('[settings] STRM export schedule updated, restarting cron...')
+    startStrmExportCron()
+  }
+
   res.json({ ok: true })
+})
+
+// ── STRM Export ───────────────────────────────────────────────────────────────
+app.get('/api/strm/stats', async (req, res) => {
+  const { getStrmExportStats } = await import('./strm-exporter.js')
+  res.json(getStrmExportStats())
+})
+
+app.post('/api/strm/export/:playlistId', async (req, res) => {
+  const playlistId = req.params.playlistId
+  const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId)
+
+  if (!playlist) {
+    return res.status(404).json({ error: 'Playlist not found' })
+  }
+
+  if (playlist.playlist_type !== 'vod') {
+    return res.status(400).json({ error: 'Only VOD playlists can be exported to STRM' })
+  }
+
+  // Get user credentials for this playlist (use first user with vod_playlist_id)
+  const user = db.prepare('SELECT * FROM users WHERE vod_playlist_id = ? LIMIT 1').get(playlistId)
+
+  if (!user) {
+    return res.status(400).json({ error: 'No user configured for this VOD playlist' })
+  }
+
+  const baseUrl = `${req.protocol}://${req.get('host')}`
+
+  try {
+    const { exportVodToStrm } = await import('./strm-exporter.js')
+    const stats = await exportVodToStrm(playlistId, baseUrl, user.username, user.password)
+
+    db.prepare('UPDATE playlists SET last_built = datetime("now") WHERE id = ?').run(playlistId)
+
+    res.json({
+      success: true,
+      stats,
+      message: `Exported ${stats.created + stats.updated} STRM files`
+    })
+  } catch (e) {
+    console.error('[strm] Export failed:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/nfo/sync', async (req, res) => {
+  try {
+    const { syncNfoToDatabase } = await import('./nfo-parser.js')
+    const stats = await syncNfoToDatabase()
+    res.json({
+      success: true,
+      stats,
+      message: `Synced ${stats.synced} NFO files to database`
+    })
+  } catch (e) {
+    console.error('[nfo] Sync failed:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/proxy-image', async (req, res) => {
+  const imageUrl = req.query.url
+  if (!imageUrl) {
+    return res.status(400).send('Missing url parameter')
+  }
+
+  try {
+    const response = await fetch(imageUrl)
+    if (!response.ok) {
+      return res.status(response.status).send('Image fetch failed')
+    }
+
+    const contentType = response.headers.get('content-type')
+    if (contentType) res.setHeader('Content-Type', contentType)
+    res.setHeader('Cache-Control', 'public, max-age=86400')
+
+    const { Readable } = await import('node:stream')
+    const readable = Readable.fromWeb(response.body)
+    readable.pipe(res)
+  } catch (e) {
+    console.error('[proxy-image] Error:', e.message)
+    res.status(500).send('Failed to proxy image')
+  }
 })
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -2688,6 +2793,7 @@ const getEnrichSchedule = () => db.prepare('SELECT value FROM settings WHERE key
 
 let epgGrabCronJob = null
 let enrichCronJob = null
+let strmExportCronJob = null
 
 function startEpgGrabCron() {
   if (epgGrabCronJob) epgGrabCronJob.stop()
@@ -2750,8 +2856,52 @@ function startEnrichCron() {
   }
 }
 
+function startStrmExportCron() {
+  if (strmExportCronJob) strmExportCronJob.stop()
+  const schedule = db.prepare('SELECT value FROM settings WHERE key = ?').get('strm_export_schedule')?.value
+  if (!schedule) {
+    console.log('[startup] STRM export schedule not configured')
+    return
+  }
+  console.log(`[startup] Configuring STRM export cron with schedule: ${schedule}`)
+  if (cron.validate(schedule)) {
+    strmExportCronJob = cron.schedule(schedule, async () => {
+      console.log(`[cron] Running STRM export at ${new Date().toISOString()}…`)
+
+      // Export all VOD playlists
+      const vodPlaylists = db.prepare('SELECT * FROM playlists WHERE playlist_type = ?').all('vod')
+
+      for (const playlist of vodPlaylists) {
+        const user = db.prepare('SELECT * FROM users WHERE vod_playlist_id = ? LIMIT 1').get(playlist.id)
+        if (!user) {
+          console.log(`[cron] Skipping playlist "${playlist.name}" - no user configured`)
+          continue
+        }
+
+        try {
+          const baseUrl = process.env.BASE_URL || 'http://localhost:3005'
+          const { exportVodToStrm } = await import('./strm-exporter.js')
+          const stats = await exportVodToStrm(playlist.id, baseUrl, user.username, user.password)
+          db.prepare('UPDATE playlists SET last_built = datetime("now") WHERE id = ?').run(playlist.id)
+          console.log(`[cron] Exported STRM for "${playlist.name}":`, stats)
+        } catch (e) {
+          console.error(`[cron] STRM export failed for "${playlist.name}":`, e.message)
+        }
+      }
+
+      console.log(`[cron] STRM export completed at ${new Date().toISOString()}`)
+    }, {
+      scheduled: true,
+      timezone: "Africa/Johannesburg"
+    })
+  } else {
+    console.error(`[startup] Invalid STRM export cron schedule: ${schedule}`)
+  }
+}
+
 startEpgGrabCron()
 startEnrichCron()
+startStrmExportCron()
 
 // Startup EPG grab disabled - only runs via scheduler
 // setTimeout(() => {
@@ -3729,6 +3879,12 @@ function cleanupOnStartup() {
 }
 
 cleanupOnStartup()
+
+// Log all unhandled requests to debug missing routes
+app.use((req, res, next) => {
+  console.log(`[unhandled] ${req.method} ${req.path}`)
+  res.status(404).send('Not found')
+})
 
 app.listen(PORT, () => {
   console.log(`M3u4Proxy server running on http://localhost:${PORT}`)

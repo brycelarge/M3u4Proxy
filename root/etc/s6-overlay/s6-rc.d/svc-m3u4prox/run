@@ -4,7 +4,7 @@
 cd /app || exit 1
 
 # Ensure EPG directories exist and have correct permissions
-/bin/mkdir -p /data/epg/tmp /data/epg-sites 2>/dev/null || true
+/bin/mkdir -p /data/epg/tmp /data/epg-sites /data/vod-strm 2>/dev/null || true
 
 # Ensure symbolic links exist
 [ ! -L /epg ] && /bin/ln -sf /data/epg /epg
@@ -15,7 +15,7 @@ cd /app || exit 1
 
 # Set proper ownership - do this EVERY time to fix any root-owned subdirectories
 /bin/chown -R m3u4prox:m3u4prox /data 2>/dev/null || true
-/bin/chmod -R u+w /data/epg-sites 2>/dev/null || true
+/bin/chmod -R u+w /data/epg-sites /data/vod-strm 2>/dev/null || true
 
 echo "[m3u4prox] starting on port ${PORT:-3005}"
 

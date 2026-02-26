@@ -66,7 +66,7 @@ RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
 # Create m3u4prox user and group during build
 RUN addgroup --system m3u4prox && \
     adduser --disabled-password --home /app --ingroup m3u4prox --no-create-home --system m3u4prox && \
-    mkdir -p /data/db /data/epg/tmp /data/epg-sites /data/logs/m3u4prox /data/logos /data/playlists /data/config && \
+    mkdir -p /data/db /data/epg/tmp /data/epg-sites /data/logs/m3u4prox /data/logos /data/playlists /data/config /data/vod-strm && \
     ln -sf /data/epg /epg && \
     ln -sf /data/epg-sites /epg-sites && \
     chown -R m3u4prox:m3u4prox /data && \

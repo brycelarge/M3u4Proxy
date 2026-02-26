@@ -201,7 +201,7 @@ function buildVodStreams(channels, base, user) {
   const cats   = buildVodCategories(channels)
   const catMap = new Map(cats.map(c => [c.category_name, c.category_id]))
   const streamBase = user
-    ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password)}`
+    ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
     : null
 
   return channels.map((ch, idx) => ({
@@ -224,7 +224,7 @@ function buildStreams(channels, base, epgMap, user) {
   const groupIds = buildCategories(channels)
   const catMap   = new Map(groupIds.map(c => [c.category_name, c.category_id]))
   const streamBase = user
-    ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password)}`
+    ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
     : null
 
   return channels.map((ch, idx) => {
@@ -261,7 +261,7 @@ function buildM3UForUser(user, base) {
     const logo  = ch.tvg_logo ? ` tvg-logo="${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}"` : ''
     const group = ch.group_title ? ` group-title="${ch.group_title}"` : ''
     lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${ch.tvg_name}" tvg-chno="${chno}"${logo}${group},${ch.tvg_name}`)
-    lines.push(`${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password)}/${ch.id}`)
+    lines.push(`${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}/${ch.id}`)
   })
   return lines.join('\n')
 }
@@ -315,31 +315,42 @@ export function registerXtreamRoutes(app) {
         const vodId = req.query.vod_id || req.body?.vod_id
         const ch = vodId ? vodChans.find(c => String(c.id) === String(vodId)) : null
         if (!ch) return res.json({ info: {}, movie_data: {} })
+        const streamBase = user
+          ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
+          : null
+
+        // Try to get enriched metadata from NFO
+        const { getVodMetadata } = await import('./nfo-parser.js')
+        const nfoData = getVodMetadata(ch.id)
+
+        const rating5 = nfoData?.rating ? (parseFloat(nfoData.rating) / 2).toFixed(1) : ''
+        const poster = nfoData?.poster ? `${base}/api/proxy-image?url=${encodeURIComponent(nfoData.poster)}` : ch.tvg_logo || ''
+
         return res.json({
           info: {
-            tmdb_id:       '',
-            name:          ch.tvg_name,
-            o_name:        ch.tvg_name,
-            cover_big:     ch.tvg_logo || '',
-            movie_image:   ch.tvg_logo || '',
-            releasedate:   '',
-            episode_run_time: '',
+            tmdb_id:       nfoData?.tmdb_id || '',
+            name:          nfoData?.title || ch.tvg_name,
+            o_name:        nfoData?.original_title || ch.tvg_name,
+            cover_big:     poster,
+            movie_image:   poster,
+            releasedate:   nfoData?.release_date || '',
+            episode_run_time: nfoData?.runtime ? String(nfoData.runtime) : '',
             youtube_trailer: '',
-            genre:         ch.group_title || '',
-            plot:          '',
-            cast:          '',
-            director:      '',
-            rating:        '',
-            rating_5based: '',
+            genre:         nfoData?.genre || ch.group_title || '',
+            plot:          nfoData?.plot || '',
+            cast:          nfoData?.actor || '',
+            director:      nfoData?.director || '',
+            rating:        nfoData?.rating ? String(nfoData.rating) : '',
+            rating_5based: rating5,
           },
           movie_data: {
             stream_id:           ch.id,
-            name:                ch.tvg_name,
+            name:                nfoData?.title || ch.tvg_name,
             added:               '0',
             category_id:         '1',
             container_extension: 'ts',
-            custom_sid:          '',
-            direct_source:       ch.url,
+            custom_sid:          streamBase ? `${streamBase}/${ch.id}` : '',
+            direct_source:       streamBase ? `${streamBase}/${ch.id}` : ch.url,
           },
         })
       }
@@ -356,6 +367,42 @@ export function registerXtreamRoutes(app) {
       case 'get_short_epg':
       case 'get_simple_data_table':
         return res.json({ epg_listings: [] })
+
+      case 'get_epg': {
+        // GSE Smart IPTV uses this to get VOD info
+        const streamId = req.query.stream_id || req.body?.stream_id
+        const ch = streamId ? vodChans.find(c => String(c.id) === String(streamId)) : null
+        if (!ch) {
+          console.log(`[xtream] get_epg: channel ${streamId} not found`)
+          return res.json({ epg_listings: [] })
+        }
+
+        const streamBase = user
+          ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
+          : null
+        const movieBase = user
+          ? `${base}/movie/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
+          : null
+
+        const response = {
+          epg_listings: [{
+            id: ch.id,
+            title: ch.tvg_name,
+            description: '',
+            start: '',
+            end: '',
+            channel_id: ch.id,
+            stream_url: streamBase ? `${streamBase}/${ch.id}.ts` : ch.url,
+            movie_url: movieBase ? `${movieBase}/${ch.id}.ts` : ch.url,
+            stream_id: ch.id,
+            category_id: '1',
+            stream_icon: ch.tvg_logo ? `${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}` : ''
+          }]
+        }
+
+        console.log(`[xtream] get_epg response for ${streamId}:`, JSON.stringify(response, null, 2))
+        return res.json(response)
+      }
 
       default:
         return res.json([])
@@ -469,14 +516,16 @@ export function registerXtreamRoutes(app) {
     }))
   })
 
-  // ── Stream URL: /xtream/:user/:pass/:channelId ────────────────────────────
-  // MUST be registered last — wildcard will match /xtream/anything/anything/anything
-  app.get('/xtream/:user/:pass/:channelId', async (req, res) => {
-    const { user: u, pass: p, channelId } = req.params
+  // ── VOD Stream URL: /movie/:user/:pass/:channelId.ts ─────────────────────
+  app.get('/movie/:user/:pass/:channelId', async (req, res) => {
+    const { user: u, pass: p, channelId: rawId } = req.params
+    const channelId = rawId.replace(/\.ts$/, '')
+
+    console.log(`[xtream] VOD stream request: /movie/${u}/${p}/${rawId} (id: ${channelId})`)
+
     const user = await lookupUser(decodeURIComponent(u), decodeURIComponent(p))
     if (!user) return res.status(401).send('Unauthorized')
 
-    // Enforce max_connections
     const active = getActiveCons(user.username)
     if (user.max_connections > 0 && active >= user.max_connections) {
       return res.status(429).send(`Stream limit reached (${user.max_connections} max)`)
@@ -485,14 +534,42 @@ export function registerXtreamRoutes(app) {
     const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
     if (!row) return res.status(404).send('Channel not found')
 
-    // Verify channel belongs to user's playlist
+    if (user.vod_playlist_id && Number(row.playlist_id) !== Number(user.vod_playlist_id)) {
+      return res.status(403).send('Forbidden')
+    }
+
+    console.log(`[xtream] Streaming VOD ${channelId}: ${row.tvg_name}`)
+
+    const { connectVodClient } = await import('./vod-streamer.js')
+    await connectVodClient(
+      channelId,
+      row.url,
+      row.tvg_name,
+      req,
+      res,
+      user.username,
+    )
+  })
+
+  // ── Stream URL: /xtream/:user/:pass/:channelId ────────────────────────────
+  app.get('/xtream/:user/:pass/:channelId', async (req, res) => {
+    const { user: u, pass: p, channelId } = req.params
+    const user = await lookupUser(decodeURIComponent(u), decodeURIComponent(p))
+    if (!user) return res.status(401).send('Unauthorized')
+
+    const active = getActiveCons(user.username)
+    if (user.max_connections > 0 && active >= user.max_connections) {
+      return res.status(429).send(`Stream limit reached (${user.max_connections} max)`)
+    }
+
+    const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
+    if (!row) return res.status(404).send('Channel not found')
+
     if (user.playlist_id && Number(row.playlist_id) !== Number(user.playlist_id)) {
       return res.status(403).send('Forbidden')
     }
 
     const { connectClient } = await import('./streamer.js')
-    // Use plain channelId as session key so multiple users watching the same
-    // channel share one upstream connection instead of each opening their own.
     await connectClient(
       channelId,
       row.url,

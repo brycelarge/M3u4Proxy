@@ -28,22 +28,33 @@ function cleanChannelName(name) {
  * @param {string} [opts.baseUrl]    - if set, rewrite stream URLs through /stream/:id proxy
  * @param {string} [opts.catchupSrc] - catchup-source template (e.g. "Xtream")
  * @param {number} [opts.catchupDays] - days of catchup (default 7)
+ * @param {Map}    [opts.vodMetadata] - Map of channelId -> NFO metadata for VOD enrichment
  */
 export function buildM3U(channels, epgMap = new Map(), opts = {}) {
-  const { baseUrl, catchupSrc, catchupDays = 7 } = opts
+  const { baseUrl, catchupSrc, catchupDays = 7, vodMetadata } = opts
   const lines = ['#EXTM3U url-tvg="' + (opts.epgUrl || '') + '"']
   for (const ch of channels) {
     const cleanName = cleanChannelName(ch.tvg_name)
+
+    // Try to get enriched metadata from NFO for VOD channels
+    const nfoData = vodMetadata?.get(String(ch.id))
+    const displayName = nfoData?.title || cleanName
     const tvgId  = ch.custom_tvg_id || epgMap.get(ch.tvg_id) || ch.tvg_id || ''
-    const rawLogo = ch.custom_logo || ch.tvg_logo || ''
-    const logo   = rawLogo ? ` tvg-logo="${baseUrl ? `${baseUrl}/api/logo?url=${encodeURIComponent(rawLogo)}` : rawLogo}"` : ''
-    const group  = ch.group_title ? ` group-title="${ch.group_title}"` : ''
+
+    // Use NFO poster if available, otherwise use channel logo
+    let rawLogo = ch.custom_logo || ch.tvg_logo || ''
+    if (nfoData?.poster && baseUrl) {
+      rawLogo = `${baseUrl}/api/proxy-image?url=${encodeURIComponent(nfoData.poster)}`
+    }
+
+    const logo   = rawLogo ? ` tvg-logo="${rawLogo}"` : ''
+    const group  = (nfoData?.genre || ch.group_title) ? ` group-title="${nfoData?.genre || ch.group_title}"` : ''
     const chno   = ch.sort_order > 0 ? ` tvg-chno="${ch.sort_order}"` : ''
     const catchup = catchupSrc
       ? ` catchup="default" catchup-source="${catchupSrc}" catchup-days="${catchupDays}"`
       : ''
     const streamUrl = baseUrl ? `${baseUrl}/stream/${ch.id}` : ch.url
-    lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${cleanName}"${chno}${logo}${group}${catchup},${cleanName}`)
+    lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${displayName}"${chno}${logo}${group}${catchup},${displayName}`)
     lines.push(streamUrl)
   }
   return lines.join('\n')
