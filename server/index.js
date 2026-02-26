@@ -1772,17 +1772,18 @@ app.post('/api/epg/grab', async (req, res) => {
     .finally(() => clearTimeout(safetyTimeout))
     .then(async () => {
       // Ensure guide.xml is registered as an EPG source
-      const proto = 'http'
-      const host = `127.0.0.1:${process.env.PORT || 3005}`
-      const guideUrl = `${proto}://${host}/guide.xml`
+      // Use HOST_IP from environment if available, otherwise localhost
+      const host = process.env.HOST_IP || 'localhost'
+      const port = process.env.PORT || 3005
+      const guideUrl = `http://${host}:${port}/guide.xml`
 
-      let guideSourceId = db.prepare('SELECT id FROM sources WHERE url = ? AND category = ?').get(guideUrl, 'epg')?.id
+      let guideSourceId = db.prepare('SELECT id FROM sources WHERE url LIKE ? AND category = ?').get('%/guide.xml', 'epg')?.id
       if (!guideSourceId) {
         const result = db.prepare(
           `INSERT INTO sources (name, type, url, category, refresh_cron) VALUES ('EPG Grabber (guide.xml)', 'epg', ?, 'epg', '0 4 * * *')`
         ).run(guideUrl)
         guideSourceId = result.lastInsertRowid
-        console.log('[epg-grab] Created EPG source for guide.xml')
+        console.log(`[epg-grab] Created EPG source for guide.xml: ${guideUrl}`)
       }
 
       // Cache the guide.xml content so it's searchable in EPG Mappings
@@ -2141,10 +2142,12 @@ app.delete('/api/tmdb/matches/:title', (req, res) => {
 
 // Register our own guide.xml as an EPG source
 app.post('/api/epg/sources/from-scraper', (req, res) => {
-  const proto = req.headers['x-forwarded-proto'] || req.protocol
+  const proto = req.protocol || 'http'
   const host  = req.headers['x-forwarded-host']  || req.headers.host
   const url   = `${proto}://${host}/guide.xml`
-  const existing = db.prepare('SELECT id FROM sources WHERE url = ? AND category = ?').get(url, 'epg')
+
+  // Check for any existing guide.xml source regardless of hostname to prevent duplicates
+  const existing = db.prepare('SELECT id FROM sources WHERE url LIKE ? AND category = ?').get('%/guide.xml', 'epg')
   if (existing) {
     return res.json({ ok: true, id: existing.id, created: false, message: 'EPG source already exists' })
   }
