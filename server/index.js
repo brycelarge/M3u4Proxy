@@ -1020,12 +1020,17 @@ app.get('/api/playlists/:id/m3u', (req, res) => {
 
   const epgRows   = db.prepare('SELECT * FROM epg_mappings').all()
   const epgMap    = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
+
+  // Always sort by channel number (sort_order) after deduplication
   if (playlist.group_order) {
     const order = JSON.parse(playlist.group_order)
     channels = [...channels].sort((a, b) => {
       const ai = order.indexOf(a.group_title); const bi = order.indexOf(b.group_title)
-      return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi) || a.sort_order - b.sort_order
+      return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi) || (a.sort_order || 9999) - (b.sort_order || 9999)
     })
+  } else {
+    // No group order - sort by channel number globally
+    channels = [...channels].sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
   }
 
   const proto   = req.headers['x-forwarded-proto'] || req.protocol

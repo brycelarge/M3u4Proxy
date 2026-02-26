@@ -97,17 +97,12 @@ export function useBrowser() {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const currentSelected = computed(() => {
-    // Build a Set of all selected channel IDs across all groups
+    // Just return a Set of all selected channel IDs - don't try to count __all__ groups
+    // The selectedCount computed will handle the total count properly
     const allSelected = new Set()
 
     for (const [groupName, selection] of Object.entries(selectionMap.value)) {
-      if (selection === '__all__') {
-        // For '__all__' groups, add all channels from that group
-        // Note: This only works for the currently loaded channels
-        channels.value
-          .filter(c => (c.group_title || activeGroup.value) === groupName)
-          .forEach(c => allSelected.add(c.id))
-      } else if (selection instanceof Set) {
+      if (selection instanceof Set) {
         // Add all IDs from this group's selection Set
         selection.forEach(id => allSelected.add(id))
       }
@@ -117,13 +112,8 @@ export function useBrowser() {
   })
 
   const selectedCount = computed(() => {
-    // If a playlist is loaded, use the totalCount from the API
-    if (activePlaylistId.value && playlistTotalCount.value > 0) {
-      return playlistTotalCount.value
-    }
-
-    // Otherwise calculate from selectionMap (for source browsing mode)
-    // Use currentSelected.value which already aggregates all selections
+    // Always count actual selections from currentSelected
+    // This works for both playlist mode and source browsing mode
     return currentSelected.value.size
   })
 
@@ -134,7 +124,8 @@ export function useBrowser() {
   const selectionCounts = computed(() => {
     const result = {}
     for (const g of groups.value) {
-      const sel = selectionMap.value[g.name]
+      // Try both g.name and g.display to handle prefixed group names
+      const sel = selectionMap.value[g.name] || selectionMap.value[g.display]
       if (!sel) { result[g.name] = 0; continue }
       if (sel === '__all__') { result[g.name] = g.count; continue }
       result[g.name] = sel instanceof Set ? sel.size : 0
@@ -145,7 +136,8 @@ export function useBrowser() {
   const groupState = computed(() => {
     const result = {}
     for (const g of groups.value) {
-      const sel = selectionMap.value[g.name]
+      // Try both g.name and g.display to handle prefixed group names
+      const sel = selectionMap.value[g.name] || selectionMap.value[g.display]
       if (sel === '__all__') result[g.name] = 'all'
       else if (!sel || !(sel instanceof Set) || sel.size === 0) result[g.name] = 'none'
       else if (sel.size >= g.count) result[g.name] = 'all'
@@ -454,23 +446,16 @@ export function useBrowser() {
 
   // ── Selection ────────────────────────────────────────────────────────────────
   function toggleChannel(ch) {
-    // Use the channel's group_title if available, otherwise use activeGroup
-    const g = ch.group_title || activeGroup.value
+    // Always use activeGroup which has the full prefixed name (e.g., "ky-tv › AF: South Africa")
+    // This ensures the key matches what selectionCounts looks up
+    const g = activeGroup.value
     if (!g) {
       console.error('[browser] toggleChannel: no group found', {
         channel: ch,
-        activeGroup: activeGroup.value,
-        hasGroupTitle: !!ch.group_title
+        activeGroup: activeGroup.value
       })
       return
     }
-
-    console.log('[browser] toggleChannel:', {
-      channelId: ch.id,
-      channelName: ch.name,
-      group: g,
-      currentlySelected: currentSelected.value.has(ch.id)
-    })
 
     const currentMap = selectionMap.value
     const s = new Set(currentMap[g] instanceof Set ? currentMap[g] : [])
@@ -488,14 +473,6 @@ export function useBrowser() {
     }
     newMap[g] = s
     selectionMap.value = newMap
-
-    console.log('[browser] After toggle:', {
-      group: g,
-      selectionSize: s.size,
-      isSelected: s.has(ch.id),
-      activeGroup: activeGroup.value,
-      groupMatchesActive: g === activeGroup.value
-    })
   }
 
   function selectAll() {

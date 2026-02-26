@@ -59,12 +59,15 @@ function getPlaylistChannels(playlistId) {
   // Deduplicate by normalized_name - keep only the first (best) variant
   // Channels without normalized_name are kept as-is (no deduplication)
   const seen = new Set()
-  return allChannels.filter(ch => {
+  const channels = allChannels.filter(ch => {
     if (!ch.normalized_name) return true // Keep channels without normalized_name
     if (seen.has(ch.normalized_name)) return false // Skip duplicates
     seen.add(ch.normalized_name)
     return true
   })
+
+  // Sort by channel number (sort_order) after deduplication
+  return channels.sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
 }
 
 // Stable 8-char device ID derived from playlist ID — same across restarts
