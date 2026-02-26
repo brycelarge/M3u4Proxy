@@ -3427,6 +3427,10 @@ app.get('/stream/:channelId', async (req, res) => {
   const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
   if (!row) return res.status(404).send('Channel not found')
 
+  // Check playlist type to determine which streamer to use
+  const playlist = db.prepare('SELECT playlist_type FROM playlists WHERE id = ?').get(row.playlist_id)
+  const isVod = playlist?.playlist_type === 'vod'
+
   // Resolve username from query creds so max_connections is enforced on this path too
   let username = null
   const u = req.query.username, p = req.query.password
@@ -3450,9 +3454,16 @@ app.get('/stream/:channelId', async (req, res) => {
   const clientIp = req.ip || req.connection.remoteAddress || 'unknown'
   const userAgent = req.get('user-agent') || 'unknown'
 
-  console.log(`[stream] Client ${clientIp} requesting "${row.tvg_name}" (channel ${channelId})`)
+  console.log(`[stream] Client ${clientIp} requesting "${row.tvg_name}" (channel ${channelId}) [${isVod ? 'VOD' : 'LIVE'}]`)
   console.log(`[stream] User-Agent: ${userAgent.substring(0, 80)}`)
 
+  // Route to VOD streamer for VOD playlists
+  if (isVod) {
+    const { connectVodClient } = await import('./vod-streamer.js')
+    return connectVodClient(channelId, row.url, row.tvg_name, req, res, username)
+  }
+
+  // Route to live streamer for live playlists
   // Get all channel variants (ordered by availability and quality)
   const variants = getChannelVariants(channelId)
 
