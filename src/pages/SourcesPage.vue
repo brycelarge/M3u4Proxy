@@ -23,14 +23,26 @@ async function pollGrabStatus() {
 
 const form = ref({ name: '', category: 'playlist', type: 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0 })
 const showCleanupRules = ref(false)
+const rulesTab = ref('cleanup')
 const cleanupRules = ref([])
+const skipRules = ref([])
 const newRule = ref({ find: '', replace: '', useRegex: false, flags: 'gi', enabled: true })
+const newSkipRule = ref({ pattern: '', useRegex: true, enabled: true, description: '' })
 const testInput = ref('PREFIX: Channel Name Full')
 
 function getCleanupRulesCount(source) {
   try {
     if (!source.cleanup_rules) return 0
     return JSON.parse(source.cleanup_rules).length
+  } catch {
+    return 0
+  }
+}
+
+function getSkipRulesCount(source) {
+  try {
+    if (!source.skip_rules) return 0
+    return JSON.parse(source.skip_rules).length
   } catch {
     return 0
   }
@@ -57,6 +69,11 @@ function openEdit(s) {
   } catch {
     cleanupRules.value = []
   }
+  try {
+    skipRules.value = s.skip_rules ? JSON.parse(s.skip_rules) : []
+  } catch {
+    skipRules.value = []
+  }
   showForm.value = true
 }
 
@@ -76,6 +93,20 @@ function removeCleanupRule(idx) {
 
 function toggleCleanupRule(idx) {
   cleanupRules.value[idx].enabled = !cleanupRules.value[idx].enabled
+}
+
+function addSkipRule() {
+  if (!newSkipRule.value.pattern) return
+  skipRules.value.push({ ...newSkipRule.value })
+  newSkipRule.value = { pattern: '', useRegex: true, enabled: true, description: '' }
+}
+
+function removeSkipRule(idx) {
+  skipRules.value.splice(idx, 1)
+}
+
+function toggleSkipRule(idx) {
+  skipRules.value[idx].enabled = !skipRules.value[idx].enabled
 }
 
 const testOutput = computed(() => {
@@ -100,7 +131,7 @@ async function save() {
   loading.value = true
   error.value = ''
   try {
-    const payload = { ...form.value, cleanup_rules: cleanupRules.value }
+    const payload = { ...form.value, cleanup_rules: cleanupRules.value, skip_rules: skipRules.value }
     if (editing.value) {
       await api.updateSource(editing.value.id, payload)
     } else {
@@ -202,8 +233,13 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
               <div class="flex flex-wrap gap-2 mt-0.5 text-xs text-slate-600">
                 <span class="uppercase font-mono">{{ s.type }}</span>
                 <span v-if="s.channel_count" class="text-slate-400">· {{ s.channel_count.toLocaleString() }} ch</span>
-                <span v-if="getCleanupRulesCount(s) > 0" class="text-amber-400">
-                  · ⚙️ {{ getCleanupRulesCount(s) }} cleanup rule{{ getCleanupRulesCount(s) > 1 ? 's' : '' }}
+                <span v-if="getCleanupRulesCount(s) > 0 || getSkipRulesCount(s) > 0">
+                  <span v-if="getCleanupRulesCount(s) > 0" class="text-amber-400">
+                    · ⚙️ {{ getCleanupRulesCount(s) }}
+                  </span>
+                  <span v-if="getSkipRulesCount(s) > 0" class="text-red-400">
+                    · 🚫 {{ getSkipRulesCount(s) }}
+                  </span>
                 </span>
                 <span v-if="s.last_fetched" class="hidden sm:inline">· {{ new Date(s.last_fetched + 'Z').toLocaleString() }}</span>
                 <span v-else class="text-amber-600">· Not fetched</span>
@@ -356,14 +392,14 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
               <p class="text-xs text-slate-600 mt-1">e.g. <code>0 */6 * * *</code> = every 6 hours</p>
             </div>
 
-            <!-- Cleanup Rules Button (Playlist sources only) -->
+            <!-- Cleanup & Skip Rules Button (Playlist sources only) -->
             <div v-if="form.category !== 'epg'">
               <button @click="openCleanupRules" type="button"
                 class="w-full px-4 py-2.5 text-sm bg-[#22263a] border border-[#2e3250] rounded-xl text-slate-300 hover:border-amber-400 hover:text-amber-300 transition-colors flex items-center justify-between">
-                <span>⚙️ Channel Name Cleanup Rules</span>
-                <span class="text-xs text-slate-600">{{ cleanupRules.length }} rules</span>
+                <span>⚙️ Channel Cleanup & Skip Rules</span>
+                <span class="text-xs text-slate-600">{{ cleanupRules.length }} cleanup, {{ skipRules.length }} skip</span>
               </button>
-              <p class="text-xs text-slate-600 mt-1">Strip or replace text before normalization (e.g., NETWORK → NET)</p>
+              <p class="text-xs text-slate-600 mt-1">Modify or exclude channels (e.g., strip prefixes, skip non-English)</p>
             </div>
           </div>
 
@@ -379,17 +415,33 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
       </div>
     </Teleport>
 
-    <!-- Cleanup Rules Modal -->
+    <!-- Cleanup & Skip Rules Modal -->
     <Teleport to="body">
       <div v-if="showCleanupRules" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
         <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl w-full max-w-3xl shadow-2xl flex flex-col" style="max-height: 90vh">
-          <div class="flex items-center gap-3 px-5 py-3.5 border-b border-[#2e3250] shrink-0">
-            <h2 class="text-sm font-bold text-slate-100">Channel Name Cleanup Rules</h2>
-            <span class="text-xs text-slate-500 ml-auto">{{ cleanupRules.length }} rules</span>
-            <button @click="showCleanupRules = false" class="text-slate-500 hover:text-slate-300 text-lg leading-none ml-3">✕</button>
+          <div class="px-5 py-3.5 border-b border-[#2e3250] shrink-0">
+            <div class="flex items-center gap-3 mb-3">
+              <h2 class="text-sm font-bold text-slate-100">Channel Cleanup & Skip Rules</h2>
+              <button @click="showCleanupRules = false" class="text-slate-500 hover:text-slate-300 text-lg leading-none ml-auto">✕</button>
+            </div>
+
+            <!-- Tabs -->
+            <div class="flex gap-2">
+              <button @click="rulesTab = 'cleanup'"
+                :class="rulesTab === 'cleanup' ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' : 'text-slate-500 border-transparent hover:text-slate-300'"
+                class="px-3 py-1.5 text-xs rounded-lg border transition-colors">
+                ⚙️ Cleanup ({{ cleanupRules.length }})
+              </button>
+              <button @click="rulesTab = 'skip'"
+                :class="rulesTab === 'skip' ? 'bg-red-500/20 text-red-300 border-red-500/30' : 'text-slate-500 border-transparent hover:text-slate-300'"
+                class="px-3 py-1.5 text-xs rounded-lg border transition-colors">
+                🚫 Skip ({{ skipRules.length }})
+              </button>
+            </div>
           </div>
 
-          <div class="flex-1 overflow-y-auto p-5 space-y-4">
+          <!-- Cleanup Tab -->
+          <div v-if="rulesTab === 'cleanup'" class="flex-1 overflow-y-auto p-5 space-y-4">
             <!-- Info -->
             <div class="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-300">
               <p class="font-semibold mb-1">💡 How it works</p>
@@ -486,6 +538,82 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
                 <p><code class="text-slate-300">\b(NETWORK|NET)\b</code> → <code class="text-indigo-300">(empty)</code> + regex (strip text)</p>
                 <p><code class="text-slate-300">\s+</code> → <code class="text-indigo-300"> </code> + regex (collapse spaces)</p>
                 <p><code class="text-slate-300">\b(HD|FHD|UHD|4K|SD)\b</code> → <code class="text-indigo-300">(empty)</code> + regex (remove quality)</p>
+              </div>
+            </details>
+          </div>
+
+          <!-- Skip Tab -->
+          <div v-if="rulesTab === 'skip'" class="flex-1 overflow-y-auto p-5 space-y-4">
+            <!-- Info -->
+            <div class="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-xs text-red-300">
+              <p class="font-semibold mb-1">🚫 How it works</p>
+              <p>Skip rules exclude channels entirely during source refresh. Channels matching these patterns won't be imported.</p>
+              <p class="mt-1 text-red-400/70">Example: Skip non-English titles with pattern: [À-ÿ]</p>
+            </div>
+
+            <!-- Current Skip Rules -->
+            <div>
+              <p class="text-xs text-slate-500 mb-2">Current Skip Rules</p>
+              <div v-if="!skipRules.length" class="text-center py-8 text-slate-600 text-sm bg-[#13151f] border border-[#2e3250] rounded-xl">
+                No skip rules yet — add one below
+              </div>
+              <div v-else class="space-y-2">
+                <div v-for="(rule, idx) in skipRules" :key="idx"
+                  class="flex items-center gap-3 bg-[#13151f] border border-[#2e3250] rounded-lg px-3 py-2.5">
+                  <input type="checkbox" :checked="rule.enabled" @change="toggleSkipRule(idx)"
+                    class="accent-green-500 cursor-pointer" />
+                  <div class="flex-1 min-w-0">
+                    <div class="font-mono text-xs text-slate-300">{{ rule.pattern }}</div>
+                    <div v-if="rule.description" class="text-[10px] text-slate-500 mt-0.5">{{ rule.description }}</div>
+                  </div>
+                  <span v-if="rule.useRegex" class="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">regex</span>
+                  <button @click="removeSkipRule(idx)"
+                    class="px-2 py-1 text-xs bg-red-500/10 border border-red-900/40 hover:border-red-500 text-red-400 rounded transition-colors">
+                    ✕
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Add New Skip Rule -->
+            <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+              <p class="text-sm font-semibold text-slate-100 mb-3">Add New Skip Rule</p>
+              <div class="space-y-3">
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1.5">Pattern (regex or text)</label>
+                  <input v-model="newSkipRule.pattern" placeholder="[À-ÿ]"
+                    class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 outline-none focus:border-red-500"
+                    @keyup.enter="addSkipRule" />
+                </div>
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1.5">Description (optional)</label>
+                  <input v-model="newSkipRule.description" placeholder="Skip non-English characters"
+                    class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-red-500"
+                    @keyup.enter="addSkipRule" />
+                </div>
+                <div class="flex items-center gap-4">
+                  <label class="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                    <input type="checkbox" v-model="newSkipRule.useRegex" class="accent-purple-500" />
+                    <span>Use Regex</span>
+                  </label>
+                  <button @click="addSkipRule" :disabled="!newSkipRule.pattern"
+                    class="ml-auto px-4 py-1.5 text-xs bg-red-500 hover:bg-red-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors">
+                    Add Skip Rule
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Common Examples -->
+            <details class="bg-[#13151f] border border-[#2e3250] rounded-xl">
+              <summary class="px-4 py-2.5 text-xs font-semibold text-slate-400 cursor-pointer hover:text-slate-300">
+                📚 Common Examples
+              </summary>
+              <div class="px-4 pb-3 space-y-2 text-xs text-slate-500">
+                <p><code class="text-slate-300">[À-ÿ]</code> + regex (skip accented characters like À, É, Ñ)</p>
+                <p><code class="text-slate-300">^[^a-zA-Z0-9]</code> + regex (skip titles starting with special chars)</p>
+                <p><code class="text-slate-300">\b(Hindi|Tamil|Telugu)\b</code> + regex (skip specific languages)</p>
+                <p><code class="text-slate-300">XXX|Adult|18+</code> + regex (skip adult content)</p>
               </div>
             </details>
           </div>

@@ -148,13 +148,14 @@ app.post('/api/sources', (req, res) => {
 })
 
 app.put('/api/sources/:id', (req, res) => {
-  const { name, type, url, username, password, refresh_cron, category, max_streams, priority, cleanup_rules } = req.body
+  const { name, type, url, username, password, refresh_cron, category, max_streams, priority, cleanup_rules, skip_rules } = req.body
   const cat = category || 'playlist'
   const typ = cat === 'epg' ? 'epg' : (type || 'm3u')
   const cleanupRulesJson = cleanup_rules ? JSON.stringify(cleanup_rules) : null
+  const skipRulesJson = skip_rules ? JSON.stringify(skip_rules) : null
   db.prepare(
-    'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=?, priority=?, cleanup_rules=? WHERE id=?'
-  ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, Number(priority) || 999, cleanupRulesJson, req.params.id)
+    'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=?, priority=?, cleanup_rules=?, skip_rules=? WHERE id=?'
+  ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, Number(priority) || 999, cleanupRulesJson, skipRulesJson, req.params.id)
   res.json(db.prepare('SELECT * FROM sources WHERE id = ?').get(req.params.id))
 })
 
@@ -207,8 +208,10 @@ async function refreshSourceCache(sourceId) {
 
   // Playlist source — fetch channels and store to source_channels
   let channels
+  let isXtream = false
   if (source.type === 'xtream') {
     channels = await fetchXtreamChannels(source.url, source.username, source.password)
+    isXtream = true
   } else {
     channels = await fetchAndParseM3U(source.url)
   }
@@ -223,74 +226,350 @@ async function refreshSourceCache(sourceId) {
     console.error(`[source] Failed to parse cleanup_rules for "${source.name}":`, e.message)
   }
 
+  // Load skip rules for this source
+  let skipRules = []
+  try {
+    if (source.skip_rules) {
+      skipRules = JSON.parse(source.skip_rules).filter(r => r.enabled)
+    }
+  } catch (e) {
+    console.error(`[source] Failed to parse skip_rules for "${source.name}":`, e.message)
+  }
+
   const insert = db.prepare(
-    'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name, meta, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
-  const replace = db.transaction((sid, chs) => {
-    db.prepare('DELETE FROM source_channels WHERE source_id = ?').run(sid)
+  const update = db.prepare(
+    'UPDATE source_channels SET tvg_id = ?, tvg_name = ?, tvg_logo = ?, group_title = ?, raw_extinf = ?, quality = ?, normalized_name = ?, meta = ?, content_type = ? WHERE source_id = ? AND url = ?'
+  )
+  const replace = db.transaction((sid, chs, isXtreamSource) => {
+    // Delete only VOD content (movies/series) - Live TV will be updated by URL
+    db.prepare("DELETE FROM source_channels WHERE source_id = ? AND (group_title LIKE 'Series:%' OR group_title LIKE 'Movie:%')").run(sid)
 
-    // Track seen URLs to deduplicate after cleanup (only for non-VOD sources)
-    const seenUrls = new Map()
-    const isVodSource = source.category === 'vod'
+    // For Xtream sources, process each content type separately
+    // For M3U sources, process as a single array
+    let channelArrays = []
+    if (isXtreamSource) {
+      channelArrays = [
+        { contentType: 'live', channels: chs.live || [] },
+        { contentType: 'movie', channels: chs.movie || [] },
+        { contentType: 'series', channels: chs.series || [] }
+      ]
+    } else {
+      // For M3U sources, default to 'vod' content type
+      channelArrays = [{ contentType: 'vod', channels: chs }]
+    }
 
-    for (const ch of chs) {
-      let channelName = ch.tvg_name || ''
+    // Track all Live TV URLs across all channel types for stale deletion
+    const allLiveTvUrls = new Set()
 
-      // Apply cleanup rules before quality extraction and normalization
-      for (const rule of cleanupRules) {
-        try {
-          if (rule.useRegex) {
-            const regex = new RegExp(rule.find, rule.flags || 'gi')
-            channelName = channelName.replace(regex, rule.replace || '')
-          } else {
-            // Simple string replacement (case-insensitive)
-            const regex = new RegExp(rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
-            channelName = channelName.replace(regex, rule.replace || '')
+    for (const { contentType, channels: channelList } of channelArrays) {
+      // Track seen URLs to deduplicate (only for Live TV)
+      const seenUrls = new Map()
+
+      for (const ch of channelList) {
+        // Determine if this is Live TV or VOD based on group_title
+        const isVod = contentType !== 'live'
+        const isLiveTv = contentType === 'live'
+        let channelName = ch.tvg_name || ''
+
+        // Apply cleanup rules before quality extraction and normalization
+        for (const rule of cleanupRules) {
+          try {
+            if (rule.useRegex) {
+              const regex = new RegExp(rule.find, rule.flags || 'gi')
+              channelName = channelName.replace(regex, rule.replace || '')
+            } else {
+              // Simple string replacement (case-insensitive)
+              const regex = new RegExp(rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+              channelName = channelName.replace(regex, rule.replace || '')
+            }
+          } catch (e) {
+            console.error(`[source] Cleanup rule failed for "${source.name}":`, e.message)
           }
-        } catch (e) {
-          console.error(`[source] Cleanup rule failed for "${source.name}":`, e.message)
         }
-      }
 
-      // Extract quality and clean the channel name
-      const { cleanedName, quality } = extractQuality(channelName.trim())
-      const normalizedName = normalizeChannelName(cleanedName)
-
-      // Deduplicate by URL - keep first occurrence (skip for VOD sources)
-      if (!isVodSource && seenUrls.has(ch.url)) {
-        if (process.env.DEBUG) {
-          console.log(`[source] Skipping duplicate URL: "${cleanedName}" (same as "${seenUrls.get(ch.url)}")`)
+        // Check skip rules - exclude channels matching patterns
+        let shouldSkip = false
+        for (const rule of skipRules) {
+          try {
+            if (rule.useRegex) {
+              const regex = new RegExp(rule.pattern, 'i')
+              if (regex.test(channelName)) {
+                shouldSkip = true
+                if (process.env.DEBUG) {
+                  console.log(`[source] Skipping "${channelName}" - matched skip rule: ${rule.pattern}`)
+                }
+                break
+              }
+            } else {
+              if (channelName.toLowerCase().includes(rule.pattern.toLowerCase())) {
+                shouldSkip = true
+                if (process.env.DEBUG) {
+                  console.log(`[source] Skipping "${channelName}" - matched skip rule: ${rule.pattern}`)
+                }
+                break
+              }
+            }
+          } catch (e) {
+            console.error(`[source] Skip rule failed for "${source.name}":`, e.message)
+          }
         }
-        continue
-      }
-      if (!isVodSource) {
-        seenUrls.set(ch.url, cleanedName)
-      }
 
-      insert.run(
-        sid,
-        ch.tvg_id || '',
-        cleanedName,
-        ch.tvg_logo || '',
-        ch.group_title || 'Ungrouped',
-        ch.url,
-        ch.raw_extinf || '',
-        quality,
-        normalizedName
-      )
+        if (shouldSkip) {
+          continue
+        }
 
-      // Update playlist_channels with cleaned name for channels with this URL
-      const updated = db.prepare('UPDATE playlist_channels SET tvg_name = ? WHERE url = ?')
-        .run(cleanedName, ch.url)
-      if (updated.changes > 0 && process.env.DEBUG) {
-        console.log(`[source] Updated ${updated.changes} playlist channel(s): "${ch.tvg_name || ''}" -> "${cleanedName}"`)
+        // Extract quality and clean the channel name
+        const { cleanedName, quality } = extractQuality(channelName.trim())
+        const normalizedName = normalizeChannelName(cleanedName)
+
+        // Deduplicate by URL - keep first occurrence (only for Live TV)
+        if (isLiveTv && seenUrls.has(ch.url)) {
+          if (process.env.DEBUG) {
+            console.log(`[source] Skipping duplicate URL: "${cleanedName}" (same as "${seenUrls.get(ch.url)}")`)
+          }
+          continue
+        }
+        if (isLiveTv) {
+          seenUrls.set(ch.url, cleanedName)
+          allLiveTvUrls.add(ch.url)
+
+          // For Live TV, UPDATE existing channel by URL to preserve ID
+          const groupTitle = ch.group_title || 'Ungrouped'
+          const result = update.run(
+            ch.tvg_id || '',
+            cleanedName,
+            ch.tvg_logo || '',
+            groupTitle,
+            ch.raw_extinf || '',
+            quality,
+            normalizedName,
+            ch.meta ? JSON.stringify(ch.meta) : null,
+            contentType,
+            sid,
+            ch.url
+          )
+
+          // If no existing channel, INSERT new one
+          if (result.changes === 0) {
+            insert.run(
+              sid,
+              ch.tvg_id || '',
+              cleanedName,
+              ch.tvg_logo || '',
+              groupTitle,
+              ch.url,
+              ch.raw_extinf || '',
+              quality,
+              normalizedName,
+              ch.meta ? JSON.stringify(ch.meta) : null,
+              contentType
+            )
+          }
+        } else {
+          // For VOD, always INSERT (we deleted them earlier)
+          const groupTitle = ch.group_title || 'Ungrouped'
+          insert.run(
+            sid,
+            ch.tvg_id || '',
+            cleanedName,
+            ch.tvg_logo || '',
+            groupTitle,
+            ch.url,
+            ch.raw_extinf || '',
+            quality,
+            normalizedName,
+            ch.meta ? JSON.stringify(ch.meta) : null,
+            contentType
+          )
+        }
+
+        // Update playlist_channels with cleaned name for channels with this URL
+        const updated = db.prepare('UPDATE playlist_channels SET tvg_name = ? WHERE url = ?')
+          .run(cleanedName, ch.url)
+        if (updated.changes > 0 && process.env.DEBUG) {
+          console.log(`[source] Updated ${updated.changes} playlist channel(s): "${ch.tvg_name || ''}" -> "${cleanedName}"`)
+        }
       }
     }
+
+    // Delete stale Live TV channels (channels that no longer exist in the source)
+    if (allLiveTvUrls.size > 0) {
+      const currentUrls = Array.from(allLiveTvUrls)
+      const placeholders = currentUrls.map(() => '?').join(',')
+      const deleteStale = db.prepare(`
+        DELETE FROM source_channels
+        WHERE source_id = ?
+        AND group_title NOT LIKE 'Series:%'
+        AND group_title NOT LIKE 'Movie:%'
+        AND url NOT IN (${placeholders})
+      `)
+      const result = deleteStale.run(sid, ...currentUrls)
+      if (result.changes > 0) {
+        console.log(`[source] Deleted ${result.changes} stale Live TV channels`)
+      }
+    }
+
+    // Sync playlists that use this source
+    const playlists = db.prepare(`
+      SELECT DISTINCT pc.playlist_id, p.playlist_type
+      FROM playlist_channels pc
+      JOIN playlists p ON pc.playlist_id = p.id
+      WHERE pc.source_id = ?
+    `).all(sid)
+
+    for (const { playlist_id, playlist_type } of playlists) {
+      if (playlist_type === 'vod') {
+        // VOD playlists: Match by URL, update existing, add new, delete stale
+        const existing = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? AND source_id = ?')
+          .all(playlist_id, sid)
+
+        const sourceUrlMap = new Map()
+        const sourceChannels = db.prepare(`
+          SELECT * FROM source_channels
+          WHERE source_id = ?
+          AND (group_title LIKE 'Series:%' OR group_title LIKE 'Movie:%')
+        `).all(sid)
+
+        for (const ch of sourceChannels) {
+          sourceUrlMap.set(ch.url, ch)
+        }
+
+        const updateStmt = db.prepare(
+          'UPDATE playlist_channels SET tvg_name = ?, tvg_logo = ?, group_title = ?, raw_extinf = ?, content_type = ? WHERE id = ?'
+        )
+        const deleteStmt = db.prepare('DELETE FROM playlist_channels WHERE id = ?')
+        const insertStmt = db.prepare(
+          'INSERT INTO playlist_channels (playlist_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, custom_tvg_id, sort_order, source_id, epg_source_id, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        )
+
+        let updatedCount = 0
+        let deletedCount = 0
+        const existingUrls = new Set()
+
+        // Update existing channels
+        for (const ch of existing) {
+          existingUrls.add(ch.url)
+          const sourceChannel = sourceUrlMap.get(ch.url)
+
+          if (sourceChannel) {
+            // Update with new data (no customizations to preserve for VOD)
+            updateStmt.run(
+              sourceChannel.tvg_name,
+              sourceChannel.tvg_logo || '',
+              sourceChannel.group_title || '',
+              sourceChannel.raw_extinf || '',
+              sourceChannel.content_type || 'movie',
+              ch.id
+            )
+            updatedCount++
+          } else {
+            // Channel no longer in source - delete
+            deleteStmt.run(ch.id)
+            deletedCount++
+          }
+        }
+
+        // Add new channels not in playlist
+        let addedCount = 0
+        let maxSortOrder = existing.length > 0 ? Math.max(...existing.map(e => e.sort_order || 0)) : 0
+
+        for (const [url, ch] of sourceUrlMap) {
+          if (!existingUrls.has(url)) {
+            insertStmt.run(
+              playlist_id,
+              ch.tvg_id || '',
+              ch.tvg_name,
+              ch.tvg_logo || '',
+              ch.group_title || '',
+              ch.url,
+              ch.raw_extinf || '',
+              '',
+              ++maxSortOrder,
+              ch.source_id,
+              null,
+              ch.content_type || 'movie'
+            )
+            addedCount++
+          }
+        }
+
+        if (updatedCount > 0 || deletedCount > 0 || addedCount > 0) {
+          console.log(`[source] Synced VOD playlist ${playlist_id}: +${addedCount} added, ~${updatedCount} updated, -${deletedCount} deleted`)
+        }
+      } else if (playlist_type === 'live') {
+        // Live TV playlists: Update existing, delete stale, add new (preserve custom overrides)
+        const existing = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? AND source_id = ?')
+          .all(playlist_id, sid)
+
+        const sourceUrlMap = new Map()
+        const sourceChannels = db.prepare(`
+          SELECT * FROM source_channels
+          WHERE source_id = ?
+          AND group_title NOT LIKE 'Series:%'
+          AND group_title NOT LIKE 'Movie:%'
+        `).all(sid)
+
+        for (const ch of sourceChannels) {
+          sourceUrlMap.set(ch.url, ch)
+        }
+
+        const updateStmt = db.prepare(
+          'UPDATE playlist_channels SET tvg_name = ?, tvg_logo = ?, raw_extinf = ?, content_type = ? WHERE id = ?'
+        )
+        const deleteStmt = db.prepare('DELETE FROM playlist_channels WHERE id = ?')
+        const insertStmt = db.prepare(
+          'INSERT INTO playlist_channels (playlist_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, custom_tvg_id, sort_order, source_id, epg_source_id, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        )
+
+        let updatedCount = 0
+        let deletedCount = 0
+        const existingUrls = new Set()
+
+        // Update existing channels
+        for (const ch of existing) {
+          existingUrls.add(ch.url)
+          const sourceChannel = sourceUrlMap.get(ch.url)
+
+          if (sourceChannel) {
+            // Update with new data, preserve custom fields
+            updateStmt.run(
+              sourceChannel.tvg_name,
+              sourceChannel.tvg_logo || '',
+              sourceChannel.raw_extinf || '',
+              sourceChannel.content_type || 'live',
+              ch.id
+            )
+            updatedCount++
+          } else {
+            // Channel no longer in source - delete
+            deleteStmt.run(ch.id)
+            deletedCount++
+          }
+        }
+
+        // Live playlists: DO NOT auto-add new channels from source
+        // Only update existing selections and delete stale ones
+        // User must manually add channels via Channel Browser
+
+        if (updatedCount > 0 || deletedCount > 0) {
+          console.log(`[source] Synced Live playlist ${playlist_id}: ~${updatedCount} updated, -${deletedCount} deleted`)
+        }
+      }
+    }
+
     db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(sid)
   })
-  replace(source.id, channels)
-  console.log(`[source] Refreshed "${source.name}" — ${channels.length} channels`)
-  return channels.length
+  replace(source.id, channels, isXtream)
+
+  // Calculate total channel count
+  const totalCount = isXtream
+    ? (channels.live?.length || 0) + (channels.movies?.length || 0) + (channels.series?.length || 0)
+    : channels.length
+
+  console.log(`[source] Refreshed "${source.name}" — ${totalCount} channels`)
+  return totalCount
 }
 
 /**
@@ -744,11 +1023,9 @@ app.get('/api/playlists/:id/selection', (req, res) => {
   for (const pg of pcGroups) {
     // Always prefix with source name — browser always uses "sourceName › groupTitle" keys
     const grpKey = `${pg.source_name} \u203a ${pg.group_title}`
-    if (pg.pc_count >= pg.sc_count) {
-      groups[grpKey] = '__all__'
-    } else {
-      partialGroups.push({ grpKey, source_id: pg.source_id, group_title: pg.group_title })
-    }
+    // Always treat as partial selection - load individual channel IDs
+    // Never auto-mark as '__all__' based on count comparison
+    partialGroups.push({ grpKey, source_id: pg.source_id, group_title: pg.group_title })
   }
 
   // Step 3: only do the expensive URL JOIN for partial groups (rare case)
@@ -871,12 +1148,13 @@ app.put('/api/playlists/:id/channels', (req, res) => {
   const { channels } = req.body // array of channel objects
   if (!Array.isArray(channels)) return res.status(400).json({ error: 'channels must be array' })
   const insert = db.prepare(
-    'INSERT INTO playlist_channels (playlist_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, custom_tvg_id, sort_order, source_id, epg_source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO playlist_channels (playlist_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, custom_tvg_id, sort_order, source_id, epg_source_id, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
   const replaceAll = db.transaction((playlistId, chs) => {
     db.prepare('DELETE FROM playlist_channels WHERE playlist_id = ?').run(playlistId)
     chs.forEach((ch, i) => {
-      insert.run(playlistId, ch.tvg_id || '', ch.tvg_name, ch.tvg_logo || '', ch.group_title || '', ch.url, ch.raw_extinf || '', ch.custom_tvg_id || '', ch.sort_order ?? i, ch.source_id || null, ch.epg_source_id || null)
+      const contentType = ch.content_type || 'live'
+      insert.run(playlistId, ch.tvg_id || '', ch.tvg_name, ch.tvg_logo || '', ch.group_title || '', ch.url, ch.raw_extinf || '', ch.custom_tvg_id || '', ch.sort_order ?? i, ch.source_id || null, ch.epg_source_id || null, contentType)
     })
   })
   replaceAll(req.params.id, channels)
@@ -890,7 +1168,7 @@ app.put('/api/playlists/:id/channels-by-groups', (req, res) => {
   if (!groups || typeof groups !== 'object') return res.status(400).json({ error: 'groups required' })
 
   const insert = db.prepare(
-    'INSERT INTO playlist_channels (playlist_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, custom_tvg_id, sort_order, source_id, epg_source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO playlist_channels (playlist_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, custom_tvg_id, sort_order, source_id, epg_source_id, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
 
   const replaceAll = db.transaction((playlistId) => {
@@ -917,18 +1195,21 @@ app.put('/api/playlists/:id/channels-by-groups', (req, res) => {
       }
       for (const ch of rows) {
         const ov = overrides[ch.id] || {}
+        const groupTitle = ov.group_title || ch.group_title || ''
+        const contentType = ch.content_type || 'live'
         insert.run(
           playlistId,
           ch.tvg_id || '',
           ov.tvg_name || ch.tvg_name,
           ch.tvg_logo || '',
-          ov.group_title || ch.group_title || '',
+          groupTitle,
           ch.url,
           ch.raw_extinf || '',
           ov.custom_tvg_id || '',
           ov.sort_order ?? i,
           ch.source_id || null,
-          ov.epg_source_id ? Number(ov.epg_source_id) : null
+          ov.epg_source_id ? Number(ov.epg_source_id) : null,
+          contentType
         )
         i++
       }
@@ -1280,9 +1561,21 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
     `</tv>`,
   ].join('\n')
 
-  res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-  res.setHeader('Cache-Control', 'public, max-age=3600')
-  res.send(out)
+  // Support gzip compression via query param ?compress=true or .gz extension
+  const compress = req.query.compress === 'true' || req.path.endsWith('.gz')
+
+  if (compress) {
+    const compressed = gzipSync(Buffer.from(out))
+    res.setHeader('Content-Type', 'application/x-gzip')
+    res.setHeader('Content-Encoding', 'gzip')
+    res.setHeader('Content-Disposition', `attachment; filename="playlist-${playlist.id}.xml.gz"`)
+    res.setHeader('Cache-Control', 'public, max-age=3600')
+    res.send(compressed)
+  } else {
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8')
+    res.setHeader('Cache-Control', 'public, max-age=3600')
+    res.send(out)
+  }
 })
 
 // Helper function to escape XML special characters
@@ -2804,21 +3097,6 @@ app.post('/api/strm/export-all', async (req, res) => {
   })
 })
 
-app.post('/api/nfo/sync', async (req, res) => {
-  try {
-    const { syncNfoToDatabase } = await import('./nfo-parser.js')
-    const stats = await syncNfoToDatabase()
-    res.json({
-      success: true,
-      stats,
-      message: `Synced ${stats.synced} NFO files to database`
-    })
-  } catch (e) {
-    console.error('[nfo] Sync failed:', e)
-    res.status(500).json({ error: e.message })
-  }
-})
-
 app.get('/api/proxy-image', async (req, res) => {
   const imageUrl = req.query.url
   if (!imageUrl) {
@@ -3421,6 +3699,15 @@ async function tryConnectWithTimeout(channelId, url, name, res, sourceId, userna
 }
 
 // ── Stream proxy ──────────────────────────────────────────────────────────────
+// OPTIONS /stream/:channelId — CORS preflight for Jellyfin
+app.options('/stream/:channelId', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type')
+  res.setHeader('Access-Control-Max-Age', '86400')
+  res.status(204).end()
+})
+
 // GET /stream/:channelId  — proxy upstream IPTV stream, reuse for multiple clients (direct stream)
 app.get('/stream/:channelId', async (req, res) => {
   const { channelId } = req.params

@@ -1,6 +1,6 @@
 /**
  * VOD (Video on Demand) streaming proxy
- * 
+ *
  * Handles MP4/MKV/AVI files with:
  * - Range request support for seeking
  * - Session sharing (multiple clients can watch same movie)
@@ -36,17 +36,17 @@ class VodSession extends EventEmitter {
       this.graceTimer = null
       console.log(`[vod] Client reconnected to "${this.channelName}" within grace period`)
     }
-    
+
     this.clients.add(res)
     res.on('close', () => this.removeClient(res))
   }
 
   removeClient(res) {
     this.clients.delete(res)
-    
+
     if (this.clients.size === 0) {
       console.log(`[vod] No clients left for "${this.channelName}" — starting grace period (${GRACE_PERIOD_MS}ms)`)
-      
+
       // Don't destroy immediately - wait for potential reconnect
       this.graceTimer = setTimeout(() => {
         console.log(`[vod] Grace period expired for "${this.channelName}" — closing session`)
@@ -58,12 +58,12 @@ class VodSession extends EventEmitter {
   destroy() {
     if (this.dead) return
     this.dead = true
-    
+
     if (this.graceTimer) {
       clearTimeout(this.graceTimer)
       this.graceTimer = null
     }
-    
+
     vodSessions.delete(this.channelId)
     this.emit('dead')
   }
@@ -83,18 +83,20 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
   if (!range && vodSessions.has(channelId)) {
     const session = vodSessions.get(channelId)
     console.log(`[vod] ✓ Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
-    
+
     // Can't really share MP4 streams effectively since each client may seek differently
     // Just track for stats but serve independently
     session.addClient(res)
-    
+
     // Fall through to fetch - each client gets own stream for now
     // TODO: Could implement smart caching here later
   }
 
   try {
     const headers = {
-      'User-Agent': req.get('user-agent') || 'Mozilla/5.0 (compatible; M3UManager/1.0)',
+      'User-Agent': req.get('user-agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Encoding': 'identity',
       'Connection': 'keep-alive',
     }
 
@@ -102,12 +104,23 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
       headers['Range'] = range
     }
 
-    const upstream = await fetch(upstreamUrl, { headers })
+    console.log(`[vod] Fetching upstream: ${upstreamUrl.substring(0, 100)}...`)
+    console.log(`[vod] Headers:`, JSON.stringify(headers, null, 2))
+
+    const upstream = await fetch(upstreamUrl, {
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(30000), // 30 second timeout
+    })
 
     if (!upstream.ok) {
-      console.error(`[vod] Upstream ${upstream.status} for "${channelName}"`)
+      console.error(`[vod] Upstream ${upstream.status} ${upstream.statusText} for "${channelName}"`)
+      console.error(`[vod] URL: ${upstreamUrl}`)
       return res.status(upstream.status).send('Upstream error')
     }
+
+    console.log(`[vod] Upstream OK (${upstream.status}) for "${channelName}"`)
+    console.log(`[vod] Content-Type: ${upstream.headers.get('content-type')}, Content-Length: ${upstream.headers.get('content-length')}`)
 
     // Forward upstream headers
     res.status(upstream.status)
@@ -116,10 +129,29 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
     const acceptRanges = upstream.headers.get('accept-ranges')
     const contentRange = upstream.headers.get('content-range')
 
-    if (contentType) res.setHeader('Content-Type', contentType)
+    // Set Content-Type with fallback based on URL extension
+    if (contentType) {
+      res.setHeader('Content-Type', contentType)
+    } else {
+      // Fallback: detect from URL
+      const url = upstreamUrl.toLowerCase()
+      if (url.includes('.mp4')) res.setHeader('Content-Type', 'video/mp4')
+      else if (url.includes('.mkv')) res.setHeader('Content-Type', 'video/x-matroska')
+      else if (url.includes('.avi')) res.setHeader('Content-Type', 'video/x-msvideo')
+      else if (url.includes('.ts')) res.setHeader('Content-Type', 'video/mp2t')
+      else res.setHeader('Content-Type', 'video/mp4') // Default to mp4
+    }
+
     if (contentLength) res.setHeader('Content-Length', contentLength)
     if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges)
+    else res.setHeader('Accept-Ranges', 'bytes') // Always advertise range support
     if (contentRange) res.setHeader('Content-Range', contentRange)
+
+    // CORS headers for Jellyfin web client
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Range')
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges')
 
     res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Connection', 'keep-alive')

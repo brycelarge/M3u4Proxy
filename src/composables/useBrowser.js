@@ -53,9 +53,9 @@ function loadSavedNameOverrides() {
 
 // ── Group classification ──────────────────────────────────────────────────────
 export function classifyGroup(name) {
-  const n = name.toLowerCase()
-  if (/series|show|episode|season|tvshow/.test(n)) return 'Series'
-  if (/vod|movie|film|cinema/.test(n)) return 'Movies VOD'
+  // Check for prefixes set by Xtream API import
+  if (name.startsWith('Series:')) return 'Series'
+  if (name.startsWith('Movie:')) return 'Movies VOD'
   return 'Live TV'
 }
 
@@ -97,8 +97,7 @@ export function useBrowser() {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const currentSelected = computed(() => {
-    // Just return a Set of all selected channel IDs - don't try to count __all__ groups
-    // The selectedCount computed will handle the total count properly
+    // Return a Set of all selected channel IDs
     const allSelected = new Set()
 
     for (const [groupName, selection] of Object.entries(selectionMap.value)) {
@@ -112,9 +111,21 @@ export function useBrowser() {
   })
 
   const selectedCount = computed(() => {
-    // Always count actual selections from currentSelected
-    // This works for both playlist mode and source browsing mode
-    return currentSelected.value.size
+    // Count actual channel IDs plus estimated count for '__all__' groups
+    let count = currentSelected.value.size
+
+    // Add counts for groups marked as '__all__'
+    for (const [groupName, selection] of Object.entries(selectionMap.value)) {
+      if (selection === '__all__') {
+        // Find the group to get its count
+        const group = groups.value.find(g => g.name === groupName || g.display === groupName)
+        if (group) {
+          count += group.count
+        }
+      }
+    }
+
+    return count
   })
 
   const totalCount = computed(() =>
@@ -138,10 +149,16 @@ export function useBrowser() {
     for (const g of groups.value) {
       // Try both g.name and g.display to handle prefixed group names
       const sel = selectionMap.value[g.name] || selectionMap.value[g.display]
-      if (sel === '__all__') result[g.name] = 'all'
-      else if (!sel || !(sel instanceof Set) || sel.size === 0) result[g.name] = 'none'
-      else if (sel.size >= g.count) result[g.name] = 'all'
-      else result[g.name] = 'partial'
+
+      // Only show 'all' if explicitly marked with '__all__' string
+      // Everything else with selections shows as 'partial' (indeterminate checkbox)
+      if (sel === '__all__') {
+        result[g.name] = 'all'
+      } else if (!sel || !(sel instanceof Set) || sel.size === 0) {
+        result[g.name] = 'none'
+      } else {
+        result[g.name] = 'partial'
+      }
     }
     return result
   })
@@ -485,6 +502,57 @@ export function useBrowser() {
     selectionMap.value = { ...selectionMap.value, [g]: new Set() }
   }
 
+  function selectFavorites() {
+    const g = activeGroup.value
+
+    // Categorized favorite patterns
+    const categories = {
+      'News': ['cnn', 'fox news', 'msnbc', 'bbc', 'cnbc', 'bloomberg'],
+      'Entertainment': ['amc', 'tnt', 'tbs', 'usa network', 'bravo', 'e!', 'lifetime', 'a&e', 'fx', 'mtv', 'vh1', 'reelz', 'comedy central', 'fyi network', 'paramount'],
+      'Sports': ['espn', 'fox sports', 'nbc sports', 'golf channel', 'tennis channel', 'nfl network', 'nba tv', 'mlb network', 'nhl network', 'bein sports', 'fs1', 'fs2', 'nbcsn', 'sec network', 'acc network', 'big ten network', 'pac-12 network', 'cbs sports', 'stadium'],
+      'Lifestyle': ['hgtv', 'tlc', 'oxygen', 'investigation discovery', 'own', 'food', 'travel', 'cooking channel'],
+      'Kids': ['disney', 'pbs kids', 'nickelodeon', 'nicktoons', 'cartoon network', 'disney junior', 'nick jr', 'boomerang', 'teen nick'],
+      'Movies': ['hbo', 'showtime', 'starz', 'cinemax', 'tcm', 'hallmark'],
+      'Documentary': ['discovery', 'history', 'animal', 'national geographic', 'nat geo', 'science channel', 'smithsonian', 'discovery science'],
+      'Sci-Fi': ['syfy']
+    }
+
+    const excludePatterns = ['east', 'west']
+
+    const favorites = filtered.value.filter(ch => {
+      const name = ch.name.toLowerCase()
+
+      // Check if matches any favorite pattern
+      for (const [category, patterns] of Object.entries(categories)) {
+        const matchesPattern = patterns.some(pattern => name.includes(pattern))
+        if (matchesPattern) {
+          // Exclude if contains east or west
+          const hasExcluded = excludePatterns.some(pattern => name.includes(pattern))
+          if (!hasExcluded) {
+            // Set group override to category
+            setGroupOverride(ch.id, category)
+            return true
+          }
+        }
+      }
+      return false
+    })
+
+    // Toggle favorites instead of replacing selection
+    const currentMap = selectionMap.value
+    const currentSelection = new Set(currentMap[g] instanceof Set ? currentMap[g] : [])
+
+    for (const ch of favorites) {
+      if (currentSelection.has(ch.id)) {
+        currentSelection.delete(ch.id)
+      } else {
+        currentSelection.add(ch.id)
+      }
+    }
+
+    selectionMap.value = { ...selectionMap.value, [g]: currentSelection }
+  }
+
   function toggleGroup(groupName) {
     const state = groupState.value[groupName]
     if (state === 'all') {
@@ -739,7 +807,7 @@ export function useBrowser() {
     // methods
     selectGroup, loadMoreChannels, loadSourceFromCache,
     loadPlaylistSelection, saveToPlaylist, buildPlaylist,
-    toggleChannel, selectAll, selectNone, toggleGroup, toggleSection,
+    toggleChannel, selectAll, selectNone, selectFavorites, toggleGroup, toggleSection,
     exportM3U, copyM3U, onImgError,
     setGroupOverride, getAllSelectedChannels, groupOverrides,
     setChannelNumbers, channelNumbers,

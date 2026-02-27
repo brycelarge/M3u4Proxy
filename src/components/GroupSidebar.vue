@@ -263,10 +263,9 @@ function toggleSection(section) {
             <span class="block truncate text-xs">{{ g.display || g.name }}</span>
           </span>
           <!-- Selected / total count -->
-          <span v-if="selectionCounts[g.name] > 0" class="text-xs shrink-0 font-medium text-blue-500">
-            {{ selectionCounts[g.name] }}
+          <span @click.stop :class="['text-xs shrink-0', selectionCounts[g.name] > 0 ? 'font-medium text-blue-500' : 'text-slate-500']">
+            <template v-if="selectionCounts[g.name] > 0">{{ selectionCounts[g.name] }}/</template>{{ g.count.toLocaleString() }}
           </span>
-          <span v-else class="text-xs text-slate-500 shrink-0">{{ g.count.toLocaleString() }}</span>
         </div>
       </template>
     </div>

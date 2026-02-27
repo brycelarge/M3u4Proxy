@@ -17,7 +17,7 @@ const {
   activePlaylistId, activePlaylistName, saving, building, saveError, loadingSelection,
   selectGroup, loadMoreChannels, loadSourceFromCache,
   loadPlaylistSelection, saveToPlaylist, buildPlaylist,
-  toggleChannel, selectAll, selectNone, toggleGroup, toggleSection,
+  toggleChannel, selectAll, selectNone, selectFavorites, toggleGroup, toggleSection,
   exportM3U, copyM3U, copyPlaylistUrl, openInWebPlayer,
   setGroupOverride, getAllSelectedChannels, groupOverrides,
   setChannelNumbers, channelNumbers,
@@ -354,6 +354,7 @@ function onSetName(payload) {
               <div class="flex gap-1.5 shrink-0">
                 <button @click="selectAll"  class="hidden sm:block px-2.5 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg hover:border-indigo-400 text-slate-300 transition-colors">All</button>
                 <button @click="selectNone" class="hidden sm:block px-2.5 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg hover:border-indigo-400 text-slate-300 transition-colors">None</button>
+                <button @click="selectFavorites" class="hidden sm:block px-2.5 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg hover:border-amber-400 text-slate-300 hover:text-amber-300 transition-colors" title="Select Discovery, History, Animal, Hallmark, FX, Nat Geo, SyFy, Travel, Food (excludes East/West)">⭐ Favorites</button>
                 <button
                   @click="toggleGroup(activeGroup)"
                   :class="['px-2.5 py-1.5 text-xs rounded-lg border transition-colors font-medium whitespace-nowrap',

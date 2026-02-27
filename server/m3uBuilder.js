@@ -81,9 +81,30 @@ export async function fetchAndParseM3U(url) {
 
 /**
  * Fetch channels from Xtream Codes API.
+ * Fetches Live TV, VOD (movies), and Series in parallel.
  */
 export async function fetchXtreamChannels(url, username, password) {
   const base = url.replace(/\/$/, '')
+
+  // Fetch all three content types in parallel
+  const [liveChannels, vodChannels, seriesChannels] = await Promise.all([
+    fetchLiveStreams(base, username, password).catch(() => []),
+    fetchVodStreams(base, username, password).catch(() => []),
+    fetchSeriesStreams(base, username, password).catch(() => [])
+  ])
+
+  // Return separated by content type so caller can handle each independently
+  return {
+    live: liveChannels,
+    movie: vodChannels,
+    series: seriesChannels
+  }
+}
+
+/**
+ * Fetch Live TV streams from Xtream API
+ */
+async function fetchLiveStreams(base, username, password) {
   const apiUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_live_streams`
   const catUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_live_categories`
 
@@ -104,6 +125,166 @@ export async function fetchXtreamChannels(url, username, password) {
   }))
 }
 
+/**
+ * Fetch VOD (movie) streams from Xtream API
+ */
+async function fetchVodStreams(base, username, password) {
+  const apiUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_vod_streams`
+  const catUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_vod_categories`
+
+  const [streamsRes, catsRes] = await Promise.all([fetch(apiUrl), fetch(catUrl)])
+  if (!streamsRes.ok) throw new Error(`Xtream VOD API error: ${streamsRes.status}`)
+
+  const streams = await streamsRes.json()
+  const cats = catsRes.ok ? await catsRes.json() : []
+  const catMap = Object.fromEntries(cats.map(c => [c.category_id, c.category_name]))
+
+  return streams.map(s => {
+    const groupTitle = catMap[s.category_id] || 'Ungrouped'
+    const prefixedGroup = groupTitle !== 'Ungrouped' ? `Movie: ${groupTitle}` : groupTitle
+
+    // Only store metadata if it has useful fields (tmdb_id, imdb_id, year, releaseDate)
+    const hasUsefulMeta = s.tmdb_id || s.imdb_id || s.year || s.releaseDate
+
+    return {
+      tvg_id:      s.tmdb_id || '',
+      tvg_name:    s.name || s.title || 'Unknown',
+      tvg_logo:    s.stream_icon || s.cover || '',
+      group_title: prefixedGroup,
+      url:         `${base}/movie/${username}/${password}/${s.stream_id}.mkv`,
+      meta:        hasUsefulMeta ? s : null, // Only store if has useful data
+      raw_extinf:  `#EXTINF:-1 tvg-id="${s.tmdb_id || ''}" tvg-name="${s.name || s.title || 'Unknown'}" tvg-logo="${s.stream_icon || s.cover || ''}" group-title="${prefixedGroup}",${s.name || s.title || 'Unknown'}`,
+    }
+  })
+}
+
+/**
+ * Fetch Series streams from Xtream API
+ * This fetches all series, then gets episodes for each series
+ */
+async function fetchSeriesStreams(base, username, password) {
+  const apiUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_series`
+  const catUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_series_categories`
+
+  const [streamsRes, catsRes] = await Promise.all([fetch(apiUrl), fetch(catUrl)])
+  if (!streamsRes.ok) throw new Error(`Xtream Series API error: ${streamsRes.status}`)
+
+  const series = await streamsRes.json()
+  const cats = catsRes.ok ? await catsRes.json() : []
+  const catMap = Object.fromEntries(cats.map(c => [c.category_id, c.category_name]))
+
+  // Debug: Check what get_series returns
+  if (series.length > 0) {
+    console.log(`[xtream] DEBUG: First series object:`, JSON.stringify(series[0], null, 2))
+  }
+
+  console.log(`[xtream] Fetching episodes for ${series.length} series...`)
+
+  const allEpisodes = []
+  const BATCH_SIZE = 10 // Process 10 series in parallel
+
+  // Process series in batches for better performance
+  for (let i = 0; i < series.length; i += BATCH_SIZE) {
+    const batch = series.slice(i, i + BATCH_SIZE)
+
+    const batchPromises = batch.map(async (s) => {
+      try {
+        const infoUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_series_info&series_id=${s.series_id}`
+        const infoRes = await fetch(infoUrl)
+        if (!infoRes.ok) return []
+
+        const info = await infoRes.json()
+
+        // Debug: Log full API response for Breaking Bad
+        if (s.name && s.name.toLowerCase().includes('breaking bad')) {
+          console.log(`[xtream] DEBUG: ===== BREAKING BAD FULL API RESPONSE =====`)
+          console.log(`[xtream] DEBUG: Series info:`, JSON.stringify(info.info || {}, null, 2))
+          console.log(`[xtream] DEBUG: Seasons:`, JSON.stringify(info.seasons || [], null, 2))
+          console.log(`[xtream] DEBUG: Episodes keys:`, Object.keys(info.episodes || {}))
+          console.log(`[xtream] DEBUG: Season 1 episodes (first 3):`, JSON.stringify(Object.entries(info.episodes || {})[0]?.[1]?.slice(0, 3), null, 2))
+          console.log(`[xtream] DEBUG: ==========================================`)
+        }
+
+        // Debug: Log episode info for first series
+        if (i === 0 && batch.indexOf(s) === 0) {
+          console.log(`[xtream] DEBUG: Series "${s.name}" (ID: ${s.series_id})`)
+          console.log(`[xtream] DEBUG: Episodes object keys:`, Object.keys(info.episodes || {}))
+          console.log(`[xtream] DEBUG: First season data:`, JSON.stringify(Object.entries(info.episodes || {})[0], null, 2))
+        }
+
+        // Skip series with no episodes or no seasons
+        if (!info.episodes || Object.keys(info.episodes).length === 0) {
+          console.log(`[xtream] Skipping series "${s.name}" - no episodes`)
+          return []
+        }
+
+        const seriesName = s.name || s.title || 'Unknown'
+        const groupTitle = catMap[s.category_id] || 'Ungrouped'
+        const prefixedGroup = groupTitle !== 'Ungrouped' ? `Series: ${groupTitle}` : groupTitle
+
+        const episodes = []
+        let totalEpisodeCount = 0
+
+        // Only store metadata if it has useful fields (tmdb_id, imdb_id, year, releaseDate)
+        const hasUsefulMeta = s.tmdb_id || s.imdb_id || s.year || s.releaseDate
+
+        // Process each season
+        for (const [seasonNum, episodeList] of Object.entries(info.episodes)) {
+          if (!Array.isArray(episodeList) || episodeList.length === 0) continue
+
+          totalEpisodeCount += episodeList.length
+
+          for (const episode of episodeList) {
+            const episodeName = `${seriesName} S${String(seasonNum).padStart(2, '0')}E${String(episode.episode_num).padStart(2, '0')}`
+            const episodeTitle = episode.title || episodeName
+
+            episodes.push({
+              tvg_id:       episode.info?.tmdb_id || s.tmdb_id || '',
+              tvg_name:     episodeName,
+              tvg_logo:     episode.info?.movie_image || s.cover || '',
+              group_title:  prefixedGroup,
+              url:          `${base}/series/${username}/${password}/${episode.id}.mkv`,
+              meta:         hasUsefulMeta ? s : null, // Only store if has useful data
+              raw_extinf:   `#EXTINF:-1 tvg-id="${episode.info?.tmdb_id || s.tmdb_id || ''}" tvg-name="${episodeName}" tvg-logo="${episode.info?.movie_image || s.cover || ''}" group-title="${prefixedGroup}",${episodeTitle}`,
+            })
+          }
+        }
+
+        // Debug: Log episode count for first series
+        if (i === 0 && batch.indexOf(s) === 0) {
+          console.log(`[xtream] DEBUG: Total episodes created: ${totalEpisodeCount}`)
+          console.log(`[xtream] DEBUG: Has useful meta: ${hasUsefulMeta}`)
+          console.log(`[xtream] DEBUG: First episode:`, episodes[0])
+        }
+
+        // Only return if series has more than 1 episode
+        if (totalEpisodeCount <= 1) {
+          console.log(`[xtream] Skipping series "${s.name}" - only ${totalEpisodeCount} episode(s)`)
+        }
+        return totalEpisodeCount > 1 ? episodes : []
+      } catch (e) {
+        console.error(`[xtream] Error fetching episodes for series ${s.series_id}:`, e.message)
+        return []
+      }
+    })
+
+    const batchResults = await Promise.all(batchPromises)
+    for (const episodes of batchResults) {
+      allEpisodes.push(...episodes)
+    }
+
+    // Progress logging
+    const processed = Math.min(i + BATCH_SIZE, series.length)
+    console.log(`[xtream] Processed ${processed}/${series.length} series (${allEpisodes.length} episodes so far)`)
+  }
+
+  console.log(`[xtream] Completed: ${allEpisodes.length} total episodes from ${series.length} series`)
+  return allEpisodes
+}
+
+/**
+ * Fetch and parse an M3U URL, returning raw channel objects.
+ */
 export function parseM3UText(text) {
   const lines = text.split(/\r?\n/)
   const channels = []
