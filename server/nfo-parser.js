@@ -7,6 +7,7 @@
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import Database from 'better-sqlite3'
 
 const STRM_BASE_DIR = process.env.STRM_EXPORT_DIR || '/data/vod-strm'
 
@@ -98,6 +99,16 @@ export function findNfoForChannel(channelId) {
 
   console.log(`[nfo] Searching for channel ${channelId} in ${STRM_BASE_DIR}`)
 
+  // Get channel info from database to match by name if metadata files don't exist
+  const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
+  const channel = db.prepare('SELECT tvg_name, group_title FROM playlist_channels WHERE id = ?').get(channelId)
+  db.close()
+
+  if (!channel) {
+    console.log(`[nfo] Channel ${channelId} not found in database`)
+    return null
+  }
+
   // Recursive function to search directories
   function searchDir(dirPath) {
     try {
@@ -126,6 +137,7 @@ export function findNfoForChannel(channelId) {
 
               for (const nfoPath of nfoOptions) {
                 if (existsSync(nfoPath)) {
+                  console.log(`[nfo] Found NFO via metadata: ${nfoPath}`)
                   return parseNfoFile(nfoPath)
                 }
               }
@@ -136,7 +148,39 @@ export function findNfoForChannel(channelId) {
         }
       }
 
-      // If no metadata file found, search subdirectories recursively
+      // If no metadata file found, try to match by directory name
+      if (channel && channel.group_title) {
+        const dirName = dirPath.split('/').pop()
+
+        // For movies: match directory name with channel name (minus year)
+        if (channel.group_title.startsWith('Movie:')) {
+          const movieNfoPath = join(dirPath, 'movie.nfo')
+          if (existsSync(movieNfoPath)) {
+            const channelName = channel.tvg_name.replace(/\s*\(\d{4}\)/, '').trim()
+            if (dirName.toLowerCase().includes(channelName.toLowerCase()) ||
+                channelName.toLowerCase().includes(dirName.toLowerCase())) {
+              console.log(`[nfo] Found NFO by directory match: ${movieNfoPath}`)
+              return parseNfoFile(movieNfoPath)
+            }
+          }
+        }
+
+        // For series: match directory name with series name (before S01E01)
+        if (channel.group_title.startsWith('Series:')) {
+          const tvshowNfoPath = join(dirPath, 'tvshow.nfo')
+          if (existsSync(tvshowNfoPath)) {
+            // Extract series name from channel name (before S01E01 pattern)
+            const seriesName = channel.tvg_name.replace(/\s*S\d{2}E\d{2}.*$/, '').replace(/\s*\(\d{4}\)/, '').trim()
+            if (dirName.toLowerCase().includes(seriesName.toLowerCase()) ||
+                seriesName.toLowerCase().includes(dirName.toLowerCase())) {
+              console.log(`[nfo] Found NFO by directory match: ${tvshowNfoPath}`)
+              return parseNfoFile(tvshowNfoPath)
+            }
+          }
+        }
+      }
+
+      // Search subdirectories recursively
       for (const entry of entries) {
         if (entry.isDirectory()) {
           const result = searchDir(join(dirPath, entry.name))
