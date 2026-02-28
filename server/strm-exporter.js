@@ -216,32 +216,79 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
     throw new Error(`Playlist ${playlistId} not found`)
   }
 
-  // Detect content type from playlist (series or movies)
-  const sampleChannels = db.prepare(`
-    SELECT group_title FROM playlist_channels
-    WHERE playlist_id = ?
-    LIMIT 10
-  `).all(playlistId)
+  // Parse stored group selections
+  let groupSelections = null
+  if (playlist.group_selections) {
+    try {
+      groupSelections = JSON.parse(playlist.group_selections)
+    } catch (e) {
+      console.error(`[strm] Failed to parse group_selections:`, e.message)
+    }
+  }
 
-  const hasMovies = sampleChannels.some(ch => ch.group_title?.startsWith('Movie:'))
-  const hasSeries = sampleChannels.some(ch => ch.group_title?.startsWith('Series:'))
-  const contentType = hasSeries ? 'series' : (hasMovies ? 'movies' : 'series')
+  let channels = []
 
-  console.log(`[strm] Detected content type: ${contentType}`)
+  if (groupSelections && groupSelections.groups) {
+    // Query source_channels directly using stored group selections
+    console.log(`[strm] Using stored group selections to query fresh data from source_channels`)
+    const { sourceId, groups } = groupSelections
 
-  // Get playlist channel IDs, then join with source_channels to get metadata
-  const prefix = contentType === 'series' ? 'Series' : 'Movie'
-  const channels = db.prepare(`
-    SELECT
-      pc.*,
-      sc.meta,
-      sc.normalized_name
-    FROM playlist_channels pc
-    LEFT JOIN source_channels sc ON pc.source_id = sc.source_id AND pc.url = sc.url
-    WHERE pc.playlist_id = ?
-      AND pc.group_title LIKE '${prefix}:%'
-    ORDER BY pc.tvg_name
-  `).all(playlistId)
+    for (const [groupName, sel] of Object.entries(groups)) {
+      if (!sel || (Array.isArray(sel) && sel.length === 0)) continue
+
+      let rows = []
+      if (sel === '__all__') {
+        if (sourceId === null || sourceId === undefined) {
+          // All sources mode — match by group_title suffix
+          const parts = groupName.split(' › ')
+          const gt = parts.length > 1 ? parts[parts.length - 1] : groupName
+          rows = db.prepare('SELECT *, id as channel_id FROM source_channels WHERE group_title = ?').all(gt)
+        } else {
+          rows = db.prepare('SELECT *, id as channel_id FROM source_channels WHERE source_id = ? AND group_title = ?').all(sourceId, groupName)
+        }
+      } else {
+        // Array of specific channel IDs - but for STRM export, we want all channels in the group
+        // So we'll get the group name from the first channel and query all channels in that group
+        if (Array.isArray(sel) && sel.length > 0) {
+          const firstCh = db.prepare('SELECT group_title, source_id FROM source_channels WHERE id = ?').get(sel[0])
+          if (firstCh) {
+            rows = db.prepare('SELECT *, id as channel_id FROM source_channels WHERE source_id = ? AND group_title = ?').all(firstCh.source_id, firstCh.group_title)
+          }
+        }
+      }
+
+      // Add meta and normalized_name (already in source_channels)
+      channels.push(...rows)
+    }
+
+    console.log(`[strm] Found ${channels.length} channels from selected groups in source_channels`)
+  } else {
+    // Fallback: use playlist_channels (old behavior)
+    console.log(`[strm] No group selections stored, falling back to playlist_channels`)
+    const sampleChannels = db.prepare(`
+      SELECT group_title FROM playlist_channels
+      WHERE playlist_id = ?
+      LIMIT 10
+    `).all(playlistId)
+
+    const hasMovies = sampleChannels.some(ch => ch.group_title?.startsWith('Movie:'))
+    const hasSeries = sampleChannels.some(ch => ch.group_title?.startsWith('Series:'))
+    const contentType = hasSeries ? 'series' : (hasMovies ? 'movies' : 'series')
+    const prefix = contentType === 'series' ? 'Series' : 'Movie'
+
+    channels = db.prepare(`
+      SELECT
+        pc.*,
+        sc.meta,
+        sc.normalized_name,
+        pc.id as channel_id
+      FROM playlist_channels pc
+      LEFT JOIN source_channels sc ON pc.source_id = sc.source_id AND pc.url = sc.url
+      WHERE pc.playlist_id = ?
+        AND pc.group_title LIKE '${prefix}:%'
+      ORDER BY pc.tvg_name
+    `).all(playlistId)
+  }
 
   if (channels.length === 0) {
     console.log(`[strm] No VOD channels found in playlist ${playlistId}`)

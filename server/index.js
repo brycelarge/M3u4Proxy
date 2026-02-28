@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import db from './db.js'
 import { runMigrations } from './migrate.js'
-import { buildM3U, writeM3U, fetchAndParseM3U, fetchXtreamChannels } from './m3uBuilder.js'
+import { buildM3U, writeM3U, fetchAndParseM3U, fetchXtreamChannels, shouldSkipByRules } from './m3uBuilder.js'
 import { connectClient, getActiveSessions, killSession, getBufferSeconds } from './streamer.js'
 import { hashPassword, verifyPassword } from './auth.js'
 import { registerHdhrRoutes, startAllDeviceServers } from './hdhr.js'
@@ -207,15 +207,6 @@ async function refreshSourceCache(sourceId) {
   }
 
   // Playlist source — fetch channels and store to source_channels
-  let channels
-  let isXtream = false
-  if (source.type === 'xtream') {
-    channels = await fetchXtreamChannels(source.url, source.username, source.password)
-    isXtream = true
-  } else {
-    channels = await fetchAndParseM3U(source.url)
-  }
-
   // Load cleanup rules for this source
   let cleanupRules = []
   try {
@@ -234,6 +225,15 @@ async function refreshSourceCache(sourceId) {
     }
   } catch (e) {
     console.error(`[source] Failed to parse skip_rules for "${source.name}":`, e.message)
+  }
+
+  let channels
+  let isXtream = false
+  if (source.type === 'xtream') {
+    channels = await fetchXtreamChannels(source.url, source.username, source.password, skipRules)
+    isXtream = true
+  } else {
+    channels = await fetchAndParseM3U(source.url)
   }
 
   const insert = db.prepare(
@@ -290,33 +290,10 @@ async function refreshSourceCache(sourceId) {
         }
 
         // Check skip rules - exclude channels matching patterns
-        let shouldSkip = false
-        for (const rule of skipRules) {
-          try {
-            if (rule.useRegex) {
-              const regex = new RegExp(rule.pattern, 'i')
-              if (regex.test(channelName)) {
-                shouldSkip = true
-                if (process.env.DEBUG) {
-                  console.log(`[source] Skipping "${channelName}" - matched skip rule: ${rule.pattern}`)
-                }
-                break
-              }
-            } else {
-              if (channelName.toLowerCase().includes(rule.pattern.toLowerCase())) {
-                shouldSkip = true
-                if (process.env.DEBUG) {
-                  console.log(`[source] Skipping "${channelName}" - matched skip rule: ${rule.pattern}`)
-                }
-                break
-              }
-            }
-          } catch (e) {
-            console.error(`[source] Skip rule failed for "${source.name}":`, e.message)
+        if (shouldSkipByRules(channelName, skipRules)) {
+          if (process.env.DEBUG) {
+            console.log(`[source] Skipping "${channelName}" - matched skip rule`)
           }
-        }
-
-        if (shouldSkip) {
           continue
         }
 
@@ -446,11 +423,25 @@ async function refreshSourceCache(sourceId) {
         const existing = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? AND source_id = ?')
           .all(playlist_id, sid)
 
+        // Determine content filter based on playlist name
+        const playlist = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlist_id)
+        const playlistName = (playlist?.name || '').toLowerCase()
+        let contentFilter = ''
+
+        if (playlistName.includes('series') || playlistName.includes('tv')) {
+          contentFilter = "AND group_title LIKE 'Series:%'"
+        } else if (playlistName.includes('movie') || playlistName.includes('film')) {
+          contentFilter = "AND group_title LIKE 'Movie:%'"
+        } else {
+          // Default: include both
+          contentFilter = "AND (group_title LIKE 'Series:%' OR group_title LIKE 'Movie:%')"
+        }
+
         const sourceUrlMap = new Map()
         const sourceChannels = db.prepare(`
           SELECT * FROM source_channels
           WHERE source_id = ?
-          AND (group_title LIKE 'Series:%' OR group_title LIKE 'Movie:%')
+          ${contentFilter}
         `).all(sid)
 
         for (const ch of sourceChannels) {
@@ -1193,6 +1184,12 @@ app.put('/api/playlists/:id/channels-by-groups', (req, res) => {
   )
 
   const replaceAll = db.transaction((playlistId) => {
+    // Store group selections for STRM export to use later
+    db.prepare('UPDATE playlists SET group_selections = ? WHERE id = ?').run(
+      JSON.stringify({ sourceId, groups }),
+      playlistId
+    )
+
     db.prepare('DELETE FROM playlist_channels WHERE playlist_id = ?').run(playlistId)
     let i = 0
     for (const [groupName, sel] of Object.entries(groups)) {

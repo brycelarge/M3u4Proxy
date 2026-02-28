@@ -70,6 +70,29 @@ export function writeM3U(outputPath, content) {
 }
 
 /**
+ * Check if a name should be skipped based on skip rules
+ */
+export function shouldSkipByRules(name, skipRules) {
+  for (const rule of skipRules) {
+    try {
+      if (rule.useRegex) {
+        const regex = new RegExp(rule.pattern, 'i')
+        if (regex.test(name)) {
+          return true
+        }
+      } else {
+        if (name.toLowerCase().includes(rule.pattern.toLowerCase())) {
+          return true
+        }
+      }
+    } catch (e) {
+      console.error(`[skip] Rule failed:`, e.message)
+    }
+  }
+  return false
+}
+
+/**
  * Fetch and parse an M3U URL, returning raw channel objects.
  */
 export async function fetchAndParseM3U(url) {
@@ -83,14 +106,14 @@ export async function fetchAndParseM3U(url) {
  * Fetch channels from Xtream Codes API.
  * Fetches Live TV, VOD (movies), and Series in parallel.
  */
-export async function fetchXtreamChannels(url, username, password) {
+export async function fetchXtreamChannels(url, username, password, skipRules = []) {
   const base = url.replace(/\/$/, '')
 
   // Fetch all three content types in parallel
   const [liveChannels, vodChannels, seriesChannels] = await Promise.all([
     fetchLiveStreams(base, username, password).catch(() => []),
     fetchVodStreams(base, username, password).catch(() => []),
-    fetchSeriesStreams(base, username, password).catch(() => [])
+    fetchSeriesStreams(base, username, password, skipRules).catch(() => [])
   ])
 
   // Return separated by content type so caller can handle each independently
@@ -159,39 +182,105 @@ async function fetchVodStreams(base, username, password) {
 }
 
 /**
- * Fetch Series streams from Xtream API
- * This fetches all series, then gets episodes for each series
+ * Fetch Series streams from Xtream API and expand each series into individual episodes.
  */
-async function fetchSeriesStreams(base, username, password) {
+async function fetchSeriesStreams(base, username, password, skipRules = []) {
   const apiUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_series`
   const catUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_series_categories`
 
   const [streamsRes, catsRes] = await Promise.all([fetch(apiUrl), fetch(catUrl)])
   if (!streamsRes.ok) throw new Error(`Xtream Series API error: ${streamsRes.status}`)
 
-  const series = await streamsRes.json()
+  const allSeries = await streamsRes.json()
   const cats = catsRes.ok ? await catsRes.json() : []
   const catMap = Object.fromEntries(cats.map(c => [c.category_id, c.category_name]))
+
+  // Apply skip rules to filter out unwanted series BEFORE fetching episodes
+  let series = allSeries
+  let skippedCount = 0
+
+  if (skipRules.length > 0) {
+    series = allSeries.filter(s => {
+      const seriesName = s.name || ''
+      if (shouldSkipByRules(seriesName, skipRules)) {
+        skippedCount++
+        return false
+      }
+      return true
+    })
+
+    if (skippedCount > 0) {
+      console.log(`[xtream] Skipped ${skippedCount} series based on skip rules (${series.length} remaining)`)
+    }
+  }
+
+  // Export categories to CSV for investigation
+  try {
+    const { writeFileSync } = await import('node:fs')
+    const csvHeader = 'Category ID,Category Name,Series Count\n'
+    const categoryCounts = new Map()
+
+    // Count series per category
+    for (const s of series) {
+      const catName = catMap[s.category_id] || 'Unknown'
+      categoryCounts.set(catName, (categoryCounts.get(catName) || 0) + 1)
+    }
+
+    const csvRows = cats.map(c => {
+      const count = categoryCounts.get(c.category_name) || 0
+      return `${c.category_id},"${c.category_name.replace(/"/g, '""')}",${count}`
+    }).join('\n')
+
+    const csvPath = '/data/xtream-series-categories.csv'
+    writeFileSync(csvPath, csvHeader + csvRows, 'utf8')
+    console.log(`[xtream] Exported ${cats.length} categories to ${csvPath}`)
+  } catch (e) {
+    console.error(`[xtream] Failed to export categories CSV:`, e.message)
+  }
 
   // Debug: Check what get_series returns
   if (series.length > 0) {
     console.log(`[xtream] DEBUG: First series object:`, JSON.stringify(series[0], null, 2))
   }
 
+  console.log(`[xtream] Found ${cats.length} categories with ${series.length} total series`)
   console.log(`[xtream] Fetching episodes for ${series.length} series...`)
 
+  const seriesToProcess = series
+
   const allEpisodes = []
-  const BATCH_SIZE = 10 // Process 10 series in parallel
+  const skippedData = [] // Track skipped series/episodes for CSV export
+  const apiErrors = [] // Track API errors
+  const BATCH_SIZE = 3 // Process 3 series in parallel (avoid rate limiting)
+  const DELAY_BETWEEN_BATCHES = 1000 // 1 second delay between batches
 
   // Process series in batches for better performance
-  for (let i = 0; i < series.length; i += BATCH_SIZE) {
-    const batch = series.slice(i, i + BATCH_SIZE)
+  for (let i = 0; i < seriesToProcess.length; i += BATCH_SIZE) {
+    const batch = seriesToProcess.slice(i, i + BATCH_SIZE)
 
     const batchPromises = batch.map(async (s) => {
       try {
         const infoUrl = `${base}/player_api.php?username=${username}&password=${password}&action=get_series_info&series_id=${s.series_id}`
-        const infoRes = await fetch(infoUrl)
-        if (!infoRes.ok) return []
+
+        // Retry up to 3 times on failure
+        let infoRes
+        let retries = 0
+        while (retries < 3) {
+          infoRes = await fetch(infoUrl)
+          if (infoRes.ok) break
+          retries++
+          if (retries < 3) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * retries)) // Exponential backoff
+          }
+        }
+
+        if (!infoRes.ok) {
+          apiErrors.push({ series_id: s.series_id, name: s.name, status: infoRes.status })
+          if (apiErrors.length <= 5) {
+            console.log(`[xtream] API error for "${s.name}" (${s.series_id}): HTTP ${infoRes.status}`)
+          }
+          return []
+        }
 
         const info = await infoRes.json()
 
@@ -205,17 +294,27 @@ async function fetchSeriesStreams(base, username, password) {
           console.log(`[xtream] DEBUG: ==========================================`)
         }
 
+        // Skip series with no episodes or no seasons
+        if (!info.episodes || Object.keys(info.episodes).length === 0) {
+          if (skippedData.length < 10) {
+            console.log(`[xtream] Skipping series "${s.name}" (${catMap[s.category_id]}) - no episodes`)
+          }
+          skippedData.push({
+            series_id: s.series_id,
+            series_name: s.name,
+            category: catMap[s.category_id] || 'Ungrouped',
+            reason: 'No episodes data from provider',
+            season: '',
+            episode: ''
+          })
+          return []
+        }
+
         // Debug: Log episode info for first series
         if (i === 0 && batch.indexOf(s) === 0) {
           console.log(`[xtream] DEBUG: Series "${s.name}" (ID: ${s.series_id})`)
           console.log(`[xtream] DEBUG: Episodes object keys:`, Object.keys(info.episodes || {}))
           console.log(`[xtream] DEBUG: First season data:`, JSON.stringify(Object.entries(info.episodes || {})[0], null, 2))
-        }
-
-        // Skip series with no episodes or no seasons
-        if (!info.episodes || Object.keys(info.episodes).length === 0) {
-          console.log(`[xtream] Skipping series "${s.name}" - no episodes`)
-          return []
         }
 
         const seriesName = s.name || s.title || 'Unknown'
@@ -232,10 +331,41 @@ async function fetchSeriesStreams(base, username, password) {
         for (const [seasonNum, episodeList] of Object.entries(info.episodes)) {
           if (!Array.isArray(episodeList) || episodeList.length === 0) continue
 
-          totalEpisodeCount += episodeList.length
+          // Validate season number exists and is valid (allow 0 for specials)
+          const season = parseInt(seasonNum, 10)
+          if (isNaN(season)) {
+            console.log(`[xtream] Skipping invalid season "${seasonNum}" for series "${s.name}"`)
+            skippedData.push({
+              series_id: s.series_id,
+              series_name: s.name,
+              category: catMap[s.category_id] || 'Ungrouped',
+              reason: 'Invalid season number',
+              season: seasonNum,
+              episode: ''
+            })
+            continue
+          }
 
           for (const episode of episodeList) {
-            const episodeName = `${seriesName} S${String(seasonNum).padStart(2, '0')}E${String(episode.episode_num).padStart(2, '0')}`
+            // Skip episodes without valid episode number
+            if (!episode.episode_num || isNaN(parseInt(episode.episode_num, 10))) {
+              console.log(`[xtream] Skipping episode without valid episode_num in "${s.name}" S${String(season).padStart(2, '0')}`)
+              skippedData.push({
+                series_id: s.series_id,
+                series_name: s.name,
+                category: catMap[s.category_id] || 'Ungrouped',
+                reason: 'Missing episode number',
+                season: String(season),
+                episode: episode.episode_num || 'null'
+              })
+              continue
+            }
+
+            const episodeNum = parseInt(episode.episode_num, 10)
+            // Episode number is valid (already checked for NaN above)
+
+            totalEpisodeCount++
+            const episodeName = `${seriesName} S${String(season).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`
             const episodeTitle = episode.title || episodeName
 
             episodes.push({
@@ -257,11 +387,7 @@ async function fetchSeriesStreams(base, username, password) {
           console.log(`[xtream] DEBUG: First episode:`, episodes[0])
         }
 
-        // Only return if series has more than 1 episode
-        if (totalEpisodeCount <= 1) {
-          console.log(`[xtream] Skipping series "${s.name}" - only ${totalEpisodeCount} episode(s)`)
-        }
-        return totalEpisodeCount > 1 ? episodes : []
+        return episodes
       } catch (e) {
         console.error(`[xtream] Error fetching episodes for series ${s.series_id}:`, e.message)
         return []
@@ -274,11 +400,48 @@ async function fetchSeriesStreams(base, username, password) {
     }
 
     // Progress logging
-    const processed = Math.min(i + BATCH_SIZE, series.length)
-    console.log(`[xtream] Processed ${processed}/${series.length} series (${allEpisodes.length} episodes so far)`)
+    const processed = Math.min(i + BATCH_SIZE, seriesToProcess.length)
+    console.log(`[xtream] Processed ${processed}/${seriesToProcess.length} series (${allEpisodes.length} episodes so far, ${apiErrors.length} API errors)`)
+
+    // Delay between batches to avoid rate limiting
+    if (i + BATCH_SIZE < seriesToProcess.length) {
+      await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES))
+    }
   }
 
-  console.log(`[xtream] Completed: ${allEpisodes.length} total episodes from ${series.length} series`)
+  // Count series that produced episodes vs series with no episodes
+  const seriesWithEpisodes = new Set()
+  for (const ep of allEpisodes) {
+    // Extract series name from episode name (before S00E00)
+    const match = ep.tvg_name.match(/^(.+?)\s+S\d+E\d+$/)
+    if (match) seriesWithEpisodes.add(match[1])
+  }
+
+  const seriesWithoutEpisodes = seriesToProcess.length - seriesWithEpisodes.size
+
+  console.log(`[xtream] Completed: ${allEpisodes.length} total episodes from ${seriesToProcess.length} series processed`)
+  console.log(`[xtream] Series with episodes: ${seriesWithEpisodes.size}, without episodes: ${seriesWithoutEpisodes}`)
+  console.log(`[xtream] API errors: ${apiErrors.length}, Skipped items: ${skippedData.length}`)
+
+  if (apiErrors.length > 0) {
+    console.log(`[xtream] WARNING: ${apiErrors.length} series failed to fetch due to API errors (rate limiting or timeouts)`)
+  }
+
+  // Always export CSV (even if empty) for investigation
+  try {
+    const { writeFileSync } = await import('node:fs')
+    const csvHeader = 'Series ID,Series Name,Category,Reason,Season,Episode\n'
+    const csvRows = skippedData.map(row =>
+      `${row.series_id},"${row.series_name.replace(/"/g, '""')}","${row.category}","${row.reason}",${row.season},${row.episode}`
+    ).join('\n')
+    const csvPath = '/data/skipped-series.csv'
+    const csvContent = csvHeader + (csvRows || '')
+    writeFileSync(csvPath, csvContent, 'utf8')
+    console.log(`[xtream] Exported ${skippedData.length} skipped items to ${csvPath}`)
+  } catch (e) {
+    console.error(`[xtream] Failed to export skipped data CSV:`, e.message)
+  }
+
   return allEpisodes
 }
 
