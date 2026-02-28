@@ -196,3 +196,83 @@ export function findNfoForChannel(channelId) {
 
   return searchDir(STRM_BASE_DIR)
 }
+
+/**
+ * Find NFO file by title (for EPG enrichment)
+ * Searches STRM directories for movie.nfo or tvshow.nfo matching the title
+ * Structure: /data/vod-strm/{playlist-name}/{title}/movie.nfo
+ */
+export function findNfoByTitle(title) {
+  console.log(`[nfo] Searching for title: "${title}" in ${STRM_BASE_DIR}`)
+
+  if (!existsSync(STRM_BASE_DIR)) {
+    console.log(`[nfo] STRM base directory does not exist: ${STRM_BASE_DIR}`)
+    return null
+  }
+
+  const normalizeTitle = (str) => str.toLowerCase().replace(/[^\w\s]/g, '').trim()
+  const normalizedSearchTitle = normalizeTitle(title)
+  console.log(`[nfo] Normalized search title: "${normalizedSearchTitle}"`)
+
+  function searchDir(dirPath) {
+    try {
+      const entries = readdirSync(dirPath, { withFileTypes: true })
+
+      // Check for movie.nfo or tvshow.nfo in this directory
+      const movieNfoPath = join(dirPath, 'movie.nfo')
+      const tvshowNfoPath = join(dirPath, 'tvshow.nfo')
+
+      if (existsSync(movieNfoPath) || existsSync(tvshowNfoPath)) {
+        const dirName = dirPath.split('/').pop()
+        const normalizedDirName = normalizeTitle(dirName)
+
+        console.log(`[nfo] Checking directory: "${dirName}" (normalized: "${normalizedDirName}")`)
+
+        // Match directory name with title (skip if it's a season folder like "Season 01")
+        if (!dirName.match(/^Season\s+\d+$/i) &&
+            (normalizedDirName.includes(normalizedSearchTitle) ||
+             normalizedSearchTitle.includes(normalizedDirName))) {
+          const nfoPath = existsSync(movieNfoPath) ? movieNfoPath : tvshowNfoPath
+          console.log(`[nfo] Found NFO by title match: ${nfoPath}`)
+          return parseNfoFile(nfoPath)
+        }
+      }
+
+      // Also check for episode-specific NFO files (e.g., "Breaking Bad S01E01.nfo")
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.nfo')) {
+          const nfoBasename = entry.name.replace('.nfo', '')
+          const normalizedNfoName = normalizeTitle(nfoBasename)
+
+          console.log(`[nfo] Checking NFO file: "${entry.name}" (normalized: "${normalizedNfoName}")`)
+
+          // Match NFO filename with title
+          if (normalizedNfoName.includes(normalizedSearchTitle) ||
+              normalizedSearchTitle.includes(normalizedNfoName)) {
+            const nfoPath = join(dirPath, entry.name)
+            console.log(`[nfo] Found episode NFO by title match: ${nfoPath}`)
+            return parseNfoFile(nfoPath)
+          }
+        }
+      }
+
+      // Search subdirectories recursively
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const result = searchDir(join(dirPath, entry.name))
+          if (result) return result
+        }
+      }
+    } catch (e) {
+      console.log(`[nfo] Error reading directory ${dirPath}: ${e.message}`)
+    }
+
+    return null
+  }
+
+  const result = searchDir(STRM_BASE_DIR)
+  if (!result) {
+    console.log(`[nfo] No NFO found for title: "${title}"`)
+  }
+  return result
+}

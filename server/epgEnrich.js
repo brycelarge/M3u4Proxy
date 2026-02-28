@@ -17,6 +17,7 @@
 
 import db from './db.js'
 import { execSync } from 'child_process'
+import { findNfoByTitle } from './nfo-parser.js'
 
 const TMDB_BASE = 'https://api.themoviedb.org/3'
 const TMDB_IMG  = 'https://image.tmdb.org/t/p/w300'
@@ -248,6 +249,9 @@ export async function enrichGuide(_unused, { onProgress } = {}) {
         poster=excluded.poster, description=excluded.description, fetched_at=excluded.fetched_at
     `)
 
+    let nfoHits = 0
+    let tmdbHits = 0
+
     for (let i = 0; i < needsFetch.length; i++) {
       const title = needsFetch[i]
       if (i > 0 && i % 40 === 0) {
@@ -255,18 +259,42 @@ export async function enrichGuide(_unused, { onProgress } = {}) {
         await new Promise(r => setTimeout(r, 1000))
       }
 
-      const result = await tmdbSearchTitle(title)
+      // First, try to find NFO file locally
+      const nfoData = findNfoByTitle(title)
+      let result = null
+
+      if (nfoData && (nfoData.plot || nfoData.poster)) {
+        // Found NFO file with metadata - use it instead of TMDB API
+        result = {
+          tmdb_id: nfoData.tmdbId || null,
+          media_type: nfoData.tmdbId ? 'movie' : null,  // Assume movie if we have tmdb_id
+          poster: nfoData.poster || null,
+          desc: nfoData.plot || null
+        }
+        nfoHits++
+
+        if (nfoHits <= 3) {
+          log(`  ✓ "${title}" → NFO (local metadata)`)
+        }
+      } else {
+        // No NFO found or NFO lacks metadata - fall back to TMDB API
+        result = await tmdbSearchTitle(title)
+        if (result) {
+          tmdbHits++
+        }
+      }
+
       if (result) {
         upsertShow.run(title, result.tmdb_id, result.media_type, result.poster, result.desc)
         enrichState.enriched++
 
-        // Debug: log first 3 successful enrichments to verify poster URLs
-        if (enrichState.enriched <= 3 && result.poster) {
-          log(`  ✓ "${title}" → ${result.media_type} (poster: ${result.poster.slice(0, 60)}...)`)
+        // Debug: log first 3 successful TMDB enrichments to verify poster URLs
+        if (tmdbHits <= 3 && result.poster && !nfoData) {
+          log(`  ✓ "${title}" → ${result.media_type} (TMDB: ${result.poster.slice(0, 60)}...)`)
         }
 
-        // For TV shows: fetch and store all seasons/episodes
-        if (result.media_type === 'tv' && result.tmdb_id) {
+        // For TV shows: fetch and store all seasons/episodes (only if from TMDB)
+        if (result.media_type === 'tv' && result.tmdb_id && !nfoData) {
           log(`  Fetching all episodes for "${title}" (TMDB id ${result.tmdb_id})…`)
           await fetchAndStoreAllEpisodes(title, result.tmdb_id)
         }
@@ -276,7 +304,14 @@ export async function enrichGuide(_unused, { onProgress } = {}) {
         enrichState.skipped++
       }
 
-      await new Promise(r => setTimeout(r, 260))
+      // Only rate limit if we hit TMDB API
+      if (!nfoData) {
+        await new Promise(r => setTimeout(r, 260))
+      }
+    }
+
+    if (nfoHits > 0) {
+      log(`Used local NFO files for ${nfoHits} titles (saved ${nfoHits} TMDB API calls)`)
     }
 
     enrichState.lastRun = new Date().toISOString()
