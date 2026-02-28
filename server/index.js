@@ -243,8 +243,7 @@ async function refreshSourceCache(sourceId) {
     'UPDATE source_channels SET tvg_id = ?, tvg_name = ?, tvg_logo = ?, group_title = ?, raw_extinf = ?, quality = ?, normalized_name = ?, meta = ?, content_type = ? WHERE source_id = ? AND url = ?'
   )
   const replace = db.transaction((sid, chs, isXtreamSource) => {
-    // Delete only VOD content (movies/series) - Live TV will be updated by URL
-    db.prepare("DELETE FROM source_channels WHERE source_id = ? AND (group_title LIKE 'Series:%' OR group_title LIKE 'Movie:%')").run(sid)
+    // No longer delete VOD content - UPDATE by URL to preserve IDs for all content types
 
     // For Xtream sources, process each content type separately
     // For M3U sources, process as a single array
@@ -260,16 +259,17 @@ async function refreshSourceCache(sourceId) {
       channelArrays = [{ contentType: 'vod', channels: chs }]
     }
 
-    // Track all Live TV URLs across all channel types for stale deletion
+    // Track all URLs by content type for stale deletion
     const allLiveTvUrls = new Set()
+    const allMovieUrls = new Set()
+    const allSeriesUrls = new Set()
 
     for (const { contentType, channels: channelList } of channelArrays) {
       // Track seen URLs to deduplicate (only for Live TV)
       const seenUrls = new Map()
 
       for (const ch of channelList) {
-        // Determine if this is Live TV or VOD based on group_title
-        const isVod = contentType !== 'live'
+        // Determine if this is Live TV based on content_type
         const isLiveTv = contentType === 'live'
         let channelName = ch.tvg_name || ''
 
@@ -331,45 +331,34 @@ async function refreshSourceCache(sourceId) {
           }
           continue
         }
+        // Track URLs by content type for stale deletion
         if (isLiveTv) {
           seenUrls.set(ch.url, cleanedName)
           allLiveTvUrls.add(ch.url)
+        } else if (contentType === 'movie') {
+          allMovieUrls.add(ch.url)
+        } else if (contentType === 'series') {
+          allSeriesUrls.add(ch.url)
+        }
 
-          // For Live TV, UPDATE existing channel by URL to preserve ID
-          const groupTitle = ch.group_title || 'Ungrouped'
-          const result = update.run(
-            ch.tvg_id || '',
-            cleanedName,
-            ch.tvg_logo || '',
-            groupTitle,
-            ch.raw_extinf || '',
-            quality,
-            normalizedName,
-            ch.meta ? JSON.stringify(ch.meta) : null,
-            contentType,
-            sid,
-            ch.url
-          )
+        // For ALL content types, UPDATE existing channel by URL to preserve ID
+        const groupTitle = ch.group_title || 'Ungrouped'
+        const result = update.run(
+          ch.tvg_id || '',
+          cleanedName,
+          ch.tvg_logo || '',
+          groupTitle,
+          ch.raw_extinf || '',
+          quality,
+          normalizedName,
+          ch.meta ? JSON.stringify(ch.meta) : null,
+          contentType,
+          sid,
+          ch.url
+        )
 
-          // If no existing channel, INSERT new one
-          if (result.changes === 0) {
-            insert.run(
-              sid,
-              ch.tvg_id || '',
-              cleanedName,
-              ch.tvg_logo || '',
-              groupTitle,
-              ch.url,
-              ch.raw_extinf || '',
-              quality,
-              normalizedName,
-              ch.meta ? JSON.stringify(ch.meta) : null,
-              contentType
-            )
-          }
-        } else {
-          // For VOD, always INSERT (we deleted them earlier)
-          const groupTitle = ch.group_title || 'Ungrouped'
+        // If no existing channel, INSERT new one
+        if (result.changes === 0) {
           insert.run(
             sid,
             ch.tvg_id || '',
@@ -394,20 +383,52 @@ async function refreshSourceCache(sourceId) {
       }
     }
 
-    // Delete stale Live TV channels (channels that no longer exist in the source)
+    // Delete stale channels (channels that no longer exist in the source)
+    // Live TV channels
     if (allLiveTvUrls.size > 0) {
       const currentUrls = Array.from(allLiveTvUrls)
       const placeholders = currentUrls.map(() => '?').join(',')
       const deleteStale = db.prepare(`
         DELETE FROM source_channels
         WHERE source_id = ?
-        AND group_title NOT LIKE 'Series:%'
-        AND group_title NOT LIKE 'Movie:%'
+        AND content_type = 'live'
         AND url NOT IN (${placeholders})
       `)
       const result = deleteStale.run(sid, ...currentUrls)
       if (result.changes > 0) {
         console.log(`[source] Deleted ${result.changes} stale Live TV channels`)
+      }
+    }
+
+    // Movie channels
+    if (allMovieUrls.size > 0) {
+      const currentUrls = Array.from(allMovieUrls)
+      const placeholders = currentUrls.map(() => '?').join(',')
+      const deleteStale = db.prepare(`
+        DELETE FROM source_channels
+        WHERE source_id = ?
+        AND content_type = 'movie'
+        AND url NOT IN (${placeholders})
+      `)
+      const result = deleteStale.run(sid, ...currentUrls)
+      if (result.changes > 0) {
+        console.log(`[source] Deleted ${result.changes} stale movie channels`)
+      }
+    }
+
+    // Series channels
+    if (allSeriesUrls.size > 0) {
+      const currentUrls = Array.from(allSeriesUrls)
+      const placeholders = currentUrls.map(() => '?').join(',')
+      const deleteStale = db.prepare(`
+        DELETE FROM source_channels
+        WHERE source_id = ?
+        AND content_type = 'series'
+        AND url NOT IN (${placeholders})
+      `)
+      const result = deleteStale.run(sid, ...currentUrls)
+      if (result.changes > 0) {
+        console.log(`[source] Deleted ${result.changes} stale series channels`)
       }
     }
 
