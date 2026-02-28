@@ -251,8 +251,8 @@ async function fetchSeriesStreams(base, username, password, skipRules = []) {
   const allEpisodes = []
   const skippedData = [] // Track skipped series/episodes for CSV export
   const apiErrors = [] // Track API errors
-  const BATCH_SIZE = 3 // Process 3 series in parallel (avoid rate limiting)
-  const DELAY_BETWEEN_BATCHES = 1000 // 1 second delay between batches
+  const BATCH_SIZE = 2 // Process 2 series in parallel (minimize API errors)
+  const DELAY_BETWEEN_BATCHES = 1500 // 1.5 second delay between batches
 
   // Process series in batches for better performance
   for (let i = 0; i < seriesToProcess.length; i += BATCH_SIZE) {
