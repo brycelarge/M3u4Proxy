@@ -5,7 +5,7 @@
  * for enriching Xtream API responses and M3U playlists
  */
 
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
 
