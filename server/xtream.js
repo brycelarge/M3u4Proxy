@@ -383,16 +383,12 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
     // Find all episodes for this series
     // seriesId is the index in the series list (1-based)
     const seriesList = buildSeriesList(channels)
-    console.log(`[xtream] buildSeriesInfo: seriesId=${seriesId}, total series=${seriesList.length}`)
-
     if (seriesId < 1 || seriesId > seriesList.length) {
-      console.log(`[xtream] buildSeriesInfo: seriesId out of range`)
       return { info: {}, episodes: {}, seasons: [] }
     }
 
     const series = seriesList[seriesId - 1]
     const seriesName = series.name
-    console.log(`[xtream] buildSeriesInfo: Looking for series "${seriesName}"`)
 
     // Build streaming base URL using plain password from request
     const streamBase = username && password
@@ -416,8 +412,6 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
     const match = ch.tvg_name.match(/^(.+?)\s+S\d+E\d+/i)
     return match && match[1].trim() === seriesName
   })
-
-  console.log(`[xtream] buildSeriesInfo: Sample episode names:`, episodes.slice(0, 3).map(e => e.tvg_name))
 
   // Group episodes by season
   const seasonMap = new Map()
@@ -487,20 +481,11 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
     episodesObj[String(seasonNum)] = eps.sort((a, b) => a.episode_num - b.episode_num)
   }
 
-    console.log(`[xtream] buildSeriesInfo: Found ${episodes.length} episodes, ${seasonMap.size} seasons`)
-
-    const response = {
+      const response = {
       info: series,
       episodes: episodesObj,
       seasons: seasons.sort((a, b) => parseInt(a.season) - parseInt(b.season))
     }
-
-    console.log(`[xtream] buildSeriesInfo: Response structure:`)
-    console.log(`[xtream]   - info:`, JSON.stringify(response.info).substring(0, 200))
-    console.log(`[xtream]   - seasons count:`, response.seasons.length)
-    console.log(`[xtream]   - episodes keys:`, Object.keys(response.episodes))
-    console.log(`[xtream]   - episodes per season:`, Object.entries(response.episodes).map(([s, eps]) => `S${s}:${eps.length}`).join(', '))
-    console.log(`[xtream]   - Full response:`, JSON.stringify(response, null, 2))
 
     return response
   } catch (error) {
@@ -595,11 +580,11 @@ export function registerXtreamRoutes(app) {
     const p        = req.query.password || req.body?.password || ''
     const action   = req.query.action   || req.body?.action
 
-    console.log(`[xtream] ${req.method} ${req.path} u="${u}" p="${p}" action="${action}" query=${JSON.stringify(req.query)}`)
+    console.log(`[xtream] ${req.method} ${req.path} u="${u}" action="${action}"`)
 
     const user = await lookupUser(u, p)
     if (!user) {
-      console.log(`[xtream] AUTH FAILED — no user found for u="${u}" p="${p}"`)
+      console.log(`[xtream] AUTH FAILED — no user found for u="${u}"`)
       return res.json({ user_info: { auth: 0 } })
     }
 
@@ -654,50 +639,11 @@ export function registerXtreamRoutes(app) {
       }
 
       case 'get_vod_categories': {
-        console.log(`[xtream] DEBUG: movieChans count: ${movieChans.length}`)
-        console.log(`[xtream] DEBUG: Sample movie group_titles:`, movieChans.slice(0, 10).map(c => c.group_title))
-
-        // Count channels per group_title
-        const groupCounts = {}
-        for (const ch of movieChans) {
-          const g = ch.group_title || 'Uncategorized'
-          groupCounts[g] = (groupCounts[g] || 0) + 1
-        }
-        console.log(`[xtream] DEBUG: Group counts:`, Object.entries(groupCounts).slice(0, 10))
-
         const categories = buildVodCategories(movieChans)
-        console.log(`[xtream] VOD categories: ${categories.length} categories from ${movieChans.length} movie channels`)
-        console.log(`[xtream] Sample categories:`, categories.slice(0, 5).map(c => c.category_name))
         return res.json(categories)
       }
 
       case 'get_vod_streams': {
-        // Import NFO parser to test metadata enrichment
-        const { findNfoForChannel } = await import('./nfo-parser.js')
-
-        // Debug: Test NFO metadata for first 5 movies
-        console.log(`[xtream] Testing NFO metadata for ${Math.min(5, movieChans.length)} movies:`)
-        for (let i = 0; i < Math.min(5, movieChans.length); i++) {
-          const ch = movieChans[i]
-          const nfoData = findNfoForChannel(ch.id)
-          console.log(`[xtream] Movie: "${ch.tvg_name}" (ID: ${ch.id})`)
-          console.log(`[xtream]   NFO found: ${nfoData ? 'YES' : 'NO'}`)
-          if (nfoData) {
-            console.log(`[xtream]   NFO data:`, {
-              title: nfoData.title,
-              plot: nfoData.plot?.substring(0, 100) + '...',
-              rating: nfoData.rating,
-              genre: nfoData.genre,
-              year: nfoData.year,
-              runtime: nfoData.runtime,
-              director: nfoData.director,
-              actor: nfoData.actor,
-              poster: nfoData.poster,
-              tmdb_id: nfoData.tmdb_id
-            })
-          }
-        }
-
         let streams = buildVodStreams(movieChans, base, user)
         const catId = req.query.category_id || req.body?.category_id
         if (catId) streams = streams.filter(s => s.category_id === String(catId))
@@ -766,16 +712,13 @@ export function registerXtreamRoutes(app) {
         const seasonFilter = req.query.season || req.body?.season
         if (!seriesId) return res.json({ info: {}, episodes: {}, seasons: [] })
 
-        console.log(`[xtream] get_series_info: series_id=${seriesId}, season=${seasonFilter || 'all'}`)
-
         const seriesInfo = await buildSeriesInfo(parseInt(seriesId, 10), seriesChans, base, u, p)
 
-        // If season filter is specified, only return episodes for that season
+        // Filter to specific season if requested
         if (seasonFilter && seriesInfo.episodes[seasonFilter]) {
           const filteredEpisodes = {}
           filteredEpisodes[seasonFilter] = seriesInfo.episodes[seasonFilter]
           seriesInfo.episodes = filteredEpisodes
-          console.log(`[xtream] Filtered to season ${seasonFilter}: ${seriesInfo.episodes[seasonFilter].length} episodes`)
         }
 
         return res.json(seriesInfo)
@@ -802,7 +745,6 @@ export function registerXtreamRoutes(app) {
           streamType = 'series'
         }
         if (!ch) {
-          console.log(`[xtream] get_epg: channel ${streamId} not found`)
           return res.json([])
         }
 
@@ -869,7 +811,6 @@ export function registerXtreamRoutes(app) {
           })
         }]
 
-        console.log(`[xtream] get_epg response for ${streamId}:`, JSON.stringify(response, null, 2))
         return res.json(response)
       }
 
@@ -990,7 +931,7 @@ export function registerXtreamRoutes(app) {
     const { user: u, pass: p, channelId: rawId } = req.params
     const channelId = rawId.replace(/\.ts$/, '')
 
-    console.log(`[xtream] VOD stream request: /movie/${u}/${p}/${rawId} (id: ${channelId})`)
+    console.log(`[xtream] VOD stream request: /movie/${u}/***/${rawId} (id: ${channelId})`)
 
     const user = await lookupUser(decodeURIComponent(u), decodeURIComponent(p))
     if (!user) return res.status(401).send('Unauthorized')
@@ -1025,7 +966,7 @@ export function registerXtreamRoutes(app) {
     const { user: u, pass: p, channelId: rawId } = req.params
     const channelId = rawId.replace(/\.mkv$/, '')
 
-    console.log(`[xtream] Series stream request: /series/${u}/${p}/${rawId} (id: ${channelId})`)
+    console.log(`[xtream] Series stream request: /series/${u}/***/${rawId} (id: ${channelId})`)
 
     const user = await lookupUser(decodeURIComponent(u), decodeURIComponent(p))
     if (!user) return res.status(401).send('Unauthorized')
