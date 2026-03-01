@@ -202,6 +202,10 @@ async function refreshSourceCache(sourceId) {
     `).run(source.id, content, channelCount)
     db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(source.id)
     console.log(`[source] Refreshed EPG "${source.name}" — ${channelCount} channels`)
+
+    // Clear channel cache to prevent stale group/channel data
+    channelCache.clear()
+
     // Note: Enrichment is now only run manually or after cron grab completes (not after every source refresh)
     return channelCount
   }
@@ -237,7 +241,18 @@ async function refreshSourceCache(sourceId) {
   }
 
   const insert = db.prepare(
-    'INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name, meta, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    `INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name, meta, content_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source_id, url) DO UPDATE SET
+       tvg_id = excluded.tvg_id,
+       tvg_name = excluded.tvg_name,
+       tvg_logo = excluded.tvg_logo,
+       group_title = excluded.group_title,
+       raw_extinf = excluded.raw_extinf,
+       quality = excluded.quality,
+       normalized_name = excluded.normalized_name,
+       meta = excluded.meta,
+       content_type = excluded.content_type`
   )
   const update = db.prepare(
     'UPDATE source_channels SET tvg_id = ?, tvg_name = ?, tvg_logo = ?, group_title = ?, raw_extinf = ?, quality = ?, normalized_name = ?, meta = ?, content_type = ? WHERE source_id = ? AND url = ?'
@@ -581,6 +596,10 @@ async function refreshSourceCache(sourceId) {
     : channels.length
 
   console.log(`[source] Refreshed "${source.name}" — ${totalCount} channels`)
+
+  // Clear channel cache to prevent stale group/channel data
+  channelCache.clear()
+
   return totalCount
 }
 
@@ -741,61 +760,6 @@ app.get('/api/sources/all/channels', (req, res) => {
       quality:         r.quality,
     }))
   }
-  setCache(cacheKey, result)
-  res.json(result)
-})
-
-// Get groups from DB cache
-app.get('/api/sources/:id/groups', (req, res) => {
-  const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(req.params.id)
-  if (!source) return res.status(404).json({ error: 'Source not found' })
-  const rows = db.prepare(
-    'SELECT group_title, COUNT(*) as count FROM source_channels WHERE source_id = ? GROUP BY group_title ORDER BY group_title'
-  ).all(source.id)
-  const total = rows.reduce((s, r) => s + r.count, 0)
-  res.json({
-    groups: rows.map(r => ({ name: r.group_title, count: r.count })),
-    total,
-    last_fetched: source.last_fetched,
-    cached: rows.length > 0,
-  })
-})
-
-// Get channels for a specific group from DB cache
-app.get('/api/sources/:id/channels', (req, res) => {
-  const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(req.params.id)
-  if (!source) return res.status(404).json({ error: 'Source not found' })
-  const group  = req.query.group
-  const limit  = Math.min(parseInt(req.query.limit  || '2000'), 5000)
-  const offset = parseInt(req.query.offset || '0')
-
-  const cacheKey = `src:${req.params.id}:${group || 'all'}:${limit}:${offset}`
-  const cached = getCached(cacheKey)
-  if (cached) return res.json(cached)
-
-  const total  = group
-    ? db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ? AND group_title = ?').get(source.id, group).c
-    : db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ?').get(source.id).c
-  const rows = group
-    ? db.prepare('SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?').all(source.id, group, limit, offset)
-    : db.prepare('SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? ORDER BY id LIMIT ? OFFSET ?').all(source.id, limit, offset)
-
-  const result = {
-    total, offset, limit,
-    channels: rows.map(r => ({
-      id:              String(r.id),
-      name:            r.tvg_name,
-      logo:            r.tvg_logo,
-      group:           r.group_title,
-      url:             r.url,
-      tvg_id:          r.tvg_id,
-      group_title:     r.group_title,
-      source_id:       r.source_id,
-      normalized_name: r.normalized_name,
-      quality:         r.quality,
-    }))
-  }
-
   setCache(cacheKey, result)
   res.json(result)
 })
@@ -1019,8 +983,8 @@ app.get('/api/playlists/:id/selection', (req, res) => {
           AND sc2.group_title = sc.group_title
       ) AS sc_count
     FROM playlist_channels pc
-    LEFT JOIN source_channels sc ON sc.url = pc.url
-    LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+    JOIN source_channels sc ON sc.url = pc.url
+    JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
     WHERE pc.playlist_id = ?
       AND s.name IS NOT NULL
       AND sc.group_title IS NOT NULL
@@ -1579,19 +1543,18 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
     `</tv>`,
   ].join('\n')
 
-  // Support gzip compression via query param ?compress=true or .gz extension
-  const compress = req.query.compress === 'true' || req.path.endsWith('.gz')
+  // Support gzip compression via query param ?compress=true
+  // Use Content-Encoding for transparent compression (client auto-decompresses)
+  const compress = req.query.compress === 'true'
+
+  res.setHeader('Content-Type', 'application/xml; charset=utf-8')
+  res.setHeader('Cache-Control', 'public, max-age=3600')
 
   if (compress) {
     const compressed = gzipSync(Buffer.from(out))
-    res.setHeader('Content-Type', 'application/x-gzip')
     res.setHeader('Content-Encoding', 'gzip')
-    res.setHeader('Content-Disposition', `attachment; filename="playlist-${playlist.id}.xml.gz"`)
-    res.setHeader('Cache-Control', 'public, max-age=3600')
     res.send(compressed)
   } else {
-    res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-    res.setHeader('Cache-Control', 'public, max-age=3600')
     res.send(out)
   }
 })
@@ -2541,7 +2504,7 @@ function parseXmltvDate(s) {
   try { return new Date(`${clean.slice(0,4)}-${clean.slice(4,6)}-${clean.slice(6,8)}T${clean.slice(8,10)}:${clean.slice(10,12)}:${clean.slice(12,14)}Z`).toISOString() } catch { return null }
 }
 
-function parseProgBlock(fullMatch) {
+export function parseProgBlock(fullMatch) {
   const attrsMatch = fullMatch.match(/^<programme\b([^>]*)>/)
   const attrs = attrsMatch?.[1] ?? ''
   const body  = fullMatch.slice(attrsMatch?.[0].length ?? 0, -'</programme>'.length)
@@ -2567,7 +2530,7 @@ function getMappedIds() {
   return ids
 }
 
-function getEnrichmentMaps() {
+export function getEnrichmentMaps() {
   const showMap = new Map(
     db.prepare('SELECT title, poster, description FROM tmdb_enrichment WHERE poster IS NOT NULL OR description IS NOT NULL').all()
       .map(r => [r.title, { poster: r.poster, desc: r.description }])
@@ -2579,7 +2542,7 @@ function getEnrichmentMaps() {
   return { showMap, epMap }
 }
 
-function applyEnrichment(prog, showMap, epMap) {
+export function applyEnrichment(prog, showMap, epMap) {
   if (!prog.title) return prog
   const ep    = prog.episode ? parseEpisodeNum(`<episode-num system="xmltv_ns">${prog.episode}</episode-num>`) : null
   const epKey = ep ? `${prog.title}\0${ep.season}\0${ep.episode}` : null
@@ -2622,7 +2585,7 @@ app.get('/api/epg/programmes', (req, res) => {
 })
 
 // Guide grid for active playlist - shows playlist channels with their EPG programmes
-app.get('/api/epg/guide-grid', (req, res) => {
+app.get('/api/epg/guide-grid', async (req, res) => {
   const windowHours = Math.min(parseInt(req.query.hours ?? '6', 10), 24)
   const fromParam   = req.query.from ? new Date(req.query.from) : new Date()
   // Snap to nearest 30min
@@ -2633,58 +2596,30 @@ app.get('/api/epg/guide-grid', (req, res) => {
   // Get active playlist from localStorage default or first playlist
   const activePlaylistId = req.query.playlist_id ? parseInt(req.query.playlist_id) : null
 
-  let channels
-  if (activePlaylistId) {
-    // Get specific playlist channels
-    channels = db.prepare(`
-      SELECT pc.*,
-             CASE
-               WHEN pc.custom_tvg_id != '' THEN pc.custom_tvg_id
-               WHEN em.target_tvg_id IS NOT NULL THEN em.target_tvg_id
-               ELSE pc.tvg_id
-             END as epg_id
-      FROM playlist_channels pc
-      LEFT JOIN epg_mappings em ON (em.source_tvg_id = pc.tvg_id OR em.source_tvg_id = pc.custom_tvg_id)
-      WHERE pc.playlist_id = ?
-      ORDER BY pc.sort_order, pc.id
-    `).all(activePlaylistId)
-  } else {
-    // Get all mapped channels (fallback)
-    const mappedIds = getMappedIds()
-    if (!mappedIds.size) return res.json({ channels: [], from: from.toISOString(), to: to.toISOString() })
-
-    // Get all playlist channels with mappings
-    channels = db.prepare(`
-      SELECT pc.*,
-             CASE
-               WHEN pc.custom_tvg_id != '' THEN pc.custom_tvg_id
-               WHEN em.target_tvg_id IS NOT NULL THEN em.target_tvg_id
-               ELSE pc.tvg_id
-             END as epg_id
-      FROM playlist_channels pc
-      LEFT JOIN epg_mappings em ON (em.source_tvg_id = pc.tvg_id OR em.source_tvg_id = pc.custom_tvg_id)
-      WHERE pc.custom_tvg_id IS NOT NULL AND pc.custom_tvg_id != ''
-         OR em.target_tvg_id IS NOT NULL
-      ORDER BY pc.playlist_id, pc.sort_order, pc.id
-    `).all()
+  if (!activePlaylistId) {
+    return res.status(400).json({ error: 'playlist_id required' })
   }
+
+  // Get playlist channels
+  const channels = db.prepare(`
+    SELECT pc.*,
+           CASE
+             WHEN pc.custom_tvg_id != '' THEN pc.custom_tvg_id
+             WHEN em.target_tvg_id IS NOT NULL THEN em.target_tvg_id
+             ELSE pc.tvg_id
+           END as epg_id
+    FROM playlist_channels pc
+    LEFT JOIN epg_mappings em ON (em.source_tvg_id = pc.tvg_id OR em.source_tvg_id = pc.custom_tvg_id)
+    WHERE pc.playlist_id = ?
+    ORDER BY pc.sort_order, pc.id
+  `).all(activePlaylistId)
 
   // Filter to channels with EPG data
   const mappedChannels = channels.filter(ch => ch.epg_id && ch.epg_id.trim())
   if (!mappedChannels.length) return res.json({ channels: [], from: from.toISOString(), to: to.toISOString() })
 
-  // Deduplicate by epg_id - keep first occurrence of each unique EPG ID
-  const seenIds = new Set()
-  const uniqueChannels = []
-  for (const ch of mappedChannels) {
-    if (!seenIds.has(ch.epg_id)) {
-      seenIds.add(ch.epg_id)
-      uniqueChannels.push(ch)
-    }
-  }
-
-  // Build channel list from playlist
-  const channelList = uniqueChannels.map(ch => ({
+  // Build channel list
+  const channelList = mappedChannels.map(ch => ({
     id: ch.epg_id,
     name: ch.tvg_name || ch.name || 'Unknown',
     icon: ch.tvg_logo || ch.custom_logo || null,
@@ -2693,16 +2628,13 @@ app.get('/api/epg/guide-grid', (req, res) => {
     programmes: []
   }))
 
-  // Get EPG data for these channels
   const epgIds = mappedChannels.map(ch => ch.epg_id)
   const wantedIds = new Set(epgIds)
 
-  // Get programmes from cache first
+  // Get programmes from EPG cache
   const cacheRows = db.prepare('SELECT content FROM epg_cache WHERE content IS NOT NULL').all()
   const { showMap, epMap } = getEnrichmentMaps()
-  const channelsWithoutProgrammes = new Set()
 
-  // Collect programmes in window from cache
   const progRe = /<programme\b[\s\S]*?<\/programme>/g
   for (const row of cacheRows) {
     progRe.lastIndex = 0
@@ -2712,37 +2644,14 @@ app.get('/api/epg/guide-grid', (req, res) => {
       if (!prog.channel || !wantedIds.has(prog.channel)) continue
       if (!prog.start || !prog.stop) continue
       const pStart = new Date(prog.start)
-      const pStop  = new Date(prog.stop)
-      if (pStop <= from || pStart >= to) continue  // outside window
+      const pStop = new Date(prog.stop)
+      if (pStop <= from || pStart >= to) continue
 
       const ch = channelList.find(c => c.id === prog.channel)
       if (ch) {
         ch.programmes.push(applyEnrichment(prog, showMap, epMap))
-        channelsWithoutProgrammes.delete(prog.channel)
       }
     }
-  }
-
-  // Mark channels that didn't get programmes from cache
-  for (const ch of channelList) {
-    if (ch.programmes.length === 0) {
-      channelsWithoutProgrammes.add(ch.id)
-    }
-  }
-
-  // For channels without programmes, try to fetch from scraper sources
-  // This is a simplified approach - in production, you'd cache this data
-  if (channelsWithoutProgrammes.size > 0) {
-    // Get unique sites for channels without programmes
-    const scraperCh = db.prepare(`
-      SELECT DISTINCT site FROM epg_site_channels
-      WHERE xmltv_id IN (` + [...channelsWithoutProgrammes].map(() => '?').join(',') + `)
-    `).all([...channelsWithoutProgrammes])
-
-    // For each site, we'd need to fetch their XMLTV feed
-    // This is complex and requires knowing the source URLs
-    // For now, we'll leave channels without programmes
-    // TODO: Implement fetching from original EPG sources
   }
 
   // Sort programmes by start time
@@ -2784,12 +2693,14 @@ app.get('/api/epg/channels', async (req, res) => {
     while ((m = channelRe.exec(xml)) !== null) {
       const id = m[1]
       const nameMatch = m[2].match(/<display-name[^>]*>([^<]*)<\/display-name>/)
-      const iconMatch = m[2].match(/<icon src="([^"]*)"/)
-      channels.push({ id, name: nameMatch?.[1] || id, icon: iconMatch?.[1] || '' })
+      const name = nameMatch?.[1] || id
+      if (id.toLowerCase().includes(req.query.q) || name.toLowerCase().includes(req.query.q)) {
+        channels.push({ id, name })
+      }
     }
-    res.json(channels)
+    res.json(channels.slice(0, 50))
   } catch (e) {
-    res.status(502).json({ error: `Cannot reach EPG server: ${e.message}` })
+    res.status(502).json({ error: e.message })
   }
 })
 
@@ -3217,21 +3128,24 @@ function startEpgGrabCron() {
     epgGrabCronJob = cron.schedule(schedule, () => {
       console.log(`[cron] Running daily EPG grab at ${new Date().toISOString()}…`)
       runGrab({ onProgress: (msg) => console.log(`[cron-epg] ${msg}`) })
-        .then(() => {
+        .then(async () => {
           console.log(`[cron] EPG grab completed successfully at ${new Date().toISOString()}`)
           const epgSources = db.prepare("SELECT * FROM sources WHERE category = 'epg'").all()
           // Refresh all EPG sources sequentially
-          ;(async () => {
-            for (const s of epgSources) {
-              try {
-                console.log(`[cron] Refreshing EPG source "${s.name}"...`)
-                await refreshSourceCache(s.id)
-                console.log(`[cron] Successfully refreshed EPG source "${s.name}"`)
-              } catch (e) {
-                console.error(`[cron] Auto-refresh "${s.name}":`, e.message)
-              }
+          for (const s of epgSources) {
+            try {
+              console.log(`[cron] Refreshing EPG source "${s.name}"...`)
+              await refreshSourceCache(s.id)
+              console.log(`[cron] Successfully refreshed EPG source "${s.name}"`)
+            } catch (e) {
+              console.error(`[cron] Auto-refresh "${s.name}":`, e.message)
             }
-          })()
+          }
+
+          // Clear EPG guide caches after all sources refreshed
+          // clearAllGuideCaches()
+
+          // invalidateEpgCache()
         })
         .catch(e => console.error('[cron] EPG grab error:', e.message))
     }, {
@@ -3255,7 +3169,9 @@ function startEnrichCron() {
     enrichCronJob = cron.schedule(schedule, () => {
       console.log(`[cron] Running TMDB enrichment at ${new Date().toISOString()}…`)
       enrichGuide(null)
-        .then(() => console.log(`[cron] TMDB enrichment completed at ${new Date().toISOString()}`))
+        .then(() => {
+          console.log(`[cron] TMDB enrichment completed at ${new Date().toISOString()}`)
+        })
         .catch(e => console.error('[cron] Enrichment error:', e.message))
     }, {
       scheduled: true,
