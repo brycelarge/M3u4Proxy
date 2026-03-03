@@ -233,22 +233,29 @@ async function refreshSourceCache(sourceId) {
 
   let channels
   let isXtream = false
-  let skipVodRefresh = false
+  let refreshedContentTypes = { live: false, movies: false, series: false }
 
   if (source.type === 'xtream') {
-    // Check if VOD content was refreshed within the last 7 days
-    const lastFetched = source.last_fetched ? new Date(source.last_fetched) : null
-    const daysSinceRefresh = lastFetched ? (Date.now() - lastFetched.getTime()) / (1000 * 60 * 60 * 24) : Infinity
-
-    if (daysSinceRefresh < 7) {
-      console.log(`[source] Skipping VOD refresh for "${source.name}" - last refreshed ${daysSinceRefresh.toFixed(1)} days ago (< 7 days)`)
-      skipVodRefresh = true
+    // For Xtream sources, determine which content types to refresh based on global schedules
+    // This will be controlled by the centralized content update scheduler
+    // For now, default to refreshing all (will be updated when scheduler is implemented)
+    const refreshOptions = {
+      refreshLive: true,
+      refreshMovies: true,
+      refreshSeries: true
     }
 
-    channels = await fetchXtreamChannels(source.url, source.username, source.password, skipRules, skipVodRefresh)
+    channels = await fetchXtreamChannels(source.url, source.username, source.password, skipRules, refreshOptions)
     isXtream = true
+
+    // Track which content types were refreshed
+    refreshedContentTypes.live = refreshOptions.refreshLive && channels.live.length > 0
+    refreshedContentTypes.movies = refreshOptions.refreshMovies && channels.movie.length > 0
+    refreshedContentTypes.series = refreshOptions.refreshSeries && channels.series.length > 0
   } else {
+    // M3U sources: fetch all content, treat as live TV
     channels = await fetchAndParseM3U(source.url)
+    refreshedContentTypes.live = true
   }
 
   const insert = db.prepare(
@@ -268,7 +275,7 @@ async function refreshSourceCache(sourceId) {
   const update = db.prepare(
     'UPDATE source_channels SET tvg_id = ?, tvg_name = ?, tvg_logo = ?, group_title = ?, raw_extinf = ?, quality = ?, normalized_name = ?, meta = ?, content_type = ? WHERE source_id = ? AND url = ?'
   )
-  const replace = db.transaction((sid, chs, isXtreamSource) => {
+  const replace = db.transaction((sid, chs, isXtreamSource, refreshedContentTypes = { live: true, movies: true, series: true }) => {
     // No longer delete VOD content - UPDATE by URL to preserve IDs for all content types
 
     // For Xtream sources, process each content type separately
@@ -403,8 +410,8 @@ async function refreshSourceCache(sourceId) {
       }
     }
 
-    // Movie channels
-    if (allMovieUrls.size > 0) {
+    // Movie channels - only delete if we actually refreshed movies
+    if (refreshedContentTypes.movies && allMovieUrls.size > 0) {
       const currentUrls = Array.from(allMovieUrls)
       const placeholders = currentUrls.map(() => '?').join(',')
       const deleteStale = db.prepare(`
@@ -417,10 +424,12 @@ async function refreshSourceCache(sourceId) {
       if (result.changes > 0) {
         console.log(`[source] Deleted ${result.changes} stale movie channels`)
       }
+    } else if (!refreshedContentTypes.movies) {
+      console.log(`[source] Skipping stale movie deletion - movies were not refreshed`)
     }
 
-    // Series channels
-    if (allSeriesUrls.size > 0) {
+    // Series channels - only delete if we actually refreshed series
+    if (refreshedContentTypes.series && allSeriesUrls.size > 0) {
       const currentUrls = Array.from(allSeriesUrls)
       const placeholders = currentUrls.map(() => '?').join(',')
       const deleteStale = db.prepare(`
@@ -433,6 +442,8 @@ async function refreshSourceCache(sourceId) {
       if (result.changes > 0) {
         console.log(`[source] Deleted ${result.changes} stale series channels`)
       }
+    } else if (!refreshedContentTypes.series) {
+      console.log(`[source] Skipping stale series deletion - series were not refreshed`)
     }
 
     // Sync playlists that use this source
@@ -597,9 +608,17 @@ async function refreshSourceCache(sourceId) {
       }
     }
 
-    db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(sid)
+    // Update last_fetched timestamps for content types that were refreshed
+    const updates = []
+    if (refreshedContentTypes.live) updates.push("last_live_fetch = datetime('now')")
+    if (refreshedContentTypes.movies) updates.push("last_movie_fetch = datetime('now')")
+    if (refreshedContentTypes.series) updates.push("last_series_fetch = datetime('now')")
+
+    if (updates.length > 0) {
+      db.prepare(`UPDATE sources SET ${updates.join(', ')}, last_fetched = datetime('now') WHERE id = ?`).run(sid)
+    }
   })
-  replace(source.id, channels, isXtream)
+  replace(source.id, channels, isXtream, refreshedContentTypes)
 
   // Calculate total channel count
   const totalCount = isXtream
@@ -2959,10 +2978,7 @@ app.put('/api/settings', (req, res) => {
     startEnrichCron()
   }
 
-  if ('strm_export_schedule' in req.body) {
-    console.log('[settings] STRM export schedule updated, restarting cron...')
-    startStrmExportCron()
-  }
+  // strm_export_schedule removed - VOD playlists now use their own schedules
 
   res.json({ ok: true })
 })
@@ -3156,21 +3172,63 @@ app.get('/api/proxy-image', async (req, res) => {
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 function schedulePlaylists() {
-  const playlists = db.prepare('SELECT * FROM playlists WHERE schedule IS NOT NULL AND output_path IS NOT NULL').all()
+  const playlists = db.prepare('SELECT * FROM playlists WHERE schedule IS NOT NULL').all()
   for (const p of playlists) {
     if (!cron.validate(p.schedule)) continue
+
     cron.schedule(p.schedule, async () => {
-      console.log(`[cron] Building playlist "${p.name}" (id=${p.id})`)
-      try {
-        const channels = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id').all(p.id)
-        const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
-        const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
-        const content = buildM3U(channels, epgMap)
-        writeM3U(p.output_path, content)
-        db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(p.id)
-        console.log(`[cron] Built "${p.name}" -> ${p.output_path} (${channels.length} channels)`)
-      } catch (e) {
-        console.error(`[cron] Failed to build "${p.name}":`, e.message)
+      // VOD playlists: export STRM files
+      if (p.playlist_type === 'vod') {
+        console.log(`[cron] Exporting STRM files for "${p.name}" (id=${p.id})`)
+        try {
+          // Get or create jellyfin user for STRM authentication
+          let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+          let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
+
+          if (!jellyfinUser) {
+            console.log('[cron] Creating default "jellyfin" user for STRM authentication')
+            const { hashPassword } = await import('./auth.js')
+            const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
+            jellyfinPassword = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+            const hashed = await hashPassword(jellyfinPassword)
+            db.prepare(
+              `INSERT INTO users (username, password, max_connections, active, notes)
+               VALUES (?, ?, ?, ?, ?)`
+            ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
+            db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
+            jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+          }
+
+          if (!jellyfinPassword) {
+            jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value || 'jellyfin'
+          }
+
+          const hostIp = process.env.HOST_IP || 'localhost'
+          const baseUrl = `http://${hostIp}:3005`
+          const { exportVodToStrm } = await import('./strm-exporter.js')
+          const stats = await exportVodToStrm(p.id, baseUrl, jellyfinUser.username, jellyfinPassword)
+          db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(p.id)
+          console.log(`[cron] Exported STRM for "${p.name}": ${stats.created} created, ${stats.updated} updated`)
+        } catch (e) {
+          console.error(`[cron] Failed to export STRM for "${p.name}":`, e.message)
+        }
+      }
+      // Live playlists: build M3U files
+      else if (p.output_path) {
+        console.log(`[cron] Building M3U playlist "${p.name}" (id=${p.id})`)
+        try {
+          const channels = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id').all(p.id)
+          const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
+          const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
+          const content = buildM3U(channels, epgMap)
+          writeM3U(p.output_path, content)
+          db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(p.id)
+          console.log(`[cron] Built "${p.name}" -> ${p.output_path} (${channels.length} channels)`)
+        } catch (e) {
+          console.error(`[cron] Failed to build "${p.name}":`, e.message)
+        }
+      } else {
+        console.log(`[cron] Skipping "${p.name}" - no output_path configured`)
       }
     })
     console.log(`[cron] Scheduled "${p.name}" with cron: ${p.schedule}`)
@@ -3285,75 +3343,10 @@ function startEnrichCron() {
   }
 }
 
-function startStrmExportCron() {
-  if (strmExportCronJob) strmExportCronJob.stop()
-  const schedule = db.prepare('SELECT value FROM settings WHERE key = ?').get('strm_export_schedule')?.value
-  if (!schedule) {
-    console.log('[startup] STRM export schedule not configured')
-    return
-  }
-  console.log(`[startup] Configuring STRM export cron with schedule: ${schedule}`)
-  if (cron.validate(schedule)) {
-    strmExportCronJob = cron.schedule(schedule, async () => {
-      console.log(`[cron] Running STRM export at ${new Date().toISOString()}…`)
-
-      // Export all VOD playlists
-      const vodPlaylists = db.prepare('SELECT * FROM playlists WHERE playlist_type = ?').all('vod')
-
-      // Get or create jellyfin user for STRM authentication
-      let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
-      let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
-
-      if (!jellyfinUser) {
-        console.log('[cron] Creating default "jellyfin" user for STRM authentication')
-        const { hashPassword } = await import('./auth.js')
-
-        // Generate random secure password
-        const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
-        jellyfinPassword = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
-
-        const hashed = await hashPassword(jellyfinPassword)
-        db.prepare(
-          `INSERT INTO users (username, password, max_connections, active, notes)
-           VALUES (?, ?, ?, ?, ?)`
-        ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
-
-        // Store password in settings for retrieval
-        db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
-
-        jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
-        console.log('[cron] Created jellyfin user with random password (stored in settings)')
-      }
-
-      if (!jellyfinPassword) {
-        jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value || 'jellyfin'
-      }
-
-      for (const playlist of vodPlaylists) {
-        try {
-          const baseUrl = process.env.BASE_URL || 'http://localhost:3005'
-          const { exportVodToStrm } = await import('./strm-exporter.js')
-          const stats = await exportVodToStrm(playlist.id, baseUrl, jellyfinUser.username, jellyfinPassword)
-          db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(playlist.id)
-          console.log(`[cron] Exported STRM for "${playlist.name}":`, stats)
-        } catch (e) {
-          console.error(`[cron] STRM export failed for "${playlist.name}":`, e.message)
-        }
-      }
-
-      console.log(`[cron] STRM export completed at ${new Date().toISOString()}`)
-    }, {
-      scheduled: true,
-      timezone: "Africa/Johannesburg"
-    })
-  } else {
-    console.error(`[startup] Invalid STRM export cron schedule: ${schedule}`)
-  }
-}
+// Global STRM export cron removed - VOD playlists now use their own schedules via schedulePlaylists()
 
 startEpgGrabCron()
 startEnrichCron()
-startStrmExportCron()
 
 // Startup EPG grab disabled - only runs via scheduler
 // setTimeout(() => {
@@ -3790,8 +3783,10 @@ app.get('/stream/:channelId', async (req, res) => {
 
   // Route to VOD streamer for VOD playlists
   if (isVod) {
+    // Get source settings for provider-specific handling
+    const source = row.source_id ? db.prepare('SELECT force_ts_extension FROM sources WHERE id = ?').get(row.source_id) : null
     const { connectVodClient } = await import('./vod-streamer.js')
-    return connectVodClient(channelId, row.url, row.tvg_name, req, res, username)
+    return connectVodClient(channelId, row.url, row.tvg_name, req, res, username, source)
   }
 
   // Route to live streamer for live playlists

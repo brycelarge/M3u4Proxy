@@ -70,7 +70,7 @@ class VodSession extends EventEmitter {
 }
 
 // ── Stream VOD with range support ────────────────────────────────────────────
-export async function connectVodClient(channelId, upstreamUrl, channelName, req, res, username = null) {
+export async function connectVodClient(channelId, upstreamUrl, channelName, req, res, username = null, source = null) {
   if (res.headersSent) {
     throw new Error('Response headers already sent')
   }
@@ -93,6 +93,13 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
   }
 
   try {
+    // Some providers require .ts extension even for VOD files
+    let fetchUrl = upstreamUrl
+    if (source?.force_ts_extension && !fetchUrl.endsWith('.ts')) {
+      fetchUrl = fetchUrl.replace(/\.(mkv|mp4|avi|m4v)$/i, '.ts')
+      console.log(`[vod] Converting extension to .ts (provider requirement)`)
+    }
+
     const headers = {
       'User-Agent': req.get('user-agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': '*/*',
@@ -104,10 +111,10 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
       headers['Range'] = range
     }
 
-    console.log(`[vod] Fetching upstream: ${upstreamUrl.substring(0, 100)}...`)
+    console.log(`[vod] Fetching upstream: ${fetchUrl.substring(0, 100)}...`)
     console.log(`[vod] Headers:`, JSON.stringify(headers, null, 2))
 
-    const upstream = await fetch(upstreamUrl, {
+    const upstream = await fetch(fetchUrl, {
       headers,
       redirect: 'follow',
       signal: AbortSignal.timeout(30000), // 30 second timeout

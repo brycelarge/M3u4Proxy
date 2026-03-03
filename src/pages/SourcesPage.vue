@@ -21,7 +21,7 @@ async function pollGrabStatus() {
   try { grabStatus.value = await api.getEpgGrabStatus() } catch {}
 }
 
-const form = ref({ name: '', category: 'playlist', type: 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0 })
+const form = ref({ name: '', category: 'playlist', type: 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0, force_ts_extension: false })
 const showCleanupRules = ref(false)
 const rulesTab = ref('cleanup')
 const cleanupRules = ref([])
@@ -57,13 +57,13 @@ async function load() {
 
 function openCreate(category = 'playlist') {
   editing.value = null
-  form.value = { name: '', category, type: category === 'epg' ? 'epg' : 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0, priority: 999 }
+  form.value = { name: '', category, type: category === 'epg' ? 'epg' : 'm3u', url: '', username: '', password: '', refresh_cron: '0 */6 * * *', max_streams: 0, priority: 999, force_ts_extension: false }
   showForm.value = true
 }
 
 function openEdit(s) {
   editing.value = s
-  form.value = { name: s.name, category: s.category || 'playlist', type: s.type, url: s.url, username: s.username || '', password: s.password || '', refresh_cron: s.refresh_cron || '0 */6 * * *', max_streams: s.max_streams || 0, priority: s.priority || 999 }
+  form.value = { name: s.name, category: s.category || 'playlist', type: s.type, url: s.url, username: s.username || '', password: s.password || '', refresh_cron: s.refresh_cron || '0 */6 * * *', max_streams: s.max_streams || 0, priority: s.priority || 999, force_ts_extension: s.force_ts_extension || false }
   try {
     cleanupRules.value = s.cleanup_rules ? JSON.parse(s.cleanup_rules) : []
   } catch {
@@ -384,6 +384,14 @@ onUnmounted(() => { if (grabPoller) clearInterval(grabPoller) })
               <input v-model.number="form.priority" type="number" min="1" placeholder="999"
                 class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-indigo-500" />
               <p class="text-xs text-slate-600 mt-1">Lower number = higher priority for stream failover. Default: 999</p>
+            </div>
+
+            <div v-if="form.category !== 'epg'">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input v-model="form.force_ts_extension" type="checkbox" class="w-4 h-4 rounded border-[#2e3250] bg-[#22263a] text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0" />
+                <span class="text-sm text-slate-300">Force .ts extension for VOD</span>
+              </label>
+              <p class="text-xs text-slate-600 mt-1">Some providers require .ts extension even for .mkv/.mp4 files</p>
             </div>
 
             <div>

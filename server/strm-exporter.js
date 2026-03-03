@@ -231,8 +231,9 @@ function scanExistingFiles(strmDir) {
   return map
 }
 
-export async function exportVodToStrm(playlistId, baseUrl, username, password) {
-  console.log(`[strm] Starting export for playlist ${playlistId}`)
+export async function exportVodToStrm(playlistId, baseUrl, username, password, options = {}) {
+  const { deleteOrphans = false } = options
+  console.log(`[strm] Starting export for playlist ${playlistId} (deleteOrphans: ${deleteOrphans})`)
 
   const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
 
@@ -382,6 +383,12 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
   // Now process the deduplicated dataset
   let debugCount = 0
   for (const [matchKey, channel] of uniqueContent.entries()) {
+    // Force .ts extension for VOD URLs (provider requirement)
+    let channelUrl = channel.url
+    if (channelUrl && !channelUrl.endsWith('.ts')) {
+      channelUrl = channelUrl.replace(/\.(mkv|mp4|avi|m4v)$/i, '.ts')
+    }
+
     const proxyUrl = `${baseUrl}/stream/${channel.id}?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
     const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
 
@@ -528,24 +535,29 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
   }
 
   // Delete files that exist on disk but are NOT in the new dataset
-  // This handles: removed content, provider switches where content doesn't exist
+  // Only if deleteOrphans is enabled (prevents accidental deletion during normal exports)
   const deletedDirs = new Set()
-  for (const [existingKey, entry] of existing.entries()) {
-    if (!newContentKeys.has(existingKey)) {
-      console.log(`[strm] Deleting: ${entry.strmFile} (no longer in playlist)`)
-      try {
-        unlinkSync(entry.fullStrmPath)
-        unlinkSync(entry.fullMetadataPath)
-        stats.deleted++
+  if (deleteOrphans) {
+    console.log(`[strm] Checking for orphaned files to delete...`)
+    for (const [existingKey, entry] of existing.entries()) {
+      if (!newContentKeys.has(existingKey)) {
+        console.log(`[strm] Deleting: ${entry.strmFile} (no longer in playlist)`)
+        try {
+          unlinkSync(entry.fullStrmPath)
+          unlinkSync(entry.fullMetadataPath)
+          stats.deleted++
 
-        // Track parent directory for cleanup
-        const parentDir = dirname(entry.fullStrmPath)
-        deletedDirs.add(parentDir)
-      } catch (e) {
-        console.error(`[strm] Error deleting ${entry.strmFile}:`, e.message)
-        stats.errors++
+          // Track parent directory for cleanup
+          const parentDir = dirname(entry.fullStrmPath)
+          deletedDirs.add(parentDir)
+        } catch (e) {
+          console.error(`[strm] Error deleting ${entry.strmFile}:`, e.message)
+          stats.errors++
+        }
       }
     }
+  } else {
+    console.log(`[strm] Skipping orphan deletion (deleteOrphans=false)`)
   }
 
   // Clean up empty directories (movies, seasons, series)

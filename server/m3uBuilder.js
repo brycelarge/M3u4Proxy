@@ -104,26 +104,44 @@ export async function fetchAndParseM3U(url) {
 
 /**
  * Fetch channels from Xtream Codes API.
- * Fetches Live TV, VOD (movies), and Series in parallel.
+ * Fetches Live TV, VOD (movies), and Series based on refresh flags.
  */
-export async function fetchXtreamChannels(url, username, password, skipRules = [], skipVodRefresh = false) {
+export async function fetchXtreamChannels(url, username, password, skipRules = [], options = {}) {
+  const { refreshLive = true, refreshMovies = true, refreshSeries = true } = options
   const base = url.replace(/\/$/, '')
 
-  // Fetch Live TV always, skip VOD/Series if skipVodRefresh is true
-  const liveChannels = await fetchLiveStreams(base, username, password).catch(() => [])
-
+  let liveChannels = []
   let vodChannels = []
   let seriesChannels = []
 
-  if (!skipVodRefresh) {
-    // Fetch VOD and Series in parallel only if not skipping
-    [vodChannels, seriesChannels] = await Promise.all([
-      fetchVodStreams(base, username, password).catch(() => []),
-      fetchSeriesStreams(base, username, password, skipRules).catch(() => [])
-    ])
+  // Fetch content types based on refresh flags
+  const fetchPromises = []
+
+  if (refreshLive) {
+    fetchPromises.push(
+      fetchLiveStreams(base, username, password).catch(() => []).then(ch => { liveChannels = ch })
+    )
   } else {
-    console.log('[xtream] Skipping VOD and Series refresh - using existing cached content')
+    console.log('[xtream] Skipping Live TV refresh - using existing cached content')
   }
+
+  if (refreshMovies) {
+    fetchPromises.push(
+      fetchVodStreams(base, username, password).catch(() => []).then(ch => { vodChannels = ch })
+    )
+  } else {
+    console.log('[xtream] Skipping Movies refresh - using existing cached content')
+  }
+
+  if (refreshSeries) {
+    fetchPromises.push(
+      fetchSeriesStreams(base, username, password, skipRules).catch(() => []).then(ch => { seriesChannels = ch })
+    )
+  } else {
+    console.log('[xtream] Skipping Series refresh - using existing cached content')
+  }
+
+  await Promise.all(fetchPromises)
 
   // Return separated by content type so caller can handle each independently
   return {
