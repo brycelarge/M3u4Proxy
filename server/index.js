@@ -236,10 +236,8 @@ async function refreshSourceCache(sourceId) {
   let refreshedContentTypes = { live: false, movies: false, series: false }
 
   if (source.type === 'xtream') {
-    // For Xtream sources, determine which content types to refresh based on global schedules
-    // This will be controlled by the centralized content update scheduler
-    // For now, default to refreshing all (will be updated when scheduler is implemented)
-    const refreshOptions = {
+    // For Xtream sources, use refresh options from global scheduler or default to all
+    const refreshOptions = global.currentRefreshOptions || {
       refreshLive: true,
       refreshMovies: true,
       refreshSeries: true
@@ -249,9 +247,9 @@ async function refreshSourceCache(sourceId) {
     isXtream = true
 
     // Track which content types were refreshed
-    refreshedContentTypes.live = refreshOptions.refreshLive && channels.live.length > 0
-    refreshedContentTypes.movies = refreshOptions.refreshMovies && channels.movie.length > 0
-    refreshedContentTypes.series = refreshOptions.refreshSeries && channels.series.length > 0
+    refreshedContentTypes.live = refreshOptions.refreshLive
+    refreshedContentTypes.movies = refreshOptions.refreshMovies
+    refreshedContentTypes.series = refreshOptions.refreshSeries
   } else {
     // M3U sources: fetch all content, treat as live TV
     channels = await fetchAndParseM3U(source.url)
@@ -2977,8 +2975,10 @@ app.put('/api/settings', (req, res) => {
     console.log('[settings] TMDB enrichment schedule updated, restarting cron...')
     startEnrichCron()
   }
-
-  // strm_export_schedule removed - VOD playlists now use their own schedules
+  if ('live_refresh_schedule' in req.body || 'movie_refresh_schedule' in req.body || 'series_refresh_schedule' in req.body) {
+    console.log('[settings] Content update schedules changed, restarting scheduler...')
+    startContentUpdateScheduler()
+  }
 
   res.json({ ok: true })
 })
@@ -3171,51 +3171,50 @@ app.get('/api/proxy-image', async (req, res) => {
 })
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
-function schedulePlaylists() {
-  const playlists = db.prepare('SELECT * FROM playlists WHERE schedule IS NOT NULL').all()
-  for (const p of playlists) {
-    if (!cron.validate(p.schedule)) continue
+// Centralized Content Update Scheduler
+// Replaces per-playlist and per-source schedulers with global content-type schedules
+let liveRefreshCronJob = null
+let movieRefreshCronJob = null
+let seriesRefreshCronJob = null
 
-    cron.schedule(p.schedule, async () => {
-      // VOD playlists: export STRM files
-      if (p.playlist_type === 'vod') {
-        console.log(`[cron] Exporting STRM files for "${p.name}" (id=${p.id})`)
+function startContentUpdateScheduler() {
+  // Stop existing jobs
+  if (liveRefreshCronJob) liveRefreshCronJob.stop()
+  if (movieRefreshCronJob) movieRefreshCronJob.stop()
+  if (seriesRefreshCronJob) seriesRefreshCronJob.stop()
+
+  const getLiveSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('live_refresh_schedule')?.value || '0 */6 * * *'
+  const getMovieSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('movie_refresh_schedule')?.value || '0 4 * * 0'
+  const getSeriesSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('series_refresh_schedule')?.value || '0 4 * * *'
+  const getAutoExportStrm = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('auto_export_strm')?.value === '1'
+
+  // Live TV refresh schedule (applies to all sources)
+  const liveSchedule = getLiveSchedule()
+  if (cron.validate(liveSchedule)) {
+    liveRefreshCronJob = cron.schedule(liveSchedule, async () => {
+      console.log(`[cron] Running Live TV refresh at ${new Date().toISOString()}`)
+
+      // Refresh all sources (Xtream: Live only, M3U: all content)
+      const sources = db.prepare('SELECT * FROM sources WHERE category = ?').all('playlist')
+      for (const source of sources) {
         try {
-          // Get or create jellyfin user for STRM authentication
-          let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
-          let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
+          console.log(`[cron] Refreshing Live TV for "${source.name}"`)
 
-          if (!jellyfinUser) {
-            console.log('[cron] Creating default "jellyfin" user for STRM authentication')
-            const { hashPassword } = await import('./auth.js')
-            const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
-            jellyfinPassword = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
-            const hashed = await hashPassword(jellyfinPassword)
-            db.prepare(
-              `INSERT INTO users (username, password, max_connections, active, notes)
-               VALUES (?, ?, ?, ?, ?)`
-            ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
-            db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
-            jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+          if (source.type === 'xtream') {
+            // For Xtream: Only refresh Live TV
+            await refreshSourceWithContentTypes(source.id, { refreshLive: true, refreshMovies: false, refreshSeries: false })
+          } else {
+            // For M3U: Refresh all content (treated as Live TV)
+            await refreshSourceCache(source.id)
           }
-
-          if (!jellyfinPassword) {
-            jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value || 'jellyfin'
-          }
-
-          const hostIp = process.env.HOST_IP || 'localhost'
-          const baseUrl = `http://${hostIp}:3005`
-          const { exportVodToStrm } = await import('./strm-exporter.js')
-          const stats = await exportVodToStrm(p.id, baseUrl, jellyfinUser.username, jellyfinPassword)
-          db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(p.id)
-          console.log(`[cron] Exported STRM for "${p.name}": ${stats.created} created, ${stats.updated} updated`)
         } catch (e) {
-          console.error(`[cron] Failed to export STRM for "${p.name}":`, e.message)
+          console.error(`[cron] Failed to refresh Live TV for "${source.name}":`, e.message)
         }
       }
-      // Live playlists: build M3U files
-      else if (p.output_path) {
-        console.log(`[cron] Building M3U playlist "${p.name}" (id=${p.id})`)
+
+      // Build M3U files for Live playlists with output_path
+      const livePlaylists = db.prepare('SELECT * FROM playlists WHERE playlist_type = ? AND output_path IS NOT NULL').all('live')
+      for (const p of livePlaylists) {
         try {
           const channels = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY sort_order, id').all(p.id)
           const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
@@ -3223,36 +3222,121 @@ function schedulePlaylists() {
           const content = buildM3U(channels, epgMap)
           writeM3U(p.output_path, content)
           db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(p.id)
-          console.log(`[cron] Built "${p.name}" -> ${p.output_path} (${channels.length} channels)`)
+          console.log(`[cron] Built Live M3U "${p.name}" -> ${p.output_path}`)
         } catch (e) {
-          console.error(`[cron] Failed to build "${p.name}":`, e.message)
+          console.error(`[cron] Failed to build M3U for "${p.name}":`, e.message)
         }
-      } else {
-        console.log(`[cron] Skipping "${p.name}" - no output_path configured`)
       }
-    })
-    console.log(`[cron] Scheduled "${p.name}" with cron: ${p.schedule}`)
+    }, { scheduled: true, timezone: "Africa/Johannesburg" })
+    console.log(`[startup] Scheduled Live TV refresh: ${liveSchedule}`)
+  }
+
+  // Movies refresh schedule (Xtream sources only)
+  const movieSchedule = getMovieSchedule()
+  if (cron.validate(movieSchedule)) {
+    movieRefreshCronJob = cron.schedule(movieSchedule, async () => {
+      console.log(`[cron] Running Movies refresh at ${new Date().toISOString()}`)
+
+      const xtreamSources = db.prepare('SELECT * FROM sources WHERE type = ? AND category = ?').all('xtream', 'playlist')
+      for (const source of xtreamSources) {
+        try {
+          console.log(`[cron] Refreshing Movies for "${source.name}"`)
+          await refreshSourceWithContentTypes(source.id, { refreshLive: false, refreshMovies: true, refreshSeries: false })
+        } catch (e) {
+          console.error(`[cron] Failed to refresh Movies for "${source.name}":`, e.message)
+        }
+      }
+
+      // Auto-export STRM files if enabled
+      if (getAutoExportStrm()) {
+        await exportVodStrmFiles('movie')
+      }
+    }, { scheduled: true, timezone: "Africa/Johannesburg" })
+    console.log(`[startup] Scheduled Movies refresh: ${movieSchedule}`)
+  }
+
+  // Series refresh schedule (Xtream sources only)
+  const seriesSchedule = getSeriesSchedule()
+  if (cron.validate(seriesSchedule)) {
+    seriesRefreshCronJob = cron.schedule(seriesSchedule, async () => {
+      console.log(`[cron] Running Series refresh at ${new Date().toISOString()}`)
+
+      const xtreamSources = db.prepare('SELECT * FROM sources WHERE type = ? AND category = ?').all('xtream', 'playlist')
+      for (const source of xtreamSources) {
+        try {
+          console.log(`[cron] Refreshing Series for "${source.name}"`)
+          await refreshSourceWithContentTypes(source.id, { refreshLive: false, refreshMovies: false, refreshSeries: true })
+        } catch (e) {
+          console.error(`[cron] Failed to refresh Series for "${source.name}":`, e.message)
+        }
+      }
+
+      // Auto-export STRM files if enabled
+      if (getAutoExportStrm()) {
+        await exportVodStrmFiles('series')
+      }
+    }, { scheduled: true, timezone: "Africa/Johannesburg" })
+    console.log(`[startup] Scheduled Series refresh: ${seriesSchedule}`)
   }
 }
 
-function scheduleSources() {
-  const sources = db.prepare('SELECT * FROM sources WHERE refresh_cron IS NOT NULL').all()
-  for (const s of sources) {
-    if (!cron.validate(s.refresh_cron)) continue
-    cron.schedule(s.refresh_cron, async () => {
-      console.log(`[cron] Refreshing source "${s.name}" (id=${s.id})`)
-      try {
-        await refreshSourceCache(s.id)
-      } catch (e) {
-        console.error(`[cron] Failed to refresh "${s.name}":`, e.message)
-      }
-    })
-    console.log(`[cron] Scheduled source refresh "${s.name}" with cron: ${s.refresh_cron}`)
+// Helper function to refresh source with specific content types
+async function refreshSourceWithContentTypes(sourceId, refreshOptions) {
+  const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId)
+  if (!source || source.type !== 'xtream') {
+    throw new Error('Invalid source or not Xtream type')
+  }
+
+  // Temporarily modify refreshSourceCache to accept refresh options
+  // Store options in a way refreshSourceCache can access them
+  global.currentRefreshOptions = refreshOptions
+  await refreshSourceCache(sourceId)
+  delete global.currentRefreshOptions
+}
+
+// Helper function to export STRM files for VOD playlists
+async function exportVodStrmFiles(contentType) {
+  console.log(`[cron] Auto-exporting STRM files for ${contentType} playlists`)
+
+  const vodPlaylists = db.prepare('SELECT * FROM playlists WHERE playlist_type = ?').all('vod')
+
+  // Get or create jellyfin user
+  let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+  let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
+
+  if (!jellyfinUser) {
+    const { hashPassword } = await import('./auth.js')
+    const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
+    jellyfinPassword = Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
+    const hashed = await hashPassword(jellyfinPassword)
+    db.prepare(
+      `INSERT INTO users (username, password, max_connections, active, notes)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
+    jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
+  }
+
+  if (!jellyfinPassword) {
+    jellyfinPassword = 'jellyfin'
+  }
+
+  const hostIp = process.env.HOST_IP || 'localhost'
+  const baseUrl = `http://${hostIp}:3005`
+  const { exportVodToStrm } = await import('./strm-exporter.js')
+
+  for (const playlist of vodPlaylists) {
+    try {
+      const stats = await exportVodToStrm(playlist.id, baseUrl, jellyfinUser.username, jellyfinPassword)
+      db.prepare("UPDATE playlists SET last_built = datetime('now') WHERE id = ?").run(playlist.id)
+      console.log(`[cron] Exported STRM for "${playlist.name}": ${stats.created} created, ${stats.updated} updated`)
+    } catch (e) {
+      console.error(`[cron] Failed to export STRM for "${playlist.name}":`, e.message)
+    }
   }
 }
 
-schedulePlaylists()
-scheduleSources()
+startContentUpdateScheduler()
 
 // Auto-sync EPG sites DB weekly (Sunday 3am) if never synced or stale
 const EPG_SYNC_CRON = process.env.EPG_SYNC_CRON || '0 3 * * 0'
@@ -4161,14 +4245,45 @@ app.delete('/api/users/:id', (req, res) => {
 })
 
 // ── Backup & Restore ──────────────────────────────────────────────────────────
-const BACKUP_TABLES = ['sources', 'playlists', 'playlist_channels', 'epg_mappings', 'settings', 'epg_site_channels', 'users', 'stream_history', 'admin_sessions', 'failed_streams']
+const BACKUP_TABLES = ['sources', 'playlists', 'playlist_channels', 'epg_mappings', 'settings', 'epg_site_channels', 'users', 'stream_history', 'admin_sessions', 'failed_streams', 'source_channels', 'epg_cache', 'hdhr_devices']
 
 // GET /api/backup — download a gzipped JSON bundle of all data
 app.get('/api/backup', (req, res) => {
-  const bundle = { version: 1, exportedAt: new Date().toISOString(), tables: {}, files: {} }
+  const bundle = {
+    version: 2, // Incremented to support schema changes
+    exportedAt: new Date().toISOString(),
+    schemaVersion: null, // Will be populated with migration version
+    tables: {},
+    schema: {}, // Store table schemas
+    files: {}
+  }
 
+  // Get current schema version from migrations table
+  try {
+    const migrationVersion = db.prepare('SELECT MAX(id) as version FROM migrations').get()
+    bundle.schemaVersion = migrationVersion?.version || 0
+  } catch {
+    bundle.schemaVersion = 0
+  }
+
+  // Backup table data and schemas
   for (const table of BACKUP_TABLES) {
-    try { bundle.tables[table] = db.prepare(`SELECT * FROM ${table}`).all() } catch { bundle.tables[table] = [] }
+    try {
+      bundle.tables[table] = db.prepare(`SELECT * FROM ${table}`).all()
+
+      // Store table schema (column names and types)
+      const schema = db.prepare(`PRAGMA table_info(${table})`).all()
+      bundle.schema[table] = schema.map(col => ({
+        name: col.name,
+        type: col.type,
+        notnull: col.notnull,
+        dflt_value: col.dflt_value,
+        pk: col.pk
+      }))
+    } catch {
+      bundle.tables[table] = []
+      bundle.schema[table] = []
+    }
   }
 
   // Include channels.xml, guide.xml, and .env as base64
@@ -4195,21 +4310,58 @@ app.post('/api/restore', express.raw({ type: 'application/gzip', limit: '500mb' 
 
     if (!bundle.version || !bundle.tables) return res.status(400).json({ error: 'Invalid backup file' })
 
+    console.log(`[restore] Restoring backup from ${bundle.exportedAt}, schema version: ${bundle.schemaVersion || 'unknown'}`)
+
     // Restore tables in dependency order (users after playlists due to FK on playlist_id)
-    const order = ['sources', 'epg_mappings', 'settings', 'playlists', 'playlist_channels', 'epg_site_channels', 'users', 'stream_history', 'admin_sessions', 'failed_streams']
+    const order = ['sources', 'epg_mappings', 'settings', 'playlists', 'playlist_channels', 'epg_site_channels', 'users', 'stream_history', 'admin_sessions', 'failed_streams', 'source_channels', 'epg_cache', 'hdhr_devices']
     db.exec('PRAGMA foreign_keys = OFF')
     const restore = db.transaction(() => {
       for (const table of order) {
         const rows = bundle.tables[table]
         if (!rows?.length) continue
-        db.prepare(`DELETE FROM ${table}`).run()
-        const cols = Object.keys(rows[0])
-        const stmt = db.prepare(`INSERT OR REPLACE INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
-        for (const row of rows) stmt.run(cols.map(c => row[c]))
+
+        try {
+          db.prepare(`DELETE FROM ${table}`).run()
+
+          // Get current table schema
+          const currentSchema = db.prepare(`PRAGMA table_info(${table})`).all()
+          const currentColumns = new Set(currentSchema.map(col => col.name))
+
+          // Filter backup columns to only include those that exist in current schema
+          const backupColumns = Object.keys(rows[0])
+          const validColumns = backupColumns.filter(col => currentColumns.has(col))
+
+          if (validColumns.length === 0) {
+            console.warn(`[restore] No valid columns for table ${table}, skipping`)
+            continue
+          }
+
+          // Insert data using only valid columns
+          const stmt = db.prepare(`INSERT OR REPLACE INTO ${table} (${validColumns.join(',')}) VALUES (${validColumns.map(() => '?').join(',')})`)
+          for (const row of rows) {
+            stmt.run(validColumns.map(c => row[c]))
+          }
+
+          console.log(`[restore] Restored ${rows.length} rows to ${table}`)
+        } catch (e) {
+          console.error(`[restore] Error restoring table ${table}:`, e.message)
+          // Continue with other tables even if one fails
+        }
       }
     })
     restore()
     db.exec('PRAGMA foreign_keys = ON')
+
+    // Run migrations to update schema if backup is from older version
+    if (bundle.schemaVersion !== undefined) {
+      const currentVersion = db.prepare('SELECT MAX(id) as version FROM migrations').get()?.version || 0
+      if (bundle.schemaVersion < currentVersion) {
+        console.log(`[restore] Running migrations from version ${bundle.schemaVersion} to ${currentVersion}`)
+        const { runMigrations } = await import('./migrations/index.js')
+        await runMigrations(db)
+        console.log(`[restore] Migrations completed`)
+      }
+    }
 
     // Restore files
     const DATA_DIR = process.env.DATA_DIR || '/data'

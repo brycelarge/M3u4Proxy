@@ -120,17 +120,18 @@ async function doRestore() {
 
 // Xtream Codes - managed via Users page, not here
 
-// Scheduler
-const schedules      = ref([])   // [{ id, name, schedule, last_built, channel_count, schedule_valid }]
-const scheduleEdits  = ref({})   // { [id]: string }
-const scheduleSaving = ref(null) // id currently saving
-const scheduleError  = ref({})   // { [id]: string }
+// Old playlist scheduler removed - now using Content Update Scheduler
 
 // EPG Scheduler
 const epgGrabSchedule = ref('0 23 * * *')
 const epgEnrichSchedule = ref('0 2 * * *')
-const strmExportSchedule = ref('0 3 * * *')
 const epgScheduleSaving = ref(false)
+
+// Content Update Scheduler
+const liveRefreshSchedule = ref('0 */6 * * *')
+const movieRefreshSchedule = ref('0 4 * * 0')
+const seriesRefreshSchedule = ref('0 4 * * *')
+const autoExportStrm = ref(true)
 
 const CRON_PRESETS = [
   { label: 'Every 6h',   value: '0 */6 * * *' },
@@ -151,27 +152,26 @@ const form = ref({
 
 async function load() {
   try {
-    const [s, p, h, d, sc] = await Promise.all([
+    const [s, p, h, d] = await Promise.all([
       api.getSettings(),
       api.getPlaylists(),
       api.getHdhrStatus(),
       fetch('/api/hdhr/devices').then(r => r.json()).catch(() => []),
-      api.getSchedules(),
     ])
     settings.value    = s
     playlists.value   = p
     hdhrStatus.value  = h
     hdhrDevices.value = d
-    schedules.value   = sc
     await loadVirtualDevices()
-    // Init edits from current schedule values
-    const edits = {}
-    for (const pl of sc) edits[pl.id] = pl.schedule || ''
-    scheduleEdits.value = edits
     // Load EPG schedules
     epgGrabSchedule.value = s.epg_grab_schedule || '0 23 * * *'
     epgEnrichSchedule.value = s.epg_enrich_schedule || '0 2 * * *'
-    strmExportSchedule.value = s.strm_export_schedule || '0 3 * * *'
+
+    // Load Content Update Scheduler settings
+    liveRefreshSchedule.value = s.live_refresh_schedule || '0 */6 * * *'
+    movieRefreshSchedule.value = s.movie_refresh_schedule || '0 4 * * 0'
+    seriesRefreshSchedule.value = s.series_refresh_schedule || '0 4 * * *'
+    autoExportStrm.value = s.auto_export_strm === '1' || s.auto_export_strm === true
     form.value = {
       hdhr_device_name: s.hdhr_device_name || 'M3u4Prox',
       hdhr_tuner_count: s.hdhr_tuner_count || '4',
@@ -182,40 +182,18 @@ async function load() {
   }
 }
 
-async function saveSchedule(id) {
-  scheduleSaving.value = id
-  scheduleError.value  = { ...scheduleError.value, [id]: '' }
-  try {
-    await api.saveSchedule(id, scheduleEdits.value[id] || null)
-    await load()
-  } catch (e) {
-    scheduleError.value = { ...scheduleError.value, [id]: e.message }
-  } finally {
-    scheduleSaving.value = null
-  }
-}
-
-function scheduleChanged(id) {
-  const pl = schedules.value.find(p => p.id === id)
-  return (scheduleEdits.value[id] || '') !== (pl?.schedule || '')
-}
-
 async function saveAllSchedules() {
   epgScheduleSaving.value = true
   try {
-    // Save EPG schedules
+    // Save EPG schedules and Content Update Scheduler settings
     await api.saveSettings({
       epg_grab_schedule: epgGrabSchedule.value || '',
       epg_enrich_schedule: epgEnrichSchedule.value || '',
-      strm_export_schedule: strmExportSchedule.value || ''
+      live_refresh_schedule: liveRefreshSchedule.value || '',
+      movie_refresh_schedule: movieRefreshSchedule.value || '',
+      series_refresh_schedule: seriesRefreshSchedule.value || '',
+      auto_export_strm: autoExportStrm.value ? '1' : '0'
     })
-
-    // Save all playlist schedules
-    for (const pl of schedules.value) {
-      if (scheduleChanged(pl.id)) {
-        await api.saveSchedule(pl.id, scheduleEdits.value[pl.id] || null)
-      }
-    }
 
     await load()
   } catch (e) {
@@ -600,103 +578,95 @@ onMounted(async () => { await load(); await loadProxySettings() })
           </div>
         </div>
 
-        <!-- STRM Export Schedule -->
+        <!-- Content Update Scheduler -->
         <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="text-sm font-semibold text-slate-100">STRM Export</span>
-            <span class="text-[10px] px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
-              Exports all VOD playlists to Jellyfin
+          <div class="flex items-center gap-2 mb-4">
+            <span class="text-sm font-semibold text-slate-100">Content Update Scheduler</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+              Refreshes Live TV, Movies, and Series independently
             </span>
           </div>
 
-          <div class="flex items-center gap-2 flex-wrap">
-            <div class="flex gap-1 flex-wrap">
-              <button
-                v-for="p in CRON_PRESETS" :key="'strm-' + p.label"
-                @click="strmExportSchedule = p.value"
-                :class="['text-[10px] px-2 py-1 rounded border transition-colors',
-                  strmExportSchedule === p.value
-                    ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
-                    : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
-              >{{ p.label }}</button>
+          <!-- Live TV Schedule -->
+          <div class="mb-4">
+            <div class="text-xs text-slate-400 mb-2">Live TV Refresh (all sources)</div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex gap-1 flex-wrap">
+                <button
+                  v-for="p in CRON_PRESETS" :key="'live-' + p.label"
+                  @click="liveRefreshSchedule = p.value"
+                  :class="['text-[10px] px-2 py-1 rounded border transition-colors',
+                    liveRefreshSchedule === p.value
+                      ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                      : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
+                >{{ p.label }}</button>
+              </div>
+              <input
+                v-model="liveRefreshSchedule"
+                placeholder="cron expression"
+                class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
+              />
             </div>
-
-            <input
-              v-model="strmExportSchedule"
-              placeholder="cron expression or leave blank to disable"
-              class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
-            />
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Playlist Scheduler -->
-    <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6">
-      <div class="flex items-center gap-3 mb-5">
-        <div class="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-lg shrink-0">🕐</div>
-        <div>
-          <h2 class="text-sm font-bold text-slate-100">Playlist Auto-Build Scheduler</h2>
-          <p class="text-xs text-slate-500">Automatically rebuild M3U files on a schedule. Requires an output path to be set.</p>
-        </div>
-      </div>
-
-      <div v-if="!schedules.length" class="text-center py-8 text-slate-600 text-sm">
-        No playlists yet — create one first.
-      </div>
-
-      <div v-else class="space-y-3">
-        <div v-for="pl in schedules" :key="pl.id"
-          class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
-
-          <!-- Playlist header -->
-          <div class="flex items-center gap-3 mb-3">
-            <span class="text-sm font-semibold text-slate-100 flex-1 truncate">{{ pl.name }}</span>
-            <span class="text-[10px] text-slate-600">{{ (pl.channel_count || 0).toLocaleString() }} ch</span>
-            <!-- Status badge -->
-            <span v-if="pl.schedule && pl.schedule_valid" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
-              ● Scheduled
-            </span>
-            <span v-else-if="pl.schedule" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-500/15 text-slate-500 border border-slate-500/20">
-              Manual only
-            </span>
           </div>
 
-          <!-- Last built -->
-          <p class="text-[10px] text-slate-600 mb-3">
-            Last built:
-            <span :class="pl.last_built ? 'text-slate-400' : 'text-slate-700'">
-              {{ pl.last_built ? new Date(pl.last_built + 'Z').toLocaleString() : 'Never' }}
-            </span>
-            <span v-if="pl.output_path" class="ml-2 font-mono text-slate-700">{{ pl.output_path }}</span>
-          </p>
-
-          <!-- Cron editor -->
-          <div class="flex items-center gap-2 flex-wrap">
-            <!-- Presets -->
-            <div class="flex gap-1 flex-wrap">
-              <button
-                v-for="p in CRON_PRESETS" :key="p.label"
-                @click="scheduleEdits[pl.id] = p.value"
-                :class="['text-[10px] px-2 py-1 rounded border transition-colors',
-                  scheduleEdits[pl.id] === p.value
-                    ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
-                    : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
-              >{{ p.label }}</button>
+          <!-- Movies Schedule -->
+          <div class="mb-4">
+            <div class="text-xs text-slate-400 mb-2">Movies Refresh (Xtream sources only)</div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex gap-1 flex-wrap">
+                <button
+                  v-for="p in CRON_PRESETS" :key="'movie-' + p.label"
+                  @click="movieRefreshSchedule = p.value"
+                  :class="['text-[10px] px-2 py-1 rounded border transition-colors',
+                    movieRefreshSchedule === p.value
+                      ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                      : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
+                >{{ p.label }}</button>
+              </div>
+              <input
+                v-model="movieRefreshSchedule"
+                placeholder="cron expression"
+                class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
+              />
             </div>
-
-            <!-- Custom cron input -->
-            <input
-              v-model="scheduleEdits[pl.id]"
-              placeholder="cron expression or leave blank to disable"
-              :class="['flex-1 min-w-48 bg-[#22263a] border rounded-lg px-3 py-1.5 text-xs font-mono outline-none transition-colors',
-                scheduleEdits[pl.id] && !schedules.find(s => s.id === pl.id)?.schedule_valid && scheduleEdits[pl.id] !== (schedules.find(s => s.id === pl.id)?.schedule || '')
-                  ? 'border-red-500/50 text-red-300 focus:border-red-500'
-                  : 'border-[#2e3250] text-slate-200 focus:border-indigo-500']"
-            />
           </div>
 
-          <p v-if="scheduleError[pl.id]" class="text-[10px] text-red-400 mt-1.5">⚠ {{ scheduleError[pl.id] }}</p>
+          <!-- Series Schedule -->
+          <div class="mb-4">
+            <div class="text-xs text-slate-400 mb-2">Series Refresh (Xtream sources only)</div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex gap-1 flex-wrap">
+                <button
+                  v-for="p in CRON_PRESETS" :key="'series-' + p.label"
+                  @click="seriesRefreshSchedule = p.value"
+                  :class="['text-[10px] px-2 py-1 rounded border transition-colors',
+                    seriesRefreshSchedule === p.value
+                      ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
+                      : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300 hover:border-slate-500']"
+                >{{ p.label }}</button>
+              </div>
+              <input
+                v-model="seriesRefreshSchedule"
+                placeholder="cron expression"
+                class="flex-1 min-w-48 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500"
+              />
+            </div>
+          </div>
+
+          <!-- Auto-export STRM -->
+          <div class="mt-4 pt-4 border-t border-[#2e3250]">
+            <label class="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                v-model="autoExportStrm"
+                class="w-4 h-4 rounded border-[#2e3250] bg-[#22263a] text-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:ring-offset-0"
+              />
+              <div>
+                <div class="text-xs font-medium text-slate-200">Auto-export STRM files after VOD refresh</div>
+                <div class="text-[10px] text-slate-500">Automatically export STRM files when Movies or Series are refreshed</div>
+              </div>
+            </label>
+          </div>
         </div>
       </div>
     </div>
