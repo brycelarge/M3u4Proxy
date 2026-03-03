@@ -157,10 +157,15 @@ function scanExistingFiles(strmDir) {
     return new Map()
   }
 
+  console.log(`[strm] Scanning directory: ${strmDir}`)
   const map = new Map() // normalizedName -> { strmFile, metadataFile, metadata, relativePath }
+  let metadataCount = 0
 
   function scanDirectory(dir, relativePath = '') {
     const files = readdirSync(dir)
+    if (metadataCount < 5) {
+      console.log(`[strm] Scanning ${dir}: found ${files.length} items`)
+    }
 
     for (const file of files) {
       const fullPath = join(dir, file)
@@ -172,18 +177,35 @@ function scanExistingFiles(strmDir) {
         continue
       }
 
+      if (metadataCount < 5 && file.includes('.json')) {
+        console.log(`[strm] Checking file: "${file}", endsWith="${file.endsWith(METADATA_EXT)}", METADATA_EXT="${METADATA_EXT}"`)
+      }
+
       if (!file.endsWith(METADATA_EXT)) continue
 
+      metadataCount++
+      if (metadataCount <= 3) {
+        console.log(`[strm] Processing metadata file #${metadataCount}: "${file}"`)
+      }
+
       const metadataPath = fullPath
-      const strmFile = file.replace(METADATA_EXT, '')
+      const strmFile = file.replace(METADATA_EXT, '.strm')
       const strmPath = join(dir, strmFile)
 
       try {
         const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'))
 
+        if (metadataCount <= 3) {
+          console.log(`[strm] Read metadata, checking STRM exists: "${strmPath}", exists="${existsSync(strmPath)}"`)
+        }
+
         if (existsSync(strmPath)) {
           // Use normalized_name as key for matching across provider changes
-          const key = metadata.normalizedName || metadata.channelId
+          // Handle both camelCase (old) and snake_case (new) formats
+          const key = metadata.normalizedName || metadata.normalized_name || metadata.channelId
+          if (metadataCount <= 3) {
+            console.log(`[strm] Found metadata: key="${key}", channelId="${metadata.channelId}", file="${file}"`)
+          }
           map.set(key, {
             strmFile,
             metadataFile: file,
@@ -193,6 +215,9 @@ function scanExistingFiles(strmDir) {
             fullMetadataPath: metadataPath
           })
         } else {
+          if (metadataCount <= 3) {
+            console.log(`[strm] STRM file missing, deleting orphaned metadata: "${file}"`)
+          }
           // Orphaned metadata file - delete it
           unlinkSync(metadataPath)
         }
@@ -229,8 +254,8 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
   let channels = []
 
   if (groupSelections && groupSelections.groups) {
-    // Query source_channels directly using stored group selections
-    console.log(`[strm] Using stored group selections to query fresh data from source_channels`)
+    // Query playlist_channels with source_channels metadata
+    console.log(`[strm] Using stored group selections to query playlist_channels`)
     const { sourceId, groups } = groupSelections
 
     for (const [groupName, sel] of Object.entries(groups)) {
@@ -242,26 +267,39 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
           // All sources mode — match by group_title suffix
           const parts = groupName.split(' › ')
           const gt = parts.length > 1 ? parts[parts.length - 1] : groupName
-          rows = db.prepare('SELECT *, id as channel_id FROM source_channels WHERE group_title = ?').all(gt)
+          rows = db.prepare(`
+            SELECT pc.*, sc.meta, sc.normalized_name
+            FROM playlist_channels pc
+            LEFT JOIN source_channels sc ON sc.url = pc.url
+            WHERE pc.playlist_id = ? AND pc.group_title = ?
+          `).all(playlistId, gt)
         } else {
-          rows = db.prepare('SELECT *, id as channel_id FROM source_channels WHERE source_id = ? AND group_title = ?').all(sourceId, groupName)
+          rows = db.prepare(`
+            SELECT pc.*, sc.meta, sc.normalized_name
+            FROM playlist_channels pc
+            LEFT JOIN source_channels sc ON sc.url = pc.url
+            WHERE pc.playlist_id = ? AND pc.group_title = ?
+          `).all(playlistId, groupName)
         }
       } else {
-        // Array of specific channel IDs - but for STRM export, we want all channels in the group
-        // So we'll get the group name from the first channel and query all channels in that group
+        // Array of specific channel IDs
         if (Array.isArray(sel) && sel.length > 0) {
-          const firstCh = db.prepare('SELECT group_title, source_id FROM source_channels WHERE id = ?').get(sel[0])
+          const firstCh = db.prepare('SELECT group_title FROM playlist_channels WHERE id = ? AND playlist_id = ?').get(sel[0], playlistId)
           if (firstCh) {
-            rows = db.prepare('SELECT *, id as channel_id FROM source_channels WHERE source_id = ? AND group_title = ?').all(firstCh.source_id, firstCh.group_title)
+            rows = db.prepare(`
+              SELECT pc.*, sc.meta, sc.normalized_name
+              FROM playlist_channels pc
+              LEFT JOIN source_channels sc ON sc.url = pc.url
+              WHERE pc.playlist_id = ? AND pc.group_title = ?
+            `).all(playlistId, firstCh.group_title)
           }
         }
       }
 
-      // Add meta and normalized_name (already in source_channels)
       channels.push(...rows)
     }
 
-    console.log(`[strm] Found ${channels.length} channels from selected groups in source_channels`)
+    console.log(`[strm] Found ${channels.length} channels from selected groups in playlist_channels`)
   } else {
     // Fallback: use playlist_channels (old behavior)
     console.log(`[strm] No group selections stored, falling back to playlist_channels`)
@@ -300,6 +338,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
   console.log(`[strm] Using directory: ${strmDir}`)
 
   const existing = scanExistingFiles(strmDir)
+  console.log(`[strm] Found ${existing.size} existing STRM files`)
   const processed = new Set()
   let stats = { created: 0, updated: 0, deleted: 0, errors: 0, skipped: 0, directory: strmDir }
   const errorList = []
@@ -341,11 +380,16 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
   const newContentKeys = new Set(uniqueContent.keys())
 
   // Now process the deduplicated dataset
+  let debugCount = 0
   for (const [matchKey, channel] of uniqueContent.entries()) {
-    const channelId = String(channel.id)
-
     const proxyUrl = `${baseUrl}/stream/${channel.id}?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
     const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
+
+    // Debug first few items
+    if (debugCount < 3) {
+      console.log(`[strm] DEBUG: matchKey="${matchKey}", tvg_name="${channel.tvg_name}", existing.has="${existing.has(matchKey)}"`)
+      debugCount++
+    }
 
     // Check if this is a series based on group_title prefix OR filename pattern
     const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
@@ -450,36 +494,21 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password) {
 
     try {
       if (existingEntry) {
-        // Channel exists - check if update needed
+        // Channel exists - check if URL needs updating
         const oldStrmPath = existingEntry.fullStrmPath
         const oldMetadataPath = existingEntry.fullMetadataPath
+        const oldUrl = readFileSync(oldStrmPath, 'utf8').trim()
 
-        // Log if we matched by normalized name (provider switch)
-        if (existingEntry.metadata.channelId !== channelId && channel.normalized_name) {
-          console.log(`[strm] Provider switch detected: "${channel.tvg_name}" (old ID: ${existingEntry.metadata.channelId} → new ID: ${channelId})`)
+        if (stats.updated < 1) {
+          console.log(`[strm] COMPARE: "${oldUrl.substring(0,100)}" vs "${proxyUrl.substring(0,100)}" equal=${oldUrl === proxyUrl}`)
         }
 
-        // Check if filename or path changed (user renamed, title changed, or moved to season folder)
-        if (oldStrmPath !== strmPath) {
-          console.log(`[strm] Moving/Renaming: ${existingEntry.strmFile} → ${filename}`)
-          unlinkSync(oldStrmPath)
-          unlinkSync(oldMetadataPath)
-          writeFileSync(strmPath, proxyUrl, 'utf8')
-          writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf8')
-          // Only write NFO if new folder or NFO doesn't exist
-          if (shouldCreateNfo) {
-            writeFileSync(nfoPath, nfoContent, 'utf8')
-          }
+        // Compare URLs - if different, update the file
+        if (oldUrl !== proxyUrl) {
+          console.log(`[strm] Updating URL for: ${existingEntry.strmFile}`)
+          writeFileSync(oldStrmPath, proxyUrl, 'utf8')
+          writeFileSync(oldMetadataPath, JSON.stringify(metadata, null, 2), 'utf8')
           stats.updated++
-        } else {
-          // Check if URL changed
-          const oldUrl = readFileSync(oldStrmPath, 'utf8').trim()
-          if (oldUrl !== proxyUrl) {
-            console.log(`[strm] Updating URL for: ${filename}`)
-            writeFileSync(strmPath, proxyUrl, 'utf8')
-            writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf8')
-            stats.updated++
-          }
         }
       } else {
         // New channel - create files (NFO only if new folder or doesn't exist)

@@ -2985,7 +2985,9 @@ app.post('/api/strm/export/:playlistId', async (req, res) => {
     return res.status(400).json({ error: 'Only VOD playlists can be exported to STRM' })
   }
 
-  const baseUrl = `${req.protocol}://${req.get('host')}`
+  // Use HOST_IP env var for STRM URLs so they're accessible from outside container
+  const hostIp = process.env.HOST_IP || req.get('host')
+  const baseUrl = `http://${hostIp}:3005`
 
   // Get or create jellyfin user for STRM authentication
   let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
@@ -3042,7 +3044,9 @@ app.post('/api/strm/export-all', async (req, res) => {
     })
   }
 
-  const baseUrl = `${req.protocol}://${req.get('host')}`
+  // Use HOST_IP env var for STRM URLs so they're accessible from outside container
+  const hostIp = process.env.HOST_IP || req.get('host')
+  const baseUrl = `http://${hostIp}:3005`
   const results = []
   let totalCreated = 0
   let totalUpdated = 0
@@ -3732,6 +3736,13 @@ async function tryConnectWithTimeout(channelId, url, name, res, sourceId, userna
 }
 
 // ── Stream proxy ──────────────────────────────────────────────────────────────
+// Log all /stream requests for debugging
+app.use('/stream/:channelId', (req, res, next) => {
+  console.log(`[DEBUG] ${req.method} /stream/${req.params.channelId} from ${req.ip}`)
+  console.log(`[DEBUG] Headers:`, JSON.stringify(req.headers, null, 2))
+  next()
+})
+
 // OPTIONS /stream/:channelId — CORS preflight for Jellyfin
 app.options('/stream/:channelId', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
