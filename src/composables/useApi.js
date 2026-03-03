@@ -68,8 +68,8 @@ export const api = {
   getSourceChannelsAll: async (id, group) => fetchAllPages((limit, offset) => request('GET', `/sources/${id}/channels${buildQuery({ group, limit, offset })}`)),
   refreshSource:       (id)         => request('POST',   `/sources/${id}/refresh`),
   getAllSourceGroups:   (playlistId) => request('GET',    `/sources/all/groups${playlistId ? `?playlist_id=${playlistId}` : ''}`),
-  getAllSourceChannels: (group, limit, offset) => request('GET', `/sources/all/channels${buildQuery({ group, limit, offset })}`),
-  getAllSourceChannelsAll: async (group) => fetchAllPages((limit, offset) => request('GET', `/sources/all/channels${buildQuery({ group, limit, offset })}`)),
+  getAllSourceChannels: (group, limit, offset, sourceId) => request('GET', `/sources/all/channels${buildQuery({ group, limit, offset, source_id: sourceId })}`),
+  getAllSourceChannelsAll: async (group, sourceId) => fetchAllPages((limit, offset) => request('GET', `/sources/all/channels${buildQuery({ group, limit, offset, source_id: sourceId })}`)),
 
   // Playlists
   getPlaylists:        ()           => request('GET',    '/playlists'),

@@ -53,9 +53,13 @@ function loadSavedNameOverrides() {
 
 // ── Group classification ──────────────────────────────────────────────────────
 export function classifyGroup(name) {
+  // Handle source-prefixed names (e.g., "source › Movie: Action")
+  // Extract the group title after the separator
+  const groupTitle = name.includes(' › ') ? name.split(' › ')[1] : name
+
   // Check for prefixes set by Xtream API import
-  if (name.startsWith('Series:')) return 'Series'
-  if (name.startsWith('Movie:')) return 'Movies VOD'
+  if (groupTitle.startsWith('Series:')) return 'Series'
+  if (groupTitle.startsWith('Movie:')) return 'Movies VOD'
   return 'Live TV'
 }
 
@@ -94,6 +98,7 @@ export function useBrowser() {
   const epgSourceOverrides  = ref(loadSavedEpgSourceOverrides())    // { channelId: sourceId }
   const nameOverrides        = ref(loadSavedNameOverrides())          // { channelId: 'Custom Name' }
   const playlistTotalCount   = ref(0)                                 // Total channels in loaded playlist
+  const playlistChannelsCache = ref([])                               // Cached channels from selection endpoint
 
   // ── Derived ─────────────────────────────────────────────────────────────────
   const currentSelected = computed(() => {
@@ -170,10 +175,19 @@ export function useBrowser() {
   })
 
   const sectionedGroups = computed(() => {
-    const base = groupSearch.value.trim()
-      ? groups.value.filter(g => g.name.toLowerCase().includes(groupSearch.value.toLowerCase()))
-      : groups.value
-    if (groupSearch.value.trim()) return [{ section: null, groups: base }]
+    let base = groups.value
+
+    // Filter by active source if one is selected
+    if (activeSourceId.value !== null) {
+      base = base.filter(g => g.source_id === activeSourceId.value)
+    }
+
+    // Filter by search text
+    if (groupSearch.value.trim()) {
+      base = base.filter(g => g.name.toLowerCase().includes(groupSearch.value.toLowerCase()))
+      return [{ section: null, groups: base }]
+    }
+
     const sections = { 'Live TV': [], 'Series': [], 'Movies VOD': [] }
     for (const g of base) sections[classifyGroup(g.name)].push(g)
     return Object.entries(sections)
@@ -218,65 +232,86 @@ export function useBrowser() {
     loadingSelection.value = true
 
     // Clear immediately so UI reflects the new playlist right away
+    playlistChannelsCache.value = []
     selectionMap.value   = {}
-    channelNumbers.value = {}
-    epgOverrides.value   = {}
-    groupOverrides.value = {}
     activeGroup.value    = null
     channels.value       = []
     groupTotal.value     = 0
-    localStorage.setItem('m3u_selection', '{}')
 
     try {
-      // Server joins playlist_channels with source_channels by URL — returns selection map directly
-      const { groups, overrides, totalCount } = await api.getPlaylistSelection(playlistId)
+      // Fetch selected channels as a flat array of channel objects
+      const { channels: selectedChannels, totalCount } = await api.getPlaylistSelection(playlistId)
 
-      // Store the total count from the API
+      // Store the total count and selected channels
       playlistTotalCount.value = totalCount || 0
+      playlistChannelsCache.value = selectedChannels || []
 
-      // Convert group arrays to Sets (__all__ stays as string)
+      // Build selection map and group metadata from channel objects
       const newMap = {}
-      for (const [grp, ids] of Object.entries(groups)) {
-        newMap[grp] = ids === '__all__' ? '__all__' : new Set(ids)
+      const groupCounts = {} // Track channel count per group
+
+      for (const ch of selectedChannels) {
+        const groupKey = `${ch.source_name} › ${ch.group_title}`
+        if (!newMap[groupKey]) {
+          newMap[groupKey] = new Set()
+          groupCounts[groupKey] = 0
+        }
+        newMap[groupKey].add(ch.id)
+        groupCounts[groupKey]++
       }
 
-      const newNums   = {}
-      const newEpg    = {}
-      const newGroups = {}
-      const newNames  = {}
-      for (const [id, ov] of Object.entries(overrides)) {
-        if (ov.sort_order    != null) newNums[id]   = ov.sort_order
-        if (ov.custom_tvg_id)         newEpg[id]    = ov.custom_tvg_id
-        if (ov.group_title)           newGroups[id] = ov.group_title
-        if (ov.tvg_name)              newNames[id]  = ov.tvg_name
-      }
-
-      selectionMap.value   = newMap
-      channelNumbers.value = newNums
-      epgOverrides.value   = newEpg
-      groupOverrides.value = newGroups
-      nameOverrides.value  = newNames
-
-      const s = {}
-      for (const [k, v] of Object.entries(newMap)) s[k] = v === '__all__' ? '__all__' : [...v]
-      localStorage.setItem('m3u_selection',        JSON.stringify(s))
-      localStorage.setItem('m3u_channel_numbers',  JSON.stringify(newNums))
-      localStorage.setItem('m3u_epg_overrides',    JSON.stringify(newEpg))
-      localStorage.setItem('m3u_group_overrides',  JSON.stringify(newGroups))
-      localStorage.setItem('m3u_name_overrides',   JSON.stringify(newNames))
+      selectionMap.value = newMap
 
       // Load source groups so selectedCount can calculate correctly
       // Use "All Sources" mode to get all groups across sources
       activeSourceId.value = null
       activeSourceName.value = '__all__'
       const data = await api.getAllSourceGroups(playlistId)
-      if (data.groups && data.groups.length > 0) {
-        setGroups(data.groups, { last_fetched: data.last_fetched })
+
+      // Merge groups from API with groups from playlist selections
+      // This ensures all groups with selections are visible in sidebar
+      const allGroups = data.groups ? [...data.groups] : []
+      const existingGroupNames = new Set(allGroups.map(g => g.name))
+
+      // Add any groups from selections that aren't in the API response
+      // Need to fetch actual counts from backend for these groups
+      for (const [groupKey, channelSet] of Object.entries(newMap)) {
+        if (!existingGroupNames.has(groupKey)) {
+          // Extract source name and group title from key
+          const [sourceName, groupTitle] = groupKey.split(' › ')
+
+          // Get source_id from the first channel in this group
+          const firstChannel = selectedChannels.find(ch => `${ch.source_name} › ${ch.group_title}` === groupKey)
+          const sourceId = firstChannel?.source_id
+
+          // Fetch the actual group to get the real total count
+          try {
+            const groupData = await api.getAllSourceChannels(groupKey, 1, 0, sourceId)
+            allGroups.push({
+              name: groupKey,
+              display: groupTitle,
+              count: groupData.total || groupCounts[groupKey],
+              source_name: sourceName,
+              source_id: sourceId
+            })
+          } catch (e) {
+            // Fallback to selected count if fetch fails
+            allGroups.push({
+              name: groupKey,
+              display: groupTitle,
+              count: groupCounts[groupKey],
+              source_name: sourceName,
+              source_id: sourceId
+            })
+          }
+        }
+      }
+
+      if (allGroups.length > 0) {
+        setGroups(allGroups, { last_fetched: data.last_fetched })
 
         // Auto-select the first group that has channels in the playlist
-        const firstGroupWithChannels = Object.keys(newMap).find(groupName =>
-          data.groups.some(g => g.name === groupName)
-        )
+        const firstGroupWithChannels = Object.keys(newMap)[0]
         if (firstGroupWithChannels) {
           await selectGroup(firstGroupWithChannels)
         }
@@ -416,10 +451,15 @@ export function useBrowser() {
           }
           res = { channels: allSelected, total: allSelected.length }
         }
-      } else if (activeSourceId.value === null) {
-        res = await api.getAllSourceChannels(groupName, PAGE_SIZE, 0)
-      } else if (activeSourceId.value) {
-        res = await api.getSourceChannels(activeSourceId.value, groupName, PAGE_SIZE, 0)
+      } else {
+        if (activeSourceId.value === null) {
+          // Find the source_id for this group to avoid duplicate source name issues
+          const group = groups.value.find(g => g.name === groupName)
+          const sourceId = group?.source_id
+          res = await api.getAllSourceChannels(groupName, PAGE_SIZE, 0, sourceId)
+        } else if (activeSourceId.value) {
+          res = await api.getSourceChannels(activeSourceId.value, groupName, PAGE_SIZE, 0)
+        }
       }
 
       if (res) {
@@ -450,7 +490,10 @@ export function useBrowser() {
         // Note: For the case where no playlist is selected, we've already loaded all channels
         // in the selectGroup function, so there's no need to load more
       } else if (activeSourceId.value === null) {
-        res = await api.getAllSourceChannels(activeGroup.value, PAGE_SIZE, offset)
+        // Find the source_id for this group to avoid duplicate source name issues
+        const group = groups.value.find(g => g.name === activeGroup.value)
+        const sourceId = group?.source_id
+        res = await api.getAllSourceChannels(activeGroup.value, PAGE_SIZE, offset, sourceId)
       } else if (activeSourceId.value) {
         res = await api.getSourceChannels(activeSourceId.value, activeGroup.value, PAGE_SIZE, offset)
       }
@@ -635,8 +678,37 @@ export function useBrowser() {
 
   // Returns flat array of all selected channel objects across all groups
   async function getAllSelectedChannels() {
+    // If we have cached playlist channels from the selection endpoint, use them directly
+    if (playlistChannelsCache.value.length > 0) {
+      const result = []
+      const seenNormalized = new Map()
+
+      for (const ch of playlistChannelsCache.value) {
+        const normalized = ch.normalized_name
+        if (normalized) {
+          if (!seenNormalized.has(normalized)) {
+            seenNormalized.set(normalized, {
+              ...ch,
+              variantIds: [ch.id],
+              variantCount: 1
+            })
+          } else {
+            const existing = seenNormalized.get(normalized)
+            existing.variantIds.push(ch.id)
+            existing.variantCount++
+          }
+        } else {
+          result.push({ ...ch, variantIds: [ch.id], variantCount: 1 })
+        }
+      }
+
+      result.push(...seenNormalized.values())
+      return result
+    }
+
+    // Fallback: fetch channels from backend (for backward compatibility)
     const result = []
-    const seenNormalized = new Map() // Track variants by normalized_name
+    const seenNormalized = new Map()
 
     for (const g of groups.value) {
       const sel = selectionMap.value[g.name]
@@ -644,10 +716,8 @@ export function useBrowser() {
 
       let groupChannels = []
       if (activeGroup.value === g.name && channels.value.length > 0) {
-        // If we already have the channels loaded for this group, use them
         groupChannels = channels.value
       } else {
-        // Fetch all channels for this group
         if (activeSourceId.value === null) {
           groupChannels = await api.getAllSourceChannelsAll(g.name)
         } else {
@@ -661,28 +731,24 @@ export function useBrowser() {
 
         const normalized = ch.normalized_name
         if (normalized) {
-          // Track variants by normalized_name
           if (!seenNormalized.has(normalized)) {
             seenNormalized.set(normalized, {
               ...ch,
               originalGroup: g.name,
-              variantIds: [ch.id], // Track all variant IDs
+              variantIds: [ch.id],
               variantCount: 1
             })
           } else {
-            // Add this variant's ID to the list
             const existing = seenNormalized.get(normalized)
             existing.variantIds.push(ch.id)
             existing.variantCount++
           }
         } else {
-          // No normalized_name - add as-is
           result.push({ ...ch, originalGroup: g.name, variantIds: [ch.id], variantCount: 1 })
         }
       }
     }
 
-    // Add deduplicated channels to result
     result.push(...seenNormalized.values())
     return result
   }

@@ -32,12 +32,6 @@ const showPlaylistModal = ref(false)
 const playlistForm = ref({ name: '', type: 'live' })
 const isEditingPlaylist = ref(false)
 
-// Find Other Sources modal
-const showVariantsModal = ref(false)
-const variantsLoading = ref(false)
-const variantsChannel = ref(null)
-const channelVariants = ref([])
-
 async function loadMeta() {
   try {
     const [sources, playlists] = await Promise.all([api.getSources(), api.getPlaylists()])
@@ -125,78 +119,6 @@ async function buildAndRefresh() {
   await buildPlaylist()
   allPlaylists.value = await api.getPlaylists()
 }
-
-async function findOtherSourcesBulk() {
-  showVariantsModal.value = true
-  variantsLoading.value = true
-  channelVariants.value = []
-
-  try {
-    const selected = await getAllSelectedChannels()
-
-    // Deduplicate by normalized_name - only search for one channel per normalized name
-    const seenNames = new Map()
-    for (const ch of selected) {
-      if (ch.normalized_name && !seenNames.has(ch.normalized_name)) {
-        seenNames.set(ch.normalized_name, ch.id)
-      }
-    }
-
-    const channelIds = Array.from(seenNames.values())
-
-    const response = await fetch('/api/source-channels/bulk-variants', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channelIds })
-    }).then(r => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`)
-      return r.json()
-    })
-
-    channelVariants.value = response
-  } catch (e) {
-    alert(`Failed to load variants: ${e.message}`)
-  } finally {
-    variantsLoading.value = false
-  }
-}
-
-// Check if a variant is currently in the selection
-function isVariantSelected(variant) {
-  // Check all groups in selectionMap for this variant ID
-  for (const [groupName, selection] of Object.entries(selectionMap.value)) {
-    if (selection instanceof Set && selection.has(variant.id)) {
-      return true
-    }
-  }
-  return false
-}
-
-// Toggle a variant in/out of selection
-function toggleVariant(variant) {
-  toggleChannel(variant)
-}
-
-// Add all variants for a specific channel
-function addChannelVariants(variants) {
-  for (const variant of variants) {
-    if (!isVariantSelected(variant)) {
-      toggleChannel(variant)
-    }
-  }
-}
-
-// Add all unselected variants
-function addAllVariants() {
-  for (const item of channelVariants.value) {
-    for (const variant of item.variants) {
-      if (!isVariantSelected(variant)) {
-        toggleChannel(variant)
-      }
-    }
-  }
-}
-
 
 onMounted(loadMeta)
 
@@ -430,11 +352,6 @@ function onSetName(payload) {
           <!-- Playlist mode: Save + Build -->
           <div v-if="activePlaylistId" class="flex flex-col-reverse sm:flex-row w-full sm:w-auto gap-2">
             <button
-              v-if="selectedCount > 0"
-              @click="findOtherSourcesBulk"
-              class="flex items-center justify-center gap-1.5 px-4 py-2 text-xs bg-cyan-500/10 border border-cyan-500/30 rounded-xl hover:border-cyan-400 text-cyan-300 transition-colors font-medium w-full sm:w-auto"
-            >🔍 Find Other Sources ({{ selectedCount.toLocaleString() }})</button>
-            <button
               v-if="selectedCount > 0 && allPlaylists.find(p => p.id === activePlaylistId)?.playlist_type !== 'vod'"
               @click="openReview"
               class="flex items-center justify-center gap-1.5 px-4 py-2 text-xs bg-amber-500/10 border border-amber-500/30 rounded-xl hover:border-amber-400 text-amber-300 transition-colors font-medium w-full sm:w-auto"
@@ -530,113 +447,6 @@ function onSetName(payload) {
               class="flex-1 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors"
             >
               {{ isEditingPlaylist ? 'Save' : 'Create' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
-
-    <!-- Find Other Sources Modal -->
-    <Teleport to="body">
-      <div v-if="showVariantsModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showVariantsModal = false">
-        <div class="bg-[#13151f] border border-[#2e3250] rounded-2xl shadow-2xl max-w-3xl w-full max-h-[80vh] flex flex-col">
-          <!-- Header -->
-          <div class="flex items-center justify-between p-5 border-b border-[#2e3250]">
-            <div>
-              <h2 class="text-lg font-semibold text-slate-100">🔍 Other Sources</h2>
-              <p class="text-xs text-slate-500 mt-1">{{ variantsChannel?.name }}</p>
-            </div>
-            <button @click="showVariantsModal = false" class="text-slate-500 hover:text-slate-300 text-2xl leading-none">&times;</button>
-          </div>
-
-          <!-- Content -->
-          <div class="flex-1 overflow-y-auto p-5">
-            <div v-if="variantsLoading" class="flex flex-col items-center justify-center gap-3 py-12 text-slate-500">
-              <span class="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></span>
-              <p class="text-base font-medium text-slate-300">Searching for variants...</p>
-              <p class="text-xs text-slate-500">Looking for channels with the same name in other sources</p>
-            </div>
-
-            <div v-else-if="!channelVariants.length" class="flex flex-col items-center justify-center gap-3 py-12 text-slate-500">
-              <span class="text-4xl">🔍</span>
-              <p class="text-sm">No other sources found for selected channels</p>
-            </div>
-
-            <div v-else class="space-y-4">
-              <div class="flex items-center justify-between mb-3">
-                <p class="text-xs text-slate-500">Found variants for {{ channelVariants.length }} channel(s)</p>
-                <button
-                  @click="addAllVariants"
-                  class="px-3 py-1.5 text-xs bg-cyan-500 hover:bg-cyan-400 text-white rounded-lg transition-colors whitespace-nowrap"
-                >
-                  Add All Variants
-                </button>
-              </div>
-
-              <!-- Each channel with its variants -->
-              <div v-for="item in channelVariants" :key="item.channel.id" class="space-y-2">
-                <div class="flex items-center gap-2 px-3 py-2 bg-[#1a1d27] border-l-2 border-indigo-500 rounded">
-                  <span class="font-semibold text-sm text-slate-200">{{ item.channel.tvg_name }}</span>
-                  <span class="text-xs text-slate-600">•</span>
-                  <span class="text-xs text-slate-500">{{ item.variants.length }} variant(s)</span>
-                  <button
-                    @click="addChannelVariants(item.variants)"
-                    class="ml-auto px-2 py-1 text-[10px] bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-cyan-300 rounded transition-colors whitespace-nowrap"
-                  >
-                    Add All
-                  </button>
-                </div>
-
-                <!-- Variants for this channel -->
-                <div class="ml-4 space-y-2">
-                  <div
-                    v-for="variant in item.variants"
-                    :key="variant.id"
-                    class="flex items-center gap-3 p-3 bg-[#1a1d27] border border-[#2e3250] rounded-lg hover:border-cyan-500/50 transition-colors"
-                  >
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-center gap-2">
-                        <span class="font-medium text-sm text-slate-200 truncate">{{ variant.tvg_name }}</span>
-                        <span
-                          v-if="variant.quality"
-                          :class="['text-[9px] px-1.5 py-0.5 rounded border whitespace-nowrap',
-                            variant.quality === 'UHD' ? 'bg-purple-500/15 border-purple-500/30 text-purple-400' :
-                            variant.quality === 'FHD' ? 'bg-blue-500/15 border-blue-500/30 text-blue-400' :
-                            variant.quality === 'HD' ? 'bg-green-500/15 border-green-500/30 text-green-400' :
-                            variant.quality === 'SD' ? 'bg-yellow-500/15 border-yellow-500/30 text-yellow-400' :
-                            'bg-slate-500/15 border-slate-500/30 text-slate-400']"
-                        >
-                          {{ variant.quality }}
-                        </span>
-                      </div>
-                      <div class="flex items-center gap-2 mt-1">
-                        <span class="text-xs text-slate-500">{{ variant.source_name }}</span>
-                        <span class="text-xs text-slate-600">•</span>
-                        <span class="text-xs text-slate-600 truncate">{{ variant.group_title }}</span>
-                      </div>
-                    </div>
-                    <label class="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        :checked="isVariantSelected(variant)"
-                        @change="toggleVariant(variant)"
-                        class="w-4 h-4 rounded border-2 border-slate-600 bg-[#22263a] checked:bg-indigo-500 checked:border-indigo-500 cursor-pointer"
-                      />
-                      <span class="text-xs text-slate-400">{{ isVariantSelected(variant) ? 'Selected' : 'Select' }}</span>
-                    </label>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Footer -->
-          <div class="flex justify-end gap-3 p-5 border-t border-[#2e3250]">
-            <button
-              @click="showVariantsModal = false"
-              class="px-4 py-2 text-sm bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-300 hover:border-slate-500 transition-colors"
-            >
-              Close
             </button>
           </div>
         </div>

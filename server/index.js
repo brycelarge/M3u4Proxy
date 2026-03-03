@@ -233,8 +233,19 @@ async function refreshSourceCache(sourceId) {
 
   let channels
   let isXtream = false
+  let skipVodRefresh = false
+
   if (source.type === 'xtream') {
-    channels = await fetchXtreamChannels(source.url, source.username, source.password, skipRules)
+    // Check if VOD content was refreshed within the last 7 days
+    const lastFetched = source.last_fetched ? new Date(source.last_fetched) : null
+    const daysSinceRefresh = lastFetched ? (Date.now() - lastFetched.getTime()) / (1000 * 60 * 60 * 24) : Infinity
+
+    if (daysSinceRefresh < 7) {
+      console.log(`[source] Skipping VOD refresh for "${source.name}" - last refreshed ${daysSinceRefresh.toFixed(1)} days ago (< 7 days)`)
+      skipVodRefresh = true
+    }
+
+    channels = await fetchXtreamChannels(source.url, source.username, source.password, skipRules, skipVodRefresh)
     isXtream = true
   } else {
     channels = await fetchAndParseM3U(source.url)
@@ -697,13 +708,40 @@ app.get('/api/sources/all/groups', (req, res) => {
   res.json({ groups, total, cached: groups.length > 0 })
 })
 
+// Get groups for a specific source
+app.get('/api/sources/:id/groups', (req, res) => {
+  const sourceId = parseInt(req.params.id)
+  const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId)
+  if (!source) return res.status(404).json({ error: 'Source not found' })
+
+  const rows = db.prepare(`
+    SELECT group_title, COUNT(*) as count
+    FROM source_channels
+    WHERE source_id = ?
+    GROUP BY group_title
+    ORDER BY group_title
+  `).all(sourceId)
+
+  const groups = rows.map(r => ({
+    name:        `${source.name} › ${r.group_title}`,
+    display:     r.group_title,
+    source_id:   sourceId,
+    source_name: source.name,
+    count:       r.count,
+  }))
+
+  const total = groups.reduce((s, g) => s + g.count, 0)
+  res.json({ groups, total, cached: groups.length > 0 })
+})
+
 // Get channels for a prefixed group key across all sources
 app.get('/api/sources/all/channels', (req, res) => {
   const groupKey = req.query.group  // e.g. "ky-tv › Sports"
+  const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null
   const limit    = Math.min(parseInt(req.query.limit  || '2000'), 5000)
   const offset   = parseInt(req.query.offset || '0')
 
-  const cacheKey = `all:${groupKey || 'all'}:${limit}:${offset}`
+  const cacheKey = `all:${sourceId || ''}:${groupKey || 'all'}:${limit}:${offset}`
   const cached = getCached(cacheKey)
   if (cached) return res.json(cached)
 
@@ -738,9 +776,22 @@ app.get('/api/sources/all/channels', (req, res) => {
   if (sepIdx === -1) return res.status(400).json({ error: 'Invalid group key format' })
   const sourceName = groupKey.slice(0, sepIdx)
   const groupTitle = groupKey.slice(sepIdx + sep.length)
-  const source = db.prepare('SELECT * FROM sources WHERE name = ?').get(sourceName)
-  if (!source) return res.status(404).json({ error: `Source "${sourceName}" not found` })
+
+  // If source_id is provided, use it directly. Otherwise look up by name (may find wrong source if duplicates exist)
+  let source
+  if (sourceId) {
+    source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId)
+    if (!source) return res.status(404).json({ error: `Source ID ${sourceId} not found` })
+  } else {
+    source = db.prepare('SELECT * FROM sources WHERE name = ?').get(sourceName)
+    if (!source) return res.status(404).json({ error: `Source "${sourceName}" not found` })
+  }
+
+  console.log(`[channels] Looking for source="${sourceName}", using source_id=${source.id}`)
+  console.log(`[channels] Querying source_id=${source.id}, group_title="${groupTitle}"`)
   const total = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ? AND group_title = ?').get(source.id, groupTitle).c
+  console.log(`[channels] Found ${total} channels`)
+
   const rows = db.prepare(
     'SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?'
   ).all(source.id, groupTitle, limit, offset)
@@ -889,6 +940,27 @@ app.delete('/api/playlists/:id', (req, res) => {
   res.json({ ok: true })
 })
 
+// Clear channel cache
+app.post('/api/cache/clear', (req, res) => {
+  channelCache.clear()
+  res.json({ ok: true, message: 'Channel cache cleared' })
+})
+
+// Clean up orphaned playlist_channels (channels whose URLs no longer exist in source_channels)
+app.post('/api/playlists/cleanup-orphans', (req, res) => {
+  const deletedCount = db.prepare(`
+    DELETE FROM playlist_channels
+    WHERE id IN (
+      SELECT pc.id FROM playlist_channels pc
+      LEFT JOIN source_channels sc ON sc.url = pc.url
+      WHERE sc.id IS NULL
+    )
+  `).run().changes
+
+  channelCache.clear()
+  res.json({ ok: true, deleted: deletedCount, message: `Removed ${deletedCount} orphaned channels` })
+})
+
 // PATCH schedule only — used by the scheduler UI
 app.patch('/api/playlists/:id/schedule', (req, res) => {
   const { schedule } = req.body
@@ -958,81 +1030,66 @@ app.get('/api/playlists/:id/channels', (req, res) => {
   res.json(channels)
 })
 
-// Get selection map for a playlist — returns { groups: {groupName: [sourceChannelId,...]}, overrides: {...} }
-// Joins playlist_channels with source_channels by URL to recover the source channel IDs the browser uses
-// groupKey format matches the browser: single-source = group_title, all-sources = "sourceName › group_title"
+// Get selected channels for a playlist — returns flat array of channel objects
 app.get('/api/playlists/:id/selection', (req, res) => {
   const playlistId = req.params.id
 
   // Get total channel count for this playlist
   const totalCount = db.prepare('SELECT COUNT(*) as count FROM playlist_channels WHERE playlist_id = ?').get(playlistId).count
 
-  // Compare playlist group counts vs source group counts.
-  // Use sc.group_title (original source group) for selection keys, not pc.group_title (renamed groups).
-  // Resolve source/group from source_channels by URL for legacy rows where source_id may be null.
-  const pcGroups = db.prepare(`
+  if (totalCount === 0) {
+    return res.json({ channels: [], totalCount: 0 })
+  }
+
+  // Fetch all selected channels as a flat array with full metadata
+  const rows = db.prepare(`
     SELECT
-      sc.group_title                        AS group_title,
-      COALESCE(pc.source_id, sc.source_id)  AS source_id,
-      s.name                                AS source_name,
-      COUNT(*)                              AS pc_count,
-      (
-        SELECT COUNT(*)
-        FROM source_channels sc2
-        WHERE sc2.source_id = COALESCE(pc.source_id, sc.source_id)
-          AND sc2.group_title = sc.group_title
-      ) AS sc_count
+      sc.id as sc_id,
+      sc.tvg_id,
+      sc.tvg_name as sc_name,
+      sc.tvg_logo,
+      sc.group_title,
+      sc.url,
+      sc.source_id,
+      sc.normalized_name,
+      sc.quality,
+      pc.sort_order,
+      pc.custom_tvg_id,
+      pc.group_title as pc_group,
+      pc.epg_source_id,
+      pc.tvg_name as pc_name,
+      s.name as source_name
     FROM playlist_channels pc
     JOIN source_channels sc ON sc.url = pc.url
-    JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+    JOIN sources s ON s.id = sc.source_id
     WHERE pc.playlist_id = ?
-      AND s.name IS NOT NULL
-      AND sc.group_title IS NOT NULL
-    GROUP BY sc.group_title, COALESCE(pc.source_id, sc.source_id), s.name
+    ORDER BY pc.sort_order, pc.id
   `).all(playlistId)
 
-  if (!pcGroups.length) return res.json({ groups: {}, overrides: {}, totalCount: 0 })
+  // Build channel objects with all metadata
+  // IMPORTANT: Use current group_title from source_channels (r.group_title), not stale playlist_channels group
+  // Only use pc_group if it's an override (different from current source group)
+  const selectedChannels = rows.map(r => ({
+    id: String(r.sc_id),
+    name: r.pc_name || r.sc_name,  // For ReviewSelectionModal compatibility
+    tvg_name: r.pc_name || r.sc_name,
+    tvg_logo: r.tvg_logo,
+    tvg_id: r.custom_tvg_id || r.tvg_id,
+    group_title: r.group_title,  // Use CURRENT group from source_channels
+    url: r.url,
+    source_id: r.source_id,
+    source_name: r.source_name,
+    normalized_name: r.normalized_name,
+    quality: r.quality,
+    sort_order: r.sort_order || 0,
+    epg_source_id: r.epg_source_id || null,
+    // Store override values
+    _override_group_title: r.pc_group && r.pc_group !== r.group_title ? r.pc_group : null,
+    _original_tvg_name: r.sc_name,
+    _original_tvg_id: r.tvg_id
+  }))
 
-  const groups = {}
-  const partialGroups = []
-
-  for (const pg of pcGroups) {
-    // Always prefix with source name — browser always uses "sourceName › groupTitle" keys
-    const grpKey = `${pg.source_name} \u203a ${pg.group_title}`
-    // Always treat as partial selection - load individual channel IDs
-    // Never auto-mark as '__all__' based on count comparison
-    partialGroups.push({ grpKey, source_id: pg.source_id, group_title: pg.group_title })
-  }
-
-  // Step 3: only do the expensive URL JOIN for partial groups (rare case)
-  const overrides = {}
-  for (const pg of partialGroups) {
-    const rows = db.prepare(`
-      SELECT sc.id as sc_id, pc.sort_order, pc.custom_tvg_id, pc.group_title as pc_group,
-             pc.epg_source_id, pc.tvg_name as pc_name, sc.tvg_name as sc_name, sc.group_title
-      FROM playlist_channels pc
-      JOIN source_channels sc ON sc.url = pc.url
-      JOIN sources s ON s.id = sc.source_id
-      WHERE pc.playlist_id = ?
-        AND s.name = ?
-        AND sc.group_title = ?
-      ORDER BY pc.sort_order, pc.id
-    `).all(playlistId, pg.grpKey.split(' › ')[0], pg.group_title)
-    const ids = []
-    for (const r of rows) {
-      ids.push(String(r.sc_id))
-      const ov = {}
-      if (r.sort_order > 0)                            ov.sort_order    = r.sort_order
-      if (r.custom_tvg_id)                             ov.custom_tvg_id = r.custom_tvg_id
-      if (r.pc_group && r.pc_group !== r.group_title)  ov.group_title   = r.pc_group
-      if (r.epg_source_id)                             ov.epg_source_id = r.epg_source_id
-      if (r.pc_name && r.pc_name !== r.sc_name)        ov.tvg_name      = r.pc_name
-      if (Object.keys(ov).length) overrides[String(r.sc_id)] = ov
-    }
-    groups[pg.grpKey] = ids
-  }
-
-  res.json({ groups, overrides, totalCount })
+  res.json({ channels: selectedChannels, totalCount })
 })
 
 // Get other source variants for a channel (by source_channel id)
@@ -1410,13 +1467,12 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
       pc.sort_order, pc.id
   `).all(playlist.id)
 
-  // For XMLTV, deduplicate by BOTH normalized_name AND epg_id
-  // This ensures channels with different EPG mappings are kept separate
-  // even if they're variants of the same channel
+  // For XMLTV, deduplicate by normalized_name only
+  // Keep the first variant (highest priority source, best quality) per normalized name
   const seen = new Set()
   const channels = allChannels.filter(ch => {
     if (!ch.normalized_name) return true // Keep channels without normalized_name
-    const key = `${ch.normalized_name}|${ch.epg_id || ''}`
+    const key = ch.normalized_name
     if (seen.has(key)) return false // Skip duplicates
     seen.add(key)
     return true
@@ -1451,6 +1507,7 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
   const channels_xml = mappedChannels.map(ch => {
     const displayName = ch.tvg_name || ch.name || 'Unknown'
     const logo = ch.tvg_logo || ch.custom_logo || ''
+    const groupTitle = ch.group_title || ''
 
     // Use epg_id which is already calculated in the SQL query
     // This is either custom_tvg_id, mapped tvg_id, or original tvg_id
@@ -1463,6 +1520,10 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
       const proxyLogoUrl = `http://${req.headers.host}/api/logo?url=${encodeURIComponent(logo)}`
       xml += `\n    <icon src="${escapeXml(proxyLogoUrl)}" />`
     }
+    // Add group as category if set in Review & Group
+    if (groupTitle) {
+      xml += `\n    <category>${escapeXml(groupTitle)}</category>`
+    }
 
     xml += `\n  </channel>`
     return xml
@@ -1470,15 +1531,54 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
 
   // Get programme data from cache and scraper
   const programmes_xml = []
-  const wantedIds = new Set(epgIds)
 
-  // Create a mapping between EPG IDs and original channel IDs
-  const idMapping = {}
+  // Load EPG mappings to map source_tvg_id -> target_tvg_id
+  const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings').all()
+  const sourceToTargetMap = {}
+  epgMappings.forEach(m => {
+    sourceToTargetMap[m.source_tvg_id] = m.target_tvg_id
+  })
+
+  // Build set of wanted channel IDs - include source_tvg_id, target_tvg_id, and custom_tvg_id
+  const wantedIds = new Set()
+  const idToEpgId = {}
+
   mappedChannels.forEach(ch => {
-    const primaryId = ch.tvg_id || ch.custom_tvg_id || ch.epg_id
-    if (ch.epg_id && ch.epg_id !== primaryId) {
-      idMapping[ch.epg_id] = primaryId
+    // The final epg_id used in channel definitions
+    const finalEpgId = ch.epg_id
+
+    // Add the final epg_id to wanted set
+    wantedIds.add(finalEpgId)
+    idToEpgId[finalEpgId] = finalEpgId
+
+    // Add original tvg_id and map it to final epg_id
+    if (ch.tvg_id && ch.tvg_id !== finalEpgId) {
+      wantedIds.add(ch.tvg_id)
+      idToEpgId[ch.tvg_id] = finalEpgId
     }
+
+    // Add custom_tvg_id and map it to final epg_id
+    if (ch.custom_tvg_id && ch.custom_tvg_id !== finalEpgId) {
+      wantedIds.add(ch.custom_tvg_id)
+      idToEpgId[ch.custom_tvg_id] = finalEpgId
+    }
+
+    // If there's an EPG mapping for this channel's tvg_id, add the source_tvg_id
+    // This allows matching programmes that use the original EPG source ID
+    if (ch.tvg_id && sourceToTargetMap[ch.tvg_id]) {
+      // ch.tvg_id is a source_tvg_id that maps to a target
+      // Programmes in cache use source_tvg_id, so add it to wanted set
+      wantedIds.add(ch.tvg_id)
+      idToEpgId[ch.tvg_id] = finalEpgId
+    }
+
+    // Also check if any source_tvg_id maps to this channel's final epg_id
+    Object.entries(sourceToTargetMap).forEach(([sourceId, targetId]) => {
+      if (targetId === finalEpgId || targetId === ch.tvg_id || targetId === ch.custom_tvg_id) {
+        wantedIds.add(sourceId)
+        idToEpgId[sourceId] = finalEpgId
+      }
+    })
   })
 
   // Get TMDB enrichment data
@@ -1491,13 +1591,12 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
     while ((m = progRe.exec(row.content)) !== null) {
       const channelId = m[1]
       if (wantedIds.has(channelId)) {
-        // If the programme uses an EPG ID that we've mapped to a primary ID,
-        // update the channel attribute to use the primary ID
         let progContent = m[0]
 
-        // Update channel ID if needed
-        if (idMapping[channelId]) {
-          progContent = progContent.replace(`channel="${channelId}"`, `channel="${idMapping[channelId]}"`)
+        // Replace channel ID with mapped epg_id if needed
+        const targetEpgId = idToEpgId[channelId]
+        if (targetEpgId && targetEpgId !== channelId) {
+          progContent = progContent.replace(`channel="${channelId}"`, `channel="${targetEpgId}"`)
         }
 
         // Parse and apply TMDB enrichment

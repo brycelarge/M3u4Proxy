@@ -51,6 +51,9 @@ services:
       - NAME_SERVERS=${NAME_SERVERS:-}
       # Comma-separated CIDRs to route outside the tunnel (optional)
       - LOCAL_NETWORK=${LOCAL_NETWORK:-}
+      # Comma-separated domains to bypass VPN (e.g., EPG sources)
+      # Domains will be resolved to IPs and routed through the default gateway
+      - OPENVPN_BYPASS_DOMAINS=${OPENVPN_BYPASS_DOMAINS:-}
 
       # ── Privoxy ───────────────────────────────────────────────────────────────
       - PRIVOXY_ENABLED=${PRIVOXY_ENABLED:-false}

@@ -106,15 +106,24 @@ export async function fetchAndParseM3U(url) {
  * Fetch channels from Xtream Codes API.
  * Fetches Live TV, VOD (movies), and Series in parallel.
  */
-export async function fetchXtreamChannels(url, username, password, skipRules = []) {
+export async function fetchXtreamChannels(url, username, password, skipRules = [], skipVodRefresh = false) {
   const base = url.replace(/\/$/, '')
 
-  // Fetch all three content types in parallel
-  const [liveChannels, vodChannels, seriesChannels] = await Promise.all([
-    fetchLiveStreams(base, username, password).catch(() => []),
-    fetchVodStreams(base, username, password).catch(() => []),
-    fetchSeriesStreams(base, username, password, skipRules).catch(() => [])
-  ])
+  // Fetch Live TV always, skip VOD/Series if skipVodRefresh is true
+  const liveChannels = await fetchLiveStreams(base, username, password).catch(() => [])
+
+  let vodChannels = []
+  let seriesChannels = []
+
+  if (!skipVodRefresh) {
+    // Fetch VOD and Series in parallel only if not skipping
+    [vodChannels, seriesChannels] = await Promise.all([
+      fetchVodStreams(base, username, password).catch(() => []),
+      fetchSeriesStreams(base, username, password, skipRules).catch(() => [])
+    ])
+  } else {
+    console.log('[xtream] Skipping VOD and Series refresh - using existing cached content')
+  }
 
   // Return separated by content type so caller can handle each independently
   return {
