@@ -204,8 +204,10 @@ onMounted(load)
               <span :class="['text-[10px] font-semibold px-2 py-0.5 rounded-full border',
                 p.playlist_type === 'vod'
                   ? 'bg-purple-500/15 border-purple-500/30 text-purple-300'
+                  : p.playlist_type === 'composite'
+                  ? 'bg-indigo-500/15 border-indigo-500/30 text-indigo-300'
                   : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300']"
-              >{{ p.playlist_type === 'vod' ? 'VOD' : 'Live' }}</span>
+              >{{ p.playlist_type === 'vod' ? 'VOD' : p.playlist_type === 'composite' ? 'Composite' : 'Live' }}</span>
             </td>
             <!-- Name + M3U URL + groups preview -->
             <td class="px-5 py-4">
@@ -352,8 +354,16 @@ onMounted(load)
                       : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:border-slate-500']">
                   🎬 VOD
                 </button>
+                <button type="button" @click="form.playlist_type = 'composite'"
+                  :class="['flex-1 py-2 text-xs font-semibold rounded-xl border transition-colors',
+                    form.playlist_type === 'composite'
+                      ? 'bg-indigo-500/20 border-indigo-500/50 text-indigo-300'
+                      : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:border-slate-500']">
+                  🎬 Composite
+                </button>
               </div>
               <p v-if="form.playlist_type === 'vod'" class="text-[10px] text-slate-600 mt-1">VOD playlists are managed via the VOD Playlists page and excluded from EPG mapping</p>
+              <p v-if="form.playlist_type === 'composite'" class="text-[10px] text-slate-600 mt-1">Composite playlists contain channels for multi-view composite streaming</p>
             </div>
 
             <!-- Auto-generated M3U URL — only shown when editing an existing playlist -->

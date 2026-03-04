@@ -347,7 +347,7 @@ export function registerHdhrRoutes(app) {
   // ── API: list all virtual devices ────────────────────────────────────────
   app.get('/api/hdhr/devices', (req, res) => {
     const base      = getBaseUrl(req)
-    const playlists = db.prepare('SELECT id, name, channel_count FROM playlists ORDER BY id').all()
+    const playlists = db.prepare("SELECT id, name, channel_count FROM playlists WHERE playlist_type != 'composite' OR playlist_type IS NULL ORDER BY id").all()
     res.json(playlists.map(p => ({
       playlist_id:   p.id,
       playlist_name: p.name,

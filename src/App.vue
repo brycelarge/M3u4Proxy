@@ -12,6 +12,7 @@ import EpgScraperPage     from './pages/EpgScraperPage.vue'
 import StreamsPage        from './pages/StreamsPage.vue'
 import SettingsPage       from './pages/SettingsPage.vue'
 import UsersPage          from './pages/UsersPage.vue'
+import CompositeStreamsPage from './pages/CompositeStreamsPage.vue'
 
 const page      = ref('browser')
 const theme     = ref('dark')
@@ -41,6 +42,7 @@ const NAV = [
   { id: 'browser',      label: 'Channel Browser',  icon: '📺' },
   { id: 'playlists',    label: 'Playlists',        icon: '📝' },
   { id: 'epg-mappings', label: 'EPG Mappings',     icon: '🗺️' },
+  { id: 'composite-streams', label: 'Composite Streams', icon: '🎬' },
   { id: 'users',        label: 'Users',            icon: '👤' },
   { id: 'settings',     label: 'Settings',         icon: '⚙️' },
 ]
@@ -204,6 +206,7 @@ onUnmounted(() => {
     <ChannelBrowserPage v-if="page === 'browser'"       class="flex-1 overflow-hidden flex flex-col" />
     <SourcesPage        v-else-if="page === 'sources'"       class="flex-1 overflow-y-auto" />
     <PlaylistsPage      v-else-if="page === 'playlists'"     class="flex-1 overflow-y-auto" />
+    <CompositeStreamsPage v-else-if="page === 'composite-streams'" class="flex-1 overflow-y-auto" />
     <StreamsPage        v-else-if="page === 'streams'"       class="flex-1 overflow-y-auto" />
     <UsersPage          v-else-if="page === 'users'"          class="flex-1 overflow-y-auto" />
     <SettingsPage       v-else-if="page === 'settings'"      class="flex-1 overflow-y-auto" />

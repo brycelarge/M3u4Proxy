@@ -166,7 +166,7 @@ async function loadAll() {
     api.getEpgMappings(),
     fetch('/api/epg/sources').then(r => r.json()),
   ])
-  if (pl.status === 'fulfilled') playlists.value  = pl.value
+  if (pl.status === 'fulfilled') playlists.value = pl.value.filter(p => p.playlist_type === 'live')
   if (mp.status === 'fulfilled') mappings.value   = mp.value
   if (es.status === 'fulfilled') epgSources.value = es.value
   if (!selectedPl.value && playlists.value.length) {
@@ -575,7 +575,7 @@ watch(tab, async (newTab) => {
     console.log('[tmdb-watch] Switched to TMDB tab, selectedPl:', selectedPl.value)
     // Auto-select first playlist if none selected
     if (!selectedPl.value && playlists.value.length > 0) {
-      selectedPl.value = String(playlists.value.filter(p => p.playlist_type !== 'vod')[0]?.id || '')
+      selectedPl.value = String(playlists.value.filter(p => p.playlist_type !== 'vod' && p.playlist_type !== 'composite')[0]?.id || '')
       console.log('[tmdb-watch] Auto-selected playlist:', selectedPl.value)
     }
     // Load titles if we have a playlist
@@ -590,7 +590,7 @@ onMounted(async () => {
   await loadEnrichStatus()
   // If TMDB tab is active on mount and we have playlists, load titles
   if (tab.value === 'tmdb' && playlists.value.length > 0 && !selectedPl.value) {
-    selectedPl.value = String(playlists.value.filter(p => p.playlist_type !== 'vod')[0]?.id || '')
+    selectedPl.value = String(playlists.value.filter(p => p.playlist_type !== 'vod' && p.playlist_type !== 'composite')[0]?.id || '')
     if (selectedPl.value) {
       await loadTmdbTitles()
     }
@@ -631,7 +631,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
         <select v-model="selectedPl"
           class="bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-1.5 text-xs text-slate-200 outline-none focus:border-indigo-500">
           <option value="" disabled>Select playlist…</option>
-          <option v-for="p in playlists.filter(p => p.playlist_type !== 'vod')" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
+          <option v-for="p in playlists.filter(p => p.playlist_type !== 'vod' && p.playlist_type !== 'composite')" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
         </select>
 
         <select v-if="epgSources.length > 1" v-model="selectedEpgSource"
@@ -991,7 +991,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
         <select v-model="selectedPl" @change="loadTmdbTitles"
           class="px-3 py-1.5 text-xs bg-[#22263a] border border-[#2e3250] rounded-lg text-slate-200 outline-none focus:border-indigo-500">
           <option value="" disabled>Select playlist…</option>
-          <option v-for="p in playlists.filter(p => p.playlist_type !== 'vod')" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
+          <option v-for="p in playlists.filter(p => p.playlist_type !== 'vod' && p.playlist_type !== 'composite')" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
         </select>
 
         <select v-model="tmdbFilterStatus"

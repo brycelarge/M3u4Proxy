@@ -9,6 +9,7 @@ A full-stack IPTV playlist manager that makes IPTV easy. Supports many feeds and
 - **Sources** — save multiple M3U URLs and Xtream Codes connections with optional cron refresh schedules
 - **Channel Browser** — browse source channels by group with virtual scrolling, card or table view, and select content for your playlists
 - **Playlists** — create named playlists (e.g. "Live TV", "VOD"), set an output path and rebuild schedule with automatic generation
+- **Composite Streams** — create multi-view streams with picture-in-picture layouts, multiple audio tracks, and real-time FFmpeg compositing for sports-style broadcasts
 - **EPG Scraper** — If your IPTV provider has incomplete EPG data, then EPG Scraper is built right in to the application to scrape known sources for missing EPG data and map it to your channels
 - **EPG Mappings** — override `tvg-id` values to fix EPG matching between channels and guide data
 - **EPG Guide** — 24-hour TV guide with live playback support for mapped channels
@@ -58,7 +59,7 @@ Manage your custom playlists and configure output settings.
 
 **What it does:**
 - View and edit playlist details
-- Set playlist type (live or vod)
+- Set playlist type (live, vod, or composite)
 - Configure output path for M3U files
 - Set automatic rebuild schedules
 - Download M3U files
@@ -67,6 +68,7 @@ Manage your custom playlists and configure output settings.
 **Types:**
 - **Live** - Live TV channels
 - **VOD** - Video on demand content
+- **Composite** - Channels for multi-view composite streaming
 
 ### 4. **EPG Mappings**
 Fine-tune EPG data matching for accurate TV guide information.
@@ -82,7 +84,41 @@ Fine-tune EPG data matching for accurate TV guide information.
 - EPG data not appearing for channels
 - Multiple channels sharing same EPG ID
 
-### 5. **EPG Guide**
+### 5. **Composite Streams**
+Create multi-view streams with picture-in-picture layouts for sports-style broadcasts.
+
+**What it does:**
+- Combine multiple video sources into one stream
+- Real-time FFmpeg compositing with HLS output
+- Multiple audio tracks (switch in player)
+- Built-in layout presets (Main+PiP, Quad Split, etc.)
+- Visual editor with channel picker
+- Uses channels from "Composite" playlists
+
+**Workflow:**
+1. Create a "Composite" playlist in Playlists page
+2. Add channels to it via Channel Browser
+3. Create composite stream and select channels from that playlist
+
+**Use Cases:**
+- Sports broadcasts with multiple camera angles
+- Multi-game viewing (watch 4 games simultaneously)
+- Main feed + stats/commentary feeds
+- Racing with driver cams + main broadcast
+
+**Layout Presets:**
+- **Main + PiP Right** - Main feed with 2 PiPs on right
+- **Quad Split** - 4 equal sources in 2x2 grid
+- **Main + PiP Grid** - Main feed with 4 small PiPs
+- **Side by Side** - 2 equal sources split vertically
+
+**Performance:**
+- Requires FFmpeg with libx264 and aac codecs
+- 2-4 CPU cores per concurrent stream
+- Recommended: tmpfs (RAM disk) for `/transcode` volume
+- See `COMPOSITE_STREAMING_DEPLOYMENT.md` for setup
+
+### 6. **EPG Guide**
 View a 24-hour TV guide for your mapped channels with live playback.
 
 **What it does:**
@@ -98,7 +134,7 @@ View a 24-hour TV guide for your mapped channels with live playback.
 - Supports HLS and MPEG-TS streams
 - Auto-updates every 30 seconds
 
-### 6. **Active Streams**
+### 7. **Active Streams**
 Monitor currently active stream sessions.
 
 **What it does:**
@@ -107,7 +143,7 @@ Monitor currently active stream sessions.
 - Kill stuck sessions
 - Monitor bandwidth usage
 
-### 7. **Users**
+### 8. **Users**
 Manage user accounts and access control.
 
 **What it does:**
@@ -116,7 +152,7 @@ Manage user accounts and access control.
 - Configure expiration dates
 - Track last connection times
 
-### 8. **Settings**
+### 9. **Settings**
 Configure application settings and integrations.
 
 **What it does:**
@@ -189,7 +225,18 @@ m3u4prox:
     - "3005:3005"
   volumes:
     - ./data:/data      # All application data (DB, output, EPG, configs, etc.)
+    - type: tmpfs       # Transcode directory for composite streams (RAM disk recommended)
+      target: /transcode
+      tmpfs:
+        size: 4G        # 1-2GB per concurrent composite stream
 ```
+
+**Transcode Volume Options:**
+- **tmpfs (RAM)** - Recommended for best performance and zero disk wear
+- **SSD path** - Good alternative: `/mnt/cache/appdata/m3u4prox/transcode:/transcode`
+- **Regular disk** - Fallback only: `./transcode:/transcode`
+
+See `docker-compose.transcode-example.yml` and `TRANSCODE_VOLUME_SETUP.md` for detailed configuration.
 
 ---
 
@@ -229,6 +276,7 @@ The OpenVPN integration is built using [openvpn-buildtools](https://github.com/b
 | Variable | Default | Description |
 |---|---|---|
 | `DATA_DIR` | `./data` | Directory for all application data (DB, playlists, EPG) |
+| `TRANSCODE_DIR` | `/transcode` | Directory for HLS segments (composite streams) - use tmpfs/SSD |
 | `ADMIN_PASSWORD` | `admin` | Admin login password |
 | `TMDB_API_KEY` | - | TMDB API key for EPG enrichment (optional) |
 | `HOST_IP` | - | Host IP for HDHomeRun discovery (optional) |

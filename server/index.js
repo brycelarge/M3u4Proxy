@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import cron from 'node-cron'
-import path from 'node:path'
+import path, { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
 import { gzipSync, gunzipSync } from 'node:zlib'
@@ -751,6 +751,72 @@ app.get('/api/sources/:id/groups', (req, res) => {
   res.json({ groups, total, cached: groups.length > 0 })
 })
 
+// Get channels for a specific source and group
+app.get('/api/sources/:id/channels', (req, res) => {
+  const sourceId = parseInt(req.params.id)
+  let groupTitle = req.query.group
+  const limit = Math.min(parseInt(req.query.limit || '2000'), 5000)
+  const offset = parseInt(req.query.offset || '0')
+
+  const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId)
+  if (!source) return res.status(404).json({ error: 'Source not found' })
+
+  // Handle prefixed group names (e.g., "source › Sports" -> "Sports")
+  if (groupTitle && groupTitle.includes(' › ')) {
+    groupTitle = groupTitle.split(' › ')[1]
+  }
+
+  const cacheKey = `source:${sourceId}:${groupTitle || 'all'}:${limit}:${offset}`
+  const cached = getCached(cacheKey)
+  if (cached) return res.json(cached)
+
+  let total, rows
+  if (!groupTitle) {
+    // Get all channels from this source
+    total = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ?').get(sourceId).c
+    rows = db.prepare(`
+      SELECT id, tvg_id, tvg_name, tvg_logo, group_title, url, source_id, normalized_name, quality, raw_extinf
+      FROM source_channels
+      WHERE source_id = ?
+      ORDER BY id
+      LIMIT ? OFFSET ?
+    `).all(sourceId, limit, offset)
+  } else {
+    // Get channels for specific group
+    total = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ? AND group_title = ?').get(sourceId, groupTitle).c
+    rows = db.prepare(`
+      SELECT id, tvg_id, tvg_name, tvg_logo, group_title, url, source_id, normalized_name, quality, raw_extinf
+      FROM source_channels
+      WHERE source_id = ? AND group_title = ?
+      ORDER BY id
+      LIMIT ? OFFSET ?
+    `).all(sourceId, groupTitle, limit, offset)
+  }
+
+  const result = {
+    total,
+    offset,
+    limit,
+    channels: rows.map(r => ({
+      id: String(r.id),
+      name: r.tvg_name,
+      logo: r.tvg_logo,
+      group: `${source.name} › ${r.group_title}`,
+      group_title: r.group_title,
+      source_id: r.source_id,
+      source_name: source.name,
+      url: r.url,
+      tvg_id: r.tvg_id,
+      normalized_name: r.normalized_name,
+      quality: r.quality,
+      raw: r.raw_extinf,
+    }))
+  }
+
+  setCache(cacheKey, result)
+  res.json(result)
+})
+
 // Get channels for a prefixed group key across all sources
 app.get('/api/sources/all/channels', (req, res) => {
   const groupKey = req.query.group  // e.g. "ky-tv › Sports"
@@ -791,7 +857,6 @@ app.get('/api/sources/all/channels', (req, res) => {
   const sep = ' › '
   const sepIdx = groupKey.indexOf(sep)
   if (sepIdx === -1) return res.status(400).json({ error: 'Invalid group key format' })
-  const sourceName = groupKey.slice(0, sepIdx)
   const groupTitle = groupKey.slice(sepIdx + sep.length)
 
   // If source_id is provided, use it directly. Otherwise look up by name (may find wrong source if duplicates exist)
@@ -800,14 +865,12 @@ app.get('/api/sources/all/channels', (req, res) => {
     source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId)
     if (!source) return res.status(404).json({ error: `Source ID ${sourceId} not found` })
   } else {
+    const sourceName = groupKey.slice(0, sepIdx)
     source = db.prepare('SELECT * FROM sources WHERE name = ?').get(sourceName)
     if (!source) return res.status(404).json({ error: `Source "${sourceName}" not found` })
   }
 
-  console.log(`[channels] Looking for source="${sourceName}", using source_id=${source.id}`)
-  console.log(`[channels] Querying source_id=${source.id}, group_title="${groupTitle}"`)
   const total = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ? AND group_title = ?').get(source.id, groupTitle).c
-  console.log(`[channels] Found ${total} channels`)
 
   const rows = db.prepare(
     'SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?'
@@ -821,7 +884,7 @@ app.get('/api/sources/all/channels', (req, res) => {
       group:           groupKey,
       group_title:     r.group_title,
       source_id:       r.source_id,
-      source_name:     sourceName,
+      source_name:     source.name,
       url:             r.url,
       tvg_id:          r.tvg_id,
       normalized_name: r.normalized_name,
@@ -1454,6 +1517,7 @@ app.get('/api/playlists/:id/m3u', async (req, res) => {
 app.get('/api/playlists/:id/xmltv', (req, res) => {
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
+  if (playlist.playlist_type === 'composite') return res.status(400).json({ error: 'XMLTV not available for composite playlists' })
 
   // Get all channels with their normalized names and deduplicate
   const allChannels = db.prepare(`
@@ -1823,9 +1887,12 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
     const { playlist_id } = req.query
     if (!playlist_id) return res.status(400).json({ error: 'playlist_id required' })
 
-    // Check if playlist exists
-    const playlist = db.prepare('SELECT id, name FROM playlists WHERE id = ?').get(playlist_id)
+    // Check if playlist exists and is a live playlist
+    const playlist = db.prepare('SELECT id, name, playlist_type FROM playlists WHERE id = ?').get(playlist_id)
     if (!playlist) return res.status(404).json({ error: `Playlist with ID ${playlist_id} not found` })
+    if (playlist.playlist_type !== 'live') {
+      return res.status(400).json({ error: 'EPG mappings only available for live playlists' })
+    }
 
     // Get playlist channels, deduplicated by normalized_name (one channel per normalized name)
     // Use SAME ordering as M3U export to ensure we show the same channels
@@ -4244,8 +4311,240 @@ app.delete('/api/users/:id', (req, res) => {
   res.json({ ok: true })
 })
 
+// ── Composite Streams ─────────────────────────────────────────────────────────
+import { getCompositeSession, stopCompositeSession, getActiveSessions as getActiveCompositeSessions, LAYOUT_PRESETS } from './composite-streamer.js'
+
+// Get all composite streams
+app.get('/api/composite-streams', (req, res) => {
+  const streams = db.prepare(`
+    SELECT cs.*,
+      (SELECT COUNT(*) FROM composite_stream_sources WHERE composite_stream_id = cs.id) as source_count
+    FROM composite_streams cs
+    ORDER BY cs.created_at DESC
+  `).all()
+  res.json(streams)
+})
+
+// Get layout presets (must be before /:id route)
+app.get('/api/composite-streams/presets', (req, res) => {
+  res.json(LAYOUT_PRESETS)
+})
+
+// Get single composite stream with sources
+app.get('/api/composite-streams/:id', (req, res) => {
+  const stream = db.prepare('SELECT * FROM composite_streams WHERE id = ?').get(req.params.id)
+  if (!stream) return res.status(404).json({ error: 'Composite stream not found' })
+
+  const sources = db.prepare(`
+    SELECT css.*, pc.tvg_name, pc.tvg_logo, pc.group_title
+    FROM composite_stream_sources css
+    JOIN playlist_channels pc ON css.source_channel_id = pc.id
+    WHERE css.composite_stream_id = ?
+    ORDER BY css.role
+  `).all(req.params.id)
+
+  res.json({ ...stream, sources })
+})
+
+// Create composite stream
+app.post('/api/composite-streams', (req, res) => {
+  const { name, description, layout_config, audio_config, sources } = req.body
+
+  if (!name || !layout_config || !sources || sources.length === 0) {
+    return res.status(400).json({ error: 'Missing required fields' })
+  }
+
+  try {
+    const insert = db.transaction(() => {
+      const result = db.prepare(`
+        INSERT INTO composite_streams (name, description, layout_config, audio_config)
+        VALUES (?, ?, ?, ?)
+      `).run(name, description || '', JSON.stringify(layout_config), JSON.stringify(audio_config || {}))
+
+      const compositeId = result.lastInsertRowid
+
+      const insertSource = db.prepare(`
+        INSERT INTO composite_stream_sources
+        (composite_stream_id, source_channel_id, role, position_x, position_y, width, height)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+
+      for (const source of sources) {
+        insertSource.run(
+          compositeId,
+          source.channelId,
+          source.role,
+          source.position?.x || 0,
+          source.position?.y || 0,
+          source.position?.w || 0,
+          source.position?.h || 0
+        )
+      }
+
+      return compositeId
+    })
+
+    const compositeId = insert()
+    res.json({ id: compositeId, ok: true })
+  } catch (error) {
+    console.error('[composite] Create failed:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Update composite stream
+app.put('/api/composite-streams/:id', (req, res) => {
+  const { name, description, layout_config, audio_config, sources, active } = req.body
+  const compositeId = req.params.id
+
+  try {
+    const update = db.transaction(() => {
+      db.prepare(`
+        UPDATE composite_streams
+        SET name = ?, description = ?, layout_config = ?, audio_config = ?, active = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(
+        name,
+        description || '',
+        JSON.stringify(layout_config),
+        JSON.stringify(audio_config || {}),
+        active !== undefined ? (active ? 1 : 0) : 1,
+        compositeId
+      )
+
+      if (sources) {
+        db.prepare('DELETE FROM composite_stream_sources WHERE composite_stream_id = ?').run(compositeId)
+
+        const insertSource = db.prepare(`
+          INSERT INTO composite_stream_sources
+          (composite_stream_id, source_channel_id, role, position_x, position_y, width, height)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `)
+
+        for (const source of sources) {
+          insertSource.run(
+            compositeId,
+            source.channelId,
+            source.role,
+            source.position?.x || 0,
+            source.position?.y || 0,
+            source.position?.w || 0,
+            source.position?.h || 0
+          )
+        }
+      }
+    })
+
+    update()
+    res.json({ ok: true })
+  } catch (error) {
+    console.error('[composite] Update failed:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Delete composite stream
+app.delete('/api/composite-streams/:id', async (req, res) => {
+  try {
+    await stopCompositeSession(parseInt(req.params.id))
+    db.prepare('DELETE FROM composite_streams WHERE id = ?').run(req.params.id)
+    res.json({ ok: true })
+  } catch (error) {
+    console.error('[composite] Delete failed:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Get composite stream HLS playlist
+app.get('/api/composite-streams/:id/stream', async (req, res) => {
+  try {
+    const compositeId = parseInt(req.params.id)
+    const session = await getCompositeSession(compositeId, db, req.username)
+
+    const clientId = `${req.ip}-${Date.now()}`
+    session.addClient(clientId)
+
+    req.on('close', () => session.removeClient(clientId))
+
+    const playlistUrl = `/composite-stream/${compositeId}/playlist.m3u8`
+    res.json({ url: playlistUrl, status: session.getStatus() })
+  } catch (error) {
+    console.error('[composite] Stream start failed:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Serve HLS playlist
+app.get('/composite-stream/:id/playlist.m3u8', async (req, res) => {
+  try {
+    const compositeId = parseInt(req.params.id)
+    const session = await getCompositeSession(compositeId, db, req.username)
+
+    const playlistPath = join(session.outputPath, 'playlist.m3u8')
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl')
+    res.sendFile(playlistPath)
+  } catch (error) {
+    console.error('[composite] Playlist serve failed:', error)
+    res.status(404).json({ error: error.message })
+  }
+})
+
+// Serve HLS segments
+app.get('/composite-stream/:id/:segment', async (req, res) => {
+  try {
+    const compositeId = parseInt(req.params.id)
+    const session = await getCompositeSession(compositeId, db, req.username)
+
+    const segmentPath = join(session.outputPath, req.params.segment)
+    res.setHeader('Content-Type', 'video/mp2t')
+    res.sendFile(segmentPath)
+  } catch (error) {
+    console.error('[composite] Segment serve failed:', error)
+    res.status(404).json({ error: error.message })
+  }
+})
+
+// Get active sessions status
+app.get('/api/composite-streams/sessions/active', (req, res) => {
+  res.json(getActiveCompositeSessions())
+})
+
+// Stop a composite session
+app.post('/api/composite-streams/:id/stop', async (req, res) => {
+  try {
+    await stopCompositeSession(parseInt(req.params.id))
+    res.json({ ok: true })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Internal stream endpoint for FFmpeg to read from
+app.get('/internal-stream/composite-:compositeId-:role', async (req, res) => {
+  const { compositeId, role } = req.params
+
+  try {
+    const source = db.prepare(`
+      SELECT css.*, pc.url, pc.tvg_name, pc.source_id
+      FROM composite_stream_sources css
+      JOIN playlist_channels pc ON css.source_channel_id = pc.id
+      WHERE css.composite_stream_id = ? AND css.role = ?
+    `).get(compositeId, role)
+
+    if (!source) {
+      return res.status(404).json({ error: 'Source not found' })
+    }
+
+    // Use streamer.js to open stream (enables session sharing and buffering)
+    await connectClient(source.source_channel_id, source.url, source.tvg_name, res, source.source_id, req.username)
+  } catch (error) {
+    console.error('[internal-stream] Failed:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
 // ── Backup & Restore ──────────────────────────────────────────────────────────
-const BACKUP_TABLES = ['sources', 'playlists', 'playlist_channels', 'epg_mappings', 'settings', 'epg_site_channels', 'users', 'stream_history', 'admin_sessions', 'failed_streams', 'source_channels', 'epg_cache', 'hdhr_devices']
+const BACKUP_TABLES = ['sources', 'playlists', 'playlist_channels', 'epg_mappings', 'settings', 'epg_site_channels', 'users', 'stream_history', 'admin_sessions', 'failed_streams', 'source_channels', 'epg_cache', 'hdhr_devices', 'composite_streams', 'composite_stream_sources']
 
 // GET /api/backup — download a gzipped JSON bundle of all data
 app.get('/api/backup', (req, res) => {

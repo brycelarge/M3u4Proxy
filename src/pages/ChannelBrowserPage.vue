@@ -111,8 +111,14 @@ async function deletePlaylist() {
 }
 
 async function saveAndRefresh() {
+  if (!activePlaylistId.value) {
+    alert('Please select a playlist first from the dropdown above')
+    return
+  }
   await saveToPlaylist()
-  allPlaylists.value = await api.getPlaylists()
+  if (!saveError.value) {
+    allPlaylists.value = await api.getPlaylists()
+  }
 }
 
 async function buildAndRefresh() {
@@ -429,8 +435,17 @@ function onSetName(payload) {
                 >
                   🎬 VOD
                 </button>
+                <button
+                  @click="playlistForm.type = 'composite'"
+                  :class="['flex-1 px-4 py-2.5 text-sm rounded-xl transition-colors font-medium',
+                    playlistForm.type === 'composite'
+                      ? 'bg-indigo-500 text-white'
+                      : 'bg-[#22263a] text-slate-400 hover:text-slate-200 border border-[#2e3250]']"
+                >
+                  🎬 Composite
+                </button>
               </div>
-              <p class="text-xs text-slate-600 mt-1.5">Live for TV channels, VOD for movies/series</p>
+              <p class="text-xs text-slate-600 mt-1.5">Live for TV channels, VOD for movies/series, Composite for multi-view streams</p>
             </div>
           </div>
 

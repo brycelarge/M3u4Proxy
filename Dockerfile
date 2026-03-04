@@ -19,6 +19,7 @@ ARG OPENVPN_TOOLS_REF=main
 ENV TZ=UTC \
     PORT=3005 \
     DATA_DIR=/data \
+    TRANSCODE_DIR=/transcode \
     DNS_SERVERS=1.1.1.1,8.8.8.8
 
 RUN apk add --no-cache \
@@ -67,12 +68,13 @@ RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
 RUN addgroup --system m3u4prox && \
     adduser --disabled-password --home /app --ingroup m3u4prox --no-create-home --system m3u4prox && \
     mkdir -p /data/db /data/epg/tmp /data/epg-sites /data/logs/m3u4prox /data/logos /data/playlists /data/config /data/vod-strm && \
+    mkdir -p /transcode && \
     ln -sf /data/epg /epg && \
     ln -sf /data/epg-sites /epg-sites && \
-    chown -R m3u4prox:m3u4prox /data && \
-    chmod -R 755 /data
+    chown -R m3u4prox:m3u4prox /data /transcode && \
+    chmod -R 755 /data /transcode
 
-VOLUME ["/data"]
+VOLUME ["/data", "/transcode"]
 
 EXPOSE 3005
 EXPOSE 8118/tcp

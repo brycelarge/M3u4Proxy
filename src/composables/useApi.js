@@ -133,4 +133,15 @@ export const api = {
 
   // Source Channel Variants
   getSourceChannelVariants: (id)    => request('GET', `/source-channels/${id}/variants`),
+
+  // Composite Streams
+  getCompositeStreams:     ()           => request('GET',    '/composite-streams'),
+  getCompositeStream:      (id)         => request('GET',    `/composite-streams/${id}`),
+  createCompositeStream:   (data)       => request('POST',   '/composite-streams', data),
+  updateCompositeStream:   (id, data)   => request('PUT',    `/composite-streams/${id}`, data),
+  deleteCompositeStream:   (id)         => request('DELETE', `/composite-streams/${id}`),
+  startCompositeStream:    (id)         => request('GET',    `/composite-streams/${id}/stream`),
+  stopCompositeStream:     (id)         => request('POST',   `/composite-streams/${id}/stop`),
+  getActiveSessions:       ()           => request('GET',    '/composite-streams/sessions/active'),
+  getLayoutPresets:        ()           => request('GET',    '/composite-streams/presets'),
 }

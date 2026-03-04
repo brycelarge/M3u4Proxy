@@ -456,15 +456,23 @@ export function useBrowser() {
           // Find the source_id for this group to avoid duplicate source name issues
           const group = groups.value.find(g => g.name === groupName)
           const sourceId = group?.source_id
+          console.log('Loading channels for All Sources:', { groupName, sourceId, group })
           res = await api.getAllSourceChannels(groupName, PAGE_SIZE, 0, sourceId)
+          console.log('Channels response:', res)
         } else if (activeSourceId.value) {
-          res = await api.getSourceChannels(activeSourceId.value, groupName, PAGE_SIZE, 0)
+          // Extract group_title from prefixed name (e.g., "source › Sports" -> "Sports")
+          const group = groups.value.find(g => g.name === groupName)
+          const groupTitle = group?.display || groupName.split(' › ')[1] || groupName
+          res = await api.getSourceChannels(activeSourceId.value, groupTitle, PAGE_SIZE, 0)
         }
       }
 
       if (res) {
         channels.value = res.channels ?? res
         groupTotal.value = res.total ?? channels.value.length
+        console.log('Set channels:', channels.value.length, 'total:', groupTotal.value)
+      } else {
+        console.warn('No response from API')
       }
       if (!(groupName in selectionMap.value)) {
         selectionMap.value = { ...selectionMap.value, [groupName]: new Set() }
@@ -495,7 +503,10 @@ export function useBrowser() {
         const sourceId = group?.source_id
         res = await api.getAllSourceChannels(activeGroup.value, PAGE_SIZE, offset, sourceId)
       } else if (activeSourceId.value) {
-        res = await api.getSourceChannels(activeSourceId.value, activeGroup.value, PAGE_SIZE, offset)
+        // Extract group_title from prefixed name
+        const group = groups.value.find(g => g.name === activeGroup.value)
+        const groupTitle = group?.display || activeGroup.value.split(' › ')[1] || activeGroup.value
+        res = await api.getSourceChannels(activeSourceId.value, groupTitle, PAGE_SIZE, offset)
       }
 
       if (res) channels.value = [...channels.value, ...(res.channels ?? res)]
