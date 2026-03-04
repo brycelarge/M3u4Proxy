@@ -253,7 +253,7 @@ const filteredChannels = computed(() => {
             <input
               v-model="form.name"
               type="text"
-              placeholder="e.g., F1 Multi-View"
+              placeholder="e.g., Multi-View"
               class="w-full bg-[#13151f] border border-[#2e3250] rounded-lg px-4 py-2 text-slate-200 placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
             />
           </div>
