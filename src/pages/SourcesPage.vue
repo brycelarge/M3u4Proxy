@@ -63,7 +63,7 @@ function openCreate(category = 'playlist') {
 
 function openEdit(s) {
   editing.value = s
-  form.value = { name: s.name, category: s.category || 'playlist', type: s.type, url: s.url, username: s.username || '', password: s.password || '', refresh_cron: s.refresh_cron || '0 */6 * * *', max_streams: s.max_streams || 0, priority: s.priority || 999, force_ts_extension: s.force_ts_extension || false }
+  form.value = { name: s.name, category: s.category || 'playlist', type: s.type, url: s.url, username: s.username || '', password: s.password || '', refresh_cron: s.refresh_cron || '0 */6 * * *', max_streams: s.max_streams || 0, priority: s.priority || 999, force_ts_extension: !!s.force_ts_extension }
   try {
     cleanupRules.value = s.cleanup_rules ? JSON.parse(s.cleanup_rules) : []
   } catch {

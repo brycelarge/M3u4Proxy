@@ -227,6 +227,7 @@ const TABS = [
   { id: 'hdhr',         label: 'HDHomeRun',   icon: '📡' },
   { id: 'streaming',    label: 'Streaming',   icon: '🎬' },
   { id: 'scheduler',    label: 'Scheduler',   icon: '⏰' },
+  { id: 'vod',          label: 'VOD',         icon: '🎬' },
   { id: 'backup',       label: 'Backup',      icon: '💾' },
   { id: 'diagnostics',  label: 'Diagnostics',  icon: '🔧' },
   { id: 'architecture', label: 'Architecture', icon: '🗺️' },
@@ -323,7 +324,82 @@ async function clearDeadChannels() {
   } finally { deadClearing.value = false }
 }
 
-onMounted(async () => { await load(); await loadProxySettings() })
+// ── VOD Settings ──────────────────────────────────────────────────────────────
+const vodLanguages = ref(['eng'])
+const vodAllowedLanguages = ref(['eng'])
+const vodFilterMode = ref('disabled')
+const vodBlockedTitles = ref('')
+const vodStats = ref({ totalChannels: 0, withLanguageData: 0 })
+const vodLoading = ref(false)
+const vodSaving = ref(false)
+const vodSaved = ref(false)
+const vodError = ref('')
+
+async function loadVodSettings() {
+  vodLoading.value = true
+  try {
+    const data = await fetch('/api/vod/languages').then(r => r.json())
+    vodLanguages.value = data.languages || ['eng']
+    vodStats.value = {
+      totalChannels: data.totalChannels || 0,
+      withLanguageData: data.withLanguageData || 0
+    }
+
+    // Load current settings
+    if (data.currentSettings) {
+      vodAllowedLanguages.value = data.currentSettings.vod_allowed_languages || ['eng']
+      vodFilterMode.value = data.currentSettings.vod_language_filter_mode || 'disabled'
+      vodBlockedTitles.value = (data.currentSettings.vod_blocked_titles || []).join('\n')
+    }
+  } catch (e) {
+    vodError.value = 'Failed to load VOD settings'
+  } finally {
+    vodLoading.value = false
+  }
+}
+
+function toggleLanguage(lang) {
+  const idx = vodAllowedLanguages.value.indexOf(lang)
+  if (idx > -1) {
+    vodAllowedLanguages.value.splice(idx, 1)
+  } else {
+    vodAllowedLanguages.value.push(lang)
+  }
+}
+
+async function saveVodSettings() {
+  vodSaving.value = true
+  vodError.value = ''
+  vodSaved.value = false
+  try {
+    const blockedTitles = vodBlockedTitles.value
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0)
+
+    await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        vod_allowed_languages: JSON.stringify(vodAllowedLanguages.value),
+        vod_language_filter_mode: vodFilterMode.value,
+        vod_blocked_titles: JSON.stringify(blockedTitles)
+      })
+    })
+    vodSaved.value = true
+    setTimeout(() => { vodSaved.value = false }, 2500)
+  } catch (e) {
+    vodError.value = e.message
+  } finally {
+    vodSaving.value = false
+  }
+}
+
+onMounted(async () => {
+  await load()
+  await loadProxySettings()
+  await loadVodSettings()
+})
 </script>
 
 <template>
@@ -682,81 +758,124 @@ onMounted(async () => { await load(); await loadProxySettings() })
         <span>Save Schedules</span>
       </button>
     </div>
-
     </template> <!-- end scheduler tab -->
 
-    <!-- Proxy Tab -->
-    <template v-if="tab === 'proxy'">
+    <!-- ── VOD Tab ── -->
+    <template v-if="tab === 'vod'">
     <div class="bg-[#1a1d27] border border-[#2e3250] rounded-2xl p-6">
       <div class="flex items-center gap-3 mb-5">
-        <div class="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center text-lg shrink-0">⚡</div>
+        <div class="w-9 h-9 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center text-lg shrink-0">🎬</div>
         <div>
-          <h2 class="text-sm font-bold text-slate-100">Stream Proxy</h2>
-          <p class="text-xs text-slate-500">Configure how the proxy buffers stream data before sending to clients</p>
+          <h2 class="text-sm font-bold text-slate-100">VOD Content Filtering</h2>
+          <p class="text-xs text-slate-500">Filter movies and series by language and block unwanted titles</p>
         </div>
       </div>
 
-      <!-- Buffer seconds setting -->
-      <div class="space-y-5">
+      <div v-if="vodLoading" class="flex items-center gap-2 text-xs text-slate-500 py-8">
+        <span class="w-4 h-4 border-2 border-slate-600 border-t-rose-400 rounded-full animate-spin"></span>
+        Loading VOD settings…
+      </div>
+
+      <div v-else class="space-y-6">
+        <!-- Language Filtering -->
         <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
-          <div class="flex items-start gap-4">
-            <div class="flex-1">
-              <p class="text-sm font-medium text-slate-200">Pre-buffer Duration</p>
-              <p class="text-xs text-slate-500 mt-1">
-                Accumulate this many seconds of stream data before sending to clients.
-                Helps absorb upstream jitter and gives players a smoother start.
-                Set to <code class="text-slate-400">0</code> to disable (default — lowest latency).
-              </p>
-              <div class="mt-3 flex items-center gap-3">
-                <input
-                  v-model.number="proxyBufferInput"
-                  type="number" min="0" max="30" step="0.5"
-                  class="w-28 bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-indigo-500 font-mono"
-                />
-                <span class="text-xs text-slate-500">seconds (0 – 30)</span>
-              </div>
-              <div class="mt-2 flex gap-2 flex-wrap">
-                <button v-for="preset in [0, 1, 2, 3, 5]" :key="preset"
-                  @click="proxyBufferInput = preset"
-                  :class="['px-2.5 py-1 text-xs rounded-lg border transition-colors',
-                    proxyBufferInput === preset
-                      ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300'
-                      : 'bg-[#22263a] border-[#2e3250] text-slate-500 hover:text-slate-300']"
-                >{{ preset === 0 ? 'Off' : preset + 's' }}</button>
-              </div>
-            </div>
-            <div class="shrink-0 text-right">
-              <p class="text-[10px] text-slate-600 mb-1">Current</p>
-              <p class="text-2xl font-bold text-slate-200 font-mono">{{ proxySettings.bufferSeconds }}<span class="text-sm text-slate-500 font-normal">s</span></p>
-            </div>
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-sm font-semibold text-slate-100">🌍 Language Filtering</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/20">
+              Based on NFO audio tracks
+            </span>
+          </div>
+
+          <p class="text-xs text-slate-500 mb-3">
+            Found {{ vodStats.totalChannels.toLocaleString() }} channels with {{ vodStats.withLanguageData.toLocaleString() }} having language data
+          </p>
+
+          <!-- Filter Mode -->
+          <div class="flex items-center gap-3 mb-4">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                v-model="vodFilterMode"
+                value="disabled"
+                class="w-4 h-4 border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
+              />
+              <span class="text-xs text-slate-300">Include all languages</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                v-model="vodFilterMode"
+                value="whitelist"
+                class="w-4 h-4 border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
+              />
+              <span class="text-xs text-slate-300">Only include selected languages</span>
+            </label>
+          </div>
+
+          <!-- Language Checkboxes -->
+          <div v-if="vodFilterMode === 'whitelist'" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+            <label
+              v-for="lang in vodLanguages"
+              :key="lang"
+              class="flex items-center gap-2 p-2 bg-[#22263a] border border-[#2e3250] rounded-lg cursor-pointer hover:border-rose-500/50 transition-colors"
+            >
+              <input
+                type="checkbox"
+                :checked="vodAllowedLanguages.includes(lang)"
+                @change="toggleLanguage(lang)"
+                class="w-4 h-4 rounded border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
+              />
+              <span class="text-xs text-slate-300 uppercase font-mono">{{ lang }}</span>
+              <span v-if="lang === 'eng'" class="text-[10px] text-slate-500">(always)</span>
+            </label>
           </div>
         </div>
 
-        <!-- How it works -->
-        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4 space-y-2 text-xs text-slate-500">
-          <p class="font-semibold text-slate-400">How it works</p>
-          <p>• The proxy accumulates the first <strong class="text-slate-300">N seconds</strong> of each stream before forwarding data to any client.</p>
-          <p>• When a second client joins an already-running stream, the buffered data is flushed to them immediately so they don't start from a blank screen.</p>
-          <p>• The setting takes effect immediately — no restart required. Active streams will pick it up on their next reconnect.</p>
-          <p class="text-amber-500/70">⚠ Higher values increase startup delay but reduce buffering mid-stream. 2–3s is a good starting point for most setups.</p>
+        <!-- Blocked Titles -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-sm font-semibold text-slate-100">🚫 Blocked Titles</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/20">
+              Case-insensitive substring match
+            </span>
+          </div>
+
+          <textarea
+            v-model="vodBlockedTitles"
+            rows="4"
+            placeholder="Enter one pattern per line...&#10;adult&#10;xxx&#10;restricted"
+            class="w-full bg-[#22263a] border border-[#2e3250] rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-rose-500 resize-y"
+          ></textarea>
+          <p class="text-[10px] text-slate-600 mt-1.5">
+            One pattern per line. Any channel title containing these substrings will be filtered out during sync and export.
+          </p>
         </div>
 
-        <p v-if="proxyError" class="text-xs text-red-400">⚠ {{ proxyError }}</p>
-
-        <div class="flex justify-end">
+        <!-- Save Button -->
+        <div class="flex items-center gap-3">
           <button
-            @click="saveProxySettings"
-            :disabled="proxySaving || proxyBufferInput === proxySettings.bufferSeconds"
-            class="px-5 py-2.5 text-sm bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors flex items-center gap-2"
+            @click="saveVodSettings"
+            :disabled="vodSaving"
+            class="px-6 py-2.5 text-sm bg-rose-500 hover:bg-rose-400 disabled:opacity-40 text-white font-semibold rounded-xl transition-colors flex items-center gap-2"
           >
-            <span v-if="proxySaving" class="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-            <span v-else-if="proxySaved">✓ Saved</span>
-            <span v-else>Save</span>
+            <span v-if="vodSaving" class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+            <span>Save VOD Settings</span>
           </button>
+          <span v-if="vodSaved" class="text-xs text-green-400">✓ Saved</span>
+          <span v-if="vodError" class="text-xs text-red-400">⚠ {{ vodError }}</span>
+        </div>
+
+        <!-- Info Box -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4 space-y-2 text-xs text-slate-500">
+          <p class="font-semibold text-slate-400">How it works</p>
+          <p>• Language filtering requires NFO files with audio stream information in your STRM folders.</p>
+          <p>• "English (eng)" is always available as a fallback even if no NFO files exist.</p>
+          <p>• Blocked title patterns apply during source refresh and STRM export.</p>
+          <p>• Changes take effect on the next source refresh or STRM export.</p>
         </div>
       </div>
     </div>
-    </template> <!-- end proxy tab -->
+    </template> <!-- end vod tab -->
 
     <!-- Backup Tab -->
     <template v-if="tab === 'backup'">

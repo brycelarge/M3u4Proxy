@@ -670,4 +670,156 @@ function escapeXml(str) {
     .replace(/'/g, '&#39;')
 }
 
+// Parse XMLTV date format
+function parseXmltvDate(s) {
+  if (!s) return null
+  const clean = s.replace(/\s.*/, '')
+  try {
+    return new Date(`${clean.slice(0,4)}-${clean.slice(4,6)}-${clean.slice(6,8)}T${clean.slice(8,10)}:${clean.slice(10,12)}:${clean.slice(12,14)}Z`).toISOString()
+  } catch {
+    return null
+  }
+}
+
+// Parse programme block from XMLTV
+function parseProgBlock(fullMatch) {
+  const attrsMatch = fullMatch.match(/^<programme\b([^>]*)>/)
+  const attrs = attrsMatch?.[1] ?? ''
+  const body = fullMatch.slice(attrsMatch?.[0].length ?? 0, -'</programme>'.length)
+  const get = (tag) => {
+    const r = body.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`))
+    return r ? r[1].replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').trim() : null
+  }
+  const getAttr = (tag, attr) => {
+    const r = body.match(new RegExp(`<${tag}[^>]*\\s${attr}="([^"]*)"`))
+    return r ? r[1] : null
+  }
+  return {
+    channel: attrs.match(/\bchannel="([^"]*)"/)?.[1] ?? null,
+    start: parseXmltvDate(attrs.match(/\bstart="([^"]*)"/)?.[1]),
+    stop: parseXmltvDate(attrs.match(/\bstop="([^"]*)"/)?.[1]),
+    title: get('title'),
+    desc: get('desc'),
+    icon: getAttr('icon', 'src'),
+    category: get('category'),
+    episode: get('episode-num')
+  }
+}
+
+// Get enrichment maps for TMDB data
+function getEnrichmentMaps() {
+  const showMap = new Map(
+    db.prepare('SELECT title, poster, description FROM tmdb_enrichment WHERE poster IS NOT NULL OR description IS NOT NULL').all()
+      .map(r => [r.title, { poster: r.poster, desc: r.description }])
+  )
+  const epMap = new Map(
+    db.prepare('SELECT show_title, season, episode, poster, description FROM tmdb_episodes').all()
+      .map(r => [`${r.show_title}\0${r.season}\0${r.episode}`, { poster: r.poster, desc: r.description }])
+  )
+  return { showMap, epMap }
+}
+
+// Apply enrichment to programme
+function applyEnrichment(prog, showMap, epMap) {
+  if (!prog.title) return prog
+  const ep = prog.episode ? parseEpisodeNum(`<episode-num system="xmltv_ns">${prog.episode}</episode-num>`) : null
+  const epKey = ep ? `${prog.title}\0${ep.season}\0${ep.episode}` : null
+  const data = (epKey && epMap.get(epKey)) || showMap.get(prog.title)
+  if (!data) return prog
+  return {
+    ...prog,
+    icon: prog.icon || data.poster || null,
+    desc: prog.desc || data.desc || null
+  }
+}
+
+// Guide grid for active playlist - shows playlist channels with their EPG programmes
+router.get('/epg/guide-grid', async (req, res) => {
+  const windowHours = Math.min(parseInt(req.query.hours ?? '6', 10), 24)
+  const fromParam = req.query.from ? new Date(req.query.from) : new Date()
+  // Snap to nearest 30min
+  fromParam.setMinutes(fromParam.getMinutes() < 30 ? 0 : 30, 0, 0)
+  const from = fromParam
+  const to = new Date(from.getTime() + windowHours * 60 * 60 * 1000)
+
+  // Get active playlist from localStorage default or first playlist
+  const activePlaylistId = req.query.playlist_id ? parseInt(req.query.playlist_id) : null
+
+  if (!activePlaylistId) {
+    return res.status(400).json({ error: 'playlist_id required' })
+  }
+
+  // Get playlist channels
+  const channels = db.prepare(`
+    SELECT pc.*,
+           CASE
+             WHEN pc.custom_tvg_id != '' THEN pc.custom_tvg_id
+             WHEN em.target_tvg_id IS NOT NULL THEN em.target_tvg_id
+             ELSE pc.tvg_id
+           END as epg_id
+    FROM playlist_channels pc
+    LEFT JOIN epg_mappings em ON (em.source_tvg_id = pc.tvg_id OR em.source_tvg_id = pc.custom_tvg_id)
+    WHERE pc.playlist_id = ?
+    ORDER BY pc.sort_order, pc.id
+  `).all(activePlaylistId)
+
+  // Filter to channels with EPG data
+  const mappedChannels = channels.filter(ch => ch.epg_id && ch.epg_id.trim())
+  if (!mappedChannels.length) return res.json({ channels: [], from: from.toISOString(), to: to.toISOString() })
+
+  // Build channel list
+  const channelList = mappedChannels.map(ch => ({
+    id: ch.epg_id,
+    name: ch.tvg_name || ch.name || 'Unknown',
+    icon: ch.tvg_logo || ch.custom_logo || null,
+    url: ch.url || null,
+    channelId: ch.id,
+    programmes: []
+  }))
+
+  const epgIds = mappedChannels.map(ch => ch.epg_id)
+  const wantedIds = new Set(epgIds)
+
+  // Get programmes from EPG cache
+  const cacheRows = db.prepare('SELECT content FROM epg_cache WHERE content IS NOT NULL').all()
+  const { showMap, epMap } = getEnrichmentMaps()
+
+  const progRe = /<programme\b[\s\S]*?<\/programme>/g
+  for (const row of cacheRows) {
+    progRe.lastIndex = 0
+    let m
+    while ((m = progRe.exec(row.content)) !== null) {
+      const prog = parseProgBlock(m[0])
+      if (!prog.channel || !wantedIds.has(prog.channel)) continue
+      if (!prog.start || !prog.stop) continue
+      const pStart = new Date(prog.start)
+      const pStop = new Date(prog.stop)
+      if (pStop <= from || pStart >= to) continue
+
+      const ch = channelList.find(c => c.id === prog.channel)
+      if (ch) {
+        ch.programmes.push(applyEnrichment(prog, showMap, epMap))
+      }
+    }
+  }
+
+  // Sort programmes by start time
+  for (const ch of channelList) {
+    ch.programmes.sort((a, b) => new Date(a.start) - new Date(b.start))
+  }
+
+  res.json({ channels: channelList, from: from.toISOString(), to: to.toISOString() })
+})
+
+// Helper for parsing episode numbers
+function parseEpisodeNum(epStr) {
+  if (!epStr) return null
+  const match = epStr.match(/(\d+)\.(\d+)\./)
+  if (!match) return null
+  return {
+    season: parseInt(match[1]) + 1,
+    episode: parseInt(match[2]) + 1
+  }
+}
+
 export default router

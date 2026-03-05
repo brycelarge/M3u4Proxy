@@ -138,6 +138,37 @@ export function escapeXml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+// Parse XMLTV date format (YYYYMMDDHHmmss +ZZZZ) to ISO string
+function parseXmltvDate(str) {
+  if (!str) return null
+  const clean = str.replace(/[^0-9]/g, '')
+  if (clean.length < 14) return null
+  try {
+    return new Date(`${clean.slice(0,4)}-${clean.slice(4,6)}-${clean.slice(6,8)}T${clean.slice(8,10)}:${clean.slice(10,12)}:${clean.slice(12,14)}Z`).toISOString()
+  } catch {
+    return null
+  }
+}
+
+// Parse a <programme> XML block into an object
+export function parseProgBlock(fullMatch) {
+  const attrsMatch = fullMatch.match(/^<programme\b([^>]*)>/)
+  const attrs = attrsMatch?.[1] ?? ''
+  const body  = fullMatch.slice(attrsMatch?.[0].length ?? 0, -'</programme>'.length)
+  const get     = (tag) => { const r = body.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)); return r ? r[1].replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').trim() : null }
+  const getAttr = (tag, attr) => { const r = body.match(new RegExp(`<${tag}[^>]*\\s${attr}="([^"]*)"`)); return r ? r[1] : null }
+  return {
+    channel:  attrs.match(/\bchannel="([^"]*)"/)?.[1] ?? null,
+    start:    parseXmltvDate(attrs.match(/\bstart="([^"]*)"/)?.[1]),
+    stop:     parseXmltvDate(attrs.match(/\bstop="([^"]*)"/)?.[1]),
+    title:    get('title'),
+    desc:     get('desc'),
+    icon:     getAttr('icon', 'src'),
+    category: get('category'),
+    episode:  get('episode-num'),
+  }
+}
+
 // Inject poster + desc into a programme block, only if not already present
 export function injectEnrichment(progBlock, poster, desc) {
   let out = progBlock
@@ -324,5 +355,31 @@ export async function enrichGuide(_unused, { onProgress } = {}) {
     throw e
   } finally {
     enrichState.inProgress = false
+  }
+}
+
+// ── XMLTV helpers ─────────────────────────────────────────────────────────────
+export function getEnrichmentMaps() {
+  const showMap = new Map(
+    db.prepare('SELECT title, poster, description FROM tmdb_enrichment WHERE poster IS NOT NULL OR description IS NOT NULL').all()
+      .map(r => [r.title, { poster: r.poster, desc: r.description }])
+  )
+  const epMap = new Map(
+    db.prepare('SELECT show_title, season, episode, poster, description FROM tmdb_episodes').all()
+      .map(r => [`${r.show_title}\\0${r.season}\\0${r.episode}`, { poster: r.poster, desc: r.description }])
+  )
+  return { showMap, epMap }
+}
+
+export function applyEnrichment(prog, showMap, epMap) {
+  if (!prog.title) return prog
+  const ep = prog.episode ? parseEpisodeNum(`<episode-num system="xmltv_ns">${prog.episode}</episode-num>`) : null
+  const epKey = ep ? `${prog.title}\\0${ep.season}\\0${ep.episode}` : null
+  const data = (epKey && epMap.get(epKey)) || showMap.get(prog.title)
+  if (!data) return prog
+  return {
+    ...prog,
+    icon: prog.icon || data.poster || null,
+    desc: prog.desc || data.desc || null
   }
 }

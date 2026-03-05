@@ -26,6 +26,7 @@ import diagnosticsRoutes from './routes/diagnostics.js'
 import tmdbRoutes from './routes/tmdb.js'
 import sourceChannelsRoutes from './routes/source-channels.js'
 import playlistChannelsRoutes from './routes/playlist-channels.js'
+import strmNfoRoutes from './routes/strm-nfo.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -53,6 +54,7 @@ app.use('/api', diagnosticsRoutes)
 app.use('/api', tmdbRoutes)
 app.use('/api', sourceChannelsRoutes)
 app.use('/api', playlistChannelsRoutes)
+app.use('/api', strmNfoRoutes)
 
 // The proxy endpoints from streams need to be mounted at root
 // to match existing URL structures like /stream/:id

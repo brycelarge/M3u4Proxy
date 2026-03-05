@@ -3,6 +3,25 @@ import db from '../db.js'
 import { GUIDE_XML } from '../epgGrab.js'
 import { fetchAndParseM3U, fetchXtreamChannels, shouldSkipByRules } from '../m3uBuilder.js'
 import { clearCache } from './cache.js'
+import { getVodSettings } from '../routes/settings.js'
+
+// Helper to check if a channel should be filtered by VOD settings
+function shouldFilterVodChannel(channelName, vodSettings) {
+  if (!channelName) return false
+
+  const nameLower = channelName.toLowerCase()
+
+  // Check blocked titles
+  if (vodSettings.vod_blocked_titles?.length > 0) {
+    for (const blocked of vodSettings.vod_blocked_titles) {
+      if (blocked && nameLower.includes(blocked.toLowerCase())) {
+        return true
+      }
+    }
+  }
+
+  return false
+}
 
 export async function refreshSourceCache(sourceId) {
   const source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId)
@@ -297,6 +316,9 @@ export async function refreshSourceCache(sourceId) {
         const existing = db.prepare('SELECT * FROM playlist_channels WHERE playlist_id = ? AND source_id = ?')
           .all(playlist_id, sid)
 
+        // Load VOD settings for filtering
+        const vodSettings = getVodSettings()
+
         // Determine content filter based on playlist name
         const playlist = db.prepare('SELECT name FROM playlists WHERE id = ?').get(playlist_id)
         const playlistName = (playlist?.name || '').toLowerCase()
@@ -318,8 +340,18 @@ export async function refreshSourceCache(sourceId) {
           ${contentFilter}
         `).all(sid)
 
+        // Filter channels by blocked titles
+        let filteredCount = 0
         for (const ch of sourceChannels) {
+          if (shouldFilterVodChannel(ch.tvg_name, vodSettings)) {
+            filteredCount++
+            continue
+          }
           sourceUrlMap.set(ch.url, ch)
+        }
+
+        if (filteredCount > 0) {
+          console.log(`[source] Filtered ${filteredCount} channels by VOD blocked titles for playlist ${playlist_id}`)
         }
 
         const updateStmt = db.prepare(

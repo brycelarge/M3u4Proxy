@@ -126,37 +126,113 @@ router.get('/stream-web/:channelId', async (req, res) => {
   console.log(`[stream-web] Client "${username}" requested channel ${channelId} (${row.tvg_name})`)
 
   try {
-    // Determine if we need to transcode (for web playback)
-    // Most IPTV streams are MPEG-TS which browsers can't play directly.
-    // However, some might be HLS (.m3u8) which we can just redirect to or proxy.
-    // For now, assume everything needs remuxing to HLS or MP4/WebM if not HLS.
+    // Import spawn for FFmpeg
+    const { spawn } = await import('node:child_process')
 
-    // BUT: Our streamer.js already outputs a raw stream.
-    // To play in browser, we ideally want HLS or DASH.
-    // Or we can use a simple MPEG-TS -> MP4 remuxer on the fly.
+    console.log(`[stream-web] ⚡ FFMPEG REMUX ENABLED - Converting stream to MP4 container for browser`)
 
-    // Current simple implementation: Use fluent-ffmpeg to remux to HLS on the fly
-    // and serve the .m3u8 playlist.
-    // This is complex to implement in a single request handler.
-
-    // ALTERNATIVE: Use a library like 'hls-server' or just spawn ffmpeg
-    // and pipe stdout if the browser supports it (e.g. mp4 fragmentation).
-
-    // EASIER PATH: Use mpegts.js on frontend, serve raw MPEG-TS here.
-    // If the source is MPEG-TS (most are), we can just reuse the main /stream endpoint!
-    // The only difference is CORS headers.
-
-    // Let's reuse the main streamer but ensure CORS is set for web
+    // Set headers for MP4 streaming
+    res.setHeader('Content-Type', 'video/mp4')
+    res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Access-Control-Allow-Origin', '*')
+
+    // Create FFmpeg process to remux stream to MP4 container
+    // Video: copy (no re-encoding)
+    // Audio: re-encode to AAC for browser compatibility
+    const ffmpegArgs = [
+      '-i', 'pipe:0',           // Input from stdin
+      '-c:v', 'copy',           // Copy video codec (no re-encoding)
+      '-c:a', 'aac',            // Re-encode audio to AAC (browser-compatible)
+      '-b:a', '128k',           // Audio bitrate
+      '-f', 'mp4',              // Output format: MP4
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof', // Enable streaming MP4
+      'pipe:1'                  // Output to stdout
+    ]
+    console.log(`[ffmpeg] Starting FFmpeg with args: ${ffmpegArgs.join(' ')}`)
+
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs)
+    let ffmpegStarted = false
+    let ffmpegKilled = false
+
+    // Pipe FFmpeg output to client
+    ffmpeg.stdout.pipe(res)
+
+    // Handle FFmpeg stdin errors (e.g., EPIPE when writing to closed pipe)
+    ffmpeg.stdin.on('error', (err) => {
+      if (err.code !== 'EPIPE') {
+        console.error(`[ffmpeg] stdin error:`, err)
+      }
+    })
+
+    // Handle FFmpeg errors and info
+    ffmpeg.stderr.on('data', (data) => {
+      const msg = data.toString().trim()
+      if (!ffmpegStarted && msg.includes('Stream mapping:')) {
+        console.log(`[ffmpeg] ✓ Stream processing started`)
+        ffmpegStarted = true
+      }
+      // Only log important FFmpeg messages (errors, warnings, stream info)
+      if (msg.includes('error') || msg.includes('Error') || msg.includes('Stream #') || msg.includes('Duration:')) {
+        console.log(`[ffmpeg] ${msg}`)
+      }
+    })
+
+    ffmpeg.on('error', (err) => {
+      console.error(`[ffmpeg] ✗ Process error:`, err)
+      if (!res.headersSent) {
+        res.status(500).send('Transcoding error')
+      }
+    })
+
+    ffmpeg.on('exit', (code) => {
+      ffmpegKilled = true
+      console.log(`[ffmpeg] Process exited with code ${code}`)
+    })
+
+    // Clean up on client disconnect
+    res.on('close', () => {
+      if (!ffmpegKilled) {
+        console.log(`[ffmpeg] Client disconnected, killing FFmpeg process`)
+        ffmpegKilled = true
+        ffmpeg.kill('SIGKILL')
+      }
+    })
+
+    // Create a wrapper that mimics HTTP response interface but pipes to FFmpeg stdin
+    const ffmpegWrapper = {
+      write: (chunk) => {
+        if (!ffmpegKilled && !ffmpeg.stdin.destroyed) {
+          return ffmpeg.stdin.write(chunk)
+        }
+        return false
+      },
+      end: () => {
+        if (!ffmpegKilled && !ffmpeg.stdin.destroyed) {
+          ffmpeg.stdin.end()
+        }
+      },
+      setHeader: () => {}, // No-op for FFmpeg stdin
+      flushHeaders: () => {}, // No-op for FFmpeg stdin
+      writableEnded: false,
+      on: (event, handler) => {
+        if (event === 'close') {
+          res.on('close', handler)
+        }
+      }
+    }
+
+    // Connect to upstream stream and pipe to FFmpeg stdin via wrapper
+    console.log(`[stream-web] Connecting upstream stream to FFmpeg stdin...`)
 
     if (row.content_type === 'movie' || row.content_type === 'series') {
       const source = row.source_id ? db.prepare('SELECT force_ts_extension FROM sources WHERE id = ?').get(row.source_id) : null
       const { connectVodClient } = await import('../vod-streamer.js')
-      await connectVodClient(channelId, row.url, row.tvg_name, req, res, username, source)
-      return
+      await connectVodClient(channelId, row.url, row.tvg_name, req, ffmpegWrapper, username, source)
+    } else {
+      await connectClient(channelId, row.url, row.tvg_name, ffmpegWrapper, row.source_id || null, username)
     }
 
-    await connectClient(channelId, row.url, row.tvg_name, res, row.source_id || null, username)
+    console.log(`[stream-web] Successfully connected to upstream`)
 
   } catch (err) {
     console.error(`[stream-web] Error proxying channel ${channelId}:`, err)

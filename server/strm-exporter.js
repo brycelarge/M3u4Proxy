@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync, readdirSync, unlinkSync, existsSync, mkdirSync, statSync, rmdirSync } from 'node:fs'
 import { join, basename, extname, dirname } from 'node:path'
 import Database from 'better-sqlite3'
+import { getVodSettings } from './routes/settings.js'
 
 const STRM_BASE_DIR = process.env.STRM_EXPORT_DIR || '/data/vod-strm'
 const METADATA_EXT = '.m3u4prox.json'
@@ -235,6 +236,17 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const { deleteOrphans = false } = options
   console.log(`[strm] Starting export for playlist ${playlistId} (deleteOrphans: ${deleteOrphans})`)
 
+  // Auto-sync VOD languages from NFO files before export
+  try {
+    const { autoSyncVodLanguages } = await import('./routes/strm-nfo.js')
+    const syncResult = await autoSyncVodLanguages()
+    if (syncResult) {
+      console.log(`[strm] Auto-synced ${syncResult.detected} detected languages → ${syncResult.total} total allowed`)
+    }
+  } catch (e) {
+    console.warn('[strm] Auto-sync of VOD languages failed:', e.message)
+  }
+
   const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
 
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId)
@@ -341,9 +353,12 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const existing = scanExistingFiles(strmDir)
   console.log(`[strm] Found ${existing.size} existing STRM files`)
   const processed = new Set()
-  let stats = { created: 0, updated: 0, deleted: 0, errors: 0, skipped: 0, directory: strmDir }
+  let stats = { created: 0, updated: 0, deleted: 0, errors: 0, skipped: 0, filtered: 0, directory: strmDir }
   const errorList = []
   const skippedList = []
+
+  // Load VOD settings for filtering
+  const vodSettings = getVodSettings()
 
   // Build deduplicated dataset first
   // For series: use full tvg_name (includes S01E01) to keep all episodes
@@ -351,6 +366,23 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const uniqueContent = new Map()
 
   for (const channel of channels) {
+    // Check VOD blocked titles filter
+    if (vodSettings.vod_blocked_titles?.length > 0) {
+      const nameLower = (channel.tvg_name || '').toLowerCase()
+      const isBlocked = vodSettings.vod_blocked_titles.some(blocked =>
+        blocked && nameLower.includes(blocked.toLowerCase())
+      )
+      if (isBlocked) {
+        skippedList.push({
+          name: channel.tvg_name,
+          group: channel.group_title,
+          reason: 'Blocked by title filter'
+        })
+        stats.filtered++
+        continue
+      }
+    }
+
     const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
     const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
 
