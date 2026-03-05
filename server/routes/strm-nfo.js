@@ -2,6 +2,7 @@ import express from 'express'
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs'
 import { join, extname, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import db from '../db.js'
 
 const router = express.Router()
 const STRM_ROOT = '/data/vod-strm'
@@ -31,6 +32,24 @@ function parseXmlSimple(xml) {
   // Extract audio stream languages
   result.languages = []
   result.audioStreams = []
+  result.hasEmptyStreamDetails = false
+
+  // Check if streamdetails exists but is empty (no media info scanned)
+  const streamDetailsMatch = xml.match(/<streamdetails>([\s\S]*?)<\/streamdetails>/i)
+  if (streamDetailsMatch) {
+    const streamDetailsContent = streamDetailsMatch[1].trim()
+    if (!streamDetailsContent || streamDetailsContent === '') {
+      result.hasEmptyStreamDetails = true
+    }
+  }
+
+  // Also check for direct <language> tag at movie/tvshow level (Jellyfin format)
+  // This is sometimes populated even when streamdetails is empty
+  const directLangMatch = xml.match(/<language>([^<]+)<\/language>/i)
+  if (directLangMatch) {
+    const lang = directLangMatch[1]
+    result.languages.push(lang)
+  }
 
   // Find all <audio> blocks within <streamdetails>
   const audioRegex = /<audio>([\s\S]*?)<\/audio>/g
@@ -48,6 +67,66 @@ function parseXmlSimple(xml) {
       codec: codecMatch?.[1] || null,
       channels: channelsMatch?.[1] ? parseInt(channelsMatch[1]) : null
     })
+  }
+
+  // FALLBACK: If no languages detected, try to infer from <country> tag
+  // Common mapping: Country -> Language
+  if (result.languages.length === 0) {
+    const countryMatch = xml.match(/<country>([^<]+)<\/country>/i)
+    if (countryMatch) {
+      const country = countryMatch[1].trim()
+      const countryToLang = {
+        'USA': 'eng', 'United States': 'eng', 'US': 'eng',
+        'UK': 'eng', 'United Kingdom': 'eng', 'GB': 'eng',
+        'Italy': 'ita', 'Italia': 'ita',
+        'France': 'fre', 'Francia': 'fre',
+        'Germany': 'ger', 'Deutschland': 'ger',
+        'Spain': 'spa', 'España': 'spa',
+        'Portugal': 'por',
+        'Brazil': 'por', 'Brasil': 'por',
+        'Russia': 'rus', 'Россия': 'rus',
+        'Japan': 'jpn', '日本': 'jpn',
+        'China': 'chi', '中国': 'chi',
+        'South Korea': 'kor', 'Korea': 'kor', '한국': 'kor',
+        'India': 'hin',
+        'Netherlands': 'dut', 'Nederland': 'dut',
+        'Sweden': 'swe', 'Sverige': 'swe',
+        'Norway': 'nor', 'Norge': 'nor',
+        'Denmark': 'dan', 'Danmark': 'dan',
+        'Finland': 'fin', 'Suomi': 'fin',
+        'Poland': 'pol', 'Polska': 'pol',
+        'Turkey': 'tur', 'Türkiye': 'tur',
+        'Greece': 'gre',
+        'Czech Republic': 'cze', 'Czechia': 'cze',
+        'Hungary': 'hun', 'Magyarország': 'hun',
+        'Romania': 'rum',
+        'Bulgaria': 'bul',
+        'Croatia': 'hrv',
+        'Serbia': 'srp',
+        'Slovenia': 'slv',
+        'Slovakia': 'slo',
+        'Ukraine': 'ukr',
+        'Lithuania': 'lit',
+        'Latvia': 'lav',
+        'Estonia': 'est',
+        'Israel': 'heb',
+        'Arab Emirates': 'ara', 'UAE': 'ara',
+        'Saudi Arabia': 'ara',
+        'Egypt': 'ara',
+        'Thailand': 'tha',
+        'Vietnam': 'vie',
+        'Indonesia': 'ind',
+        'Malaysia': 'may',
+        'Philippines': 'fil',
+        'South Africa': 'afr', 'ZAF': 'afr'
+      }
+      const inferredLang = countryToLang[country]
+      if (inferredLang) {
+        result.languages.push(inferredLang)
+        result.inferredFromCountry = country
+        console.log(`[nfo-parser] Inferred language '${inferredLang}' from country '${country}' for: ${result.title}`)
+      }
+    }
   }
 
   // Extract subtitle languages
@@ -269,5 +348,87 @@ export async function autoSyncVodLanguages() {
     return null
   }
 }
+
+// GET /api/strm/nfo-missing-languages - CSV export of NFO files without allowed/missing languages
+router.get('/strm/nfo-missing-languages', async (req, res) => {
+  try {
+    // Get current allowed languages
+    const allowedSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('vod_allowed_languages')
+    const allowedLanguages = allowedSetting ? JSON.parse(allowedSetting.value) : ['eng']
+    const allowedSet = new Set(allowedLanguages.map(l => l.toLowerCase()))
+
+    const full = await scanNfoFiles()
+
+    // Filter files that:
+    // 1. Have no detected languages at all, OR
+    // 2. Have languages but none are in the allowed list
+    const missingFiles = full.files.filter(f => {
+      if (!f.languages || f.languages.length === 0) return true
+      const hasAllowedLang = f.languages.some(l => allowedSet.has(l.toLowerCase()))
+      return !hasAllowedLang
+    })
+
+    // Generate CSV
+    const csvHeader = 'Title,Type,Path,Languages,Audio Streams,Issue\n'
+    const csvRows = missingFiles.map(f => {
+      const title = f.title || 'Unknown'
+      const type = f.type || 'unknown'
+      const path = f.path || ''
+      const languages = f.languages ? f.languages.join('; ') : 'none'
+      const audioStreams = f.audioStreams ? f.audioStreams.map(s => s.language || 'unknown').join('; ') : 'none'
+
+      let issue = ''
+      if (!f.languages || f.languages.length === 0) {
+        if (f.hasEmptyStreamDetails) {
+          issue = 'No media info in NFO (<streamdetails> is empty). Run library scan in Jellyfin/Emby to populate audio track info.'
+        } else {
+          issue = 'No language data detected in NFO'
+        }
+      } else if (f.inferredFromCountry) {
+        issue = `Language '${f.languages[0]}' inferred from country '${f.inferredFromCountry}' (not from actual audio tracks)`
+      } else {
+        issue = `Languages not in allowed list: ${f.languages.join(', ')}`
+      }
+
+      // Escape quotes in fields
+      const escape = (s) => `"${String(s).replace(/"/g, '""')}"`
+      return [escape(title), escape(type), escape(path), escape(languages), escape(audioStreams), escape(issue)].join(',')
+    }).join('\n')
+
+    const csv = csvHeader + csvRows
+
+    res.setHeader('Content-Type', 'text/csv')
+    res.setHeader('Content-Disposition', `attachment; filename="nfo-missing-languages-${new Date().toISOString().split('T')[0]}.csv"`)
+    res.send(csv)
+
+    console.log(`[nfo-csv] Exported ${missingFiles.length} files without allowed languages (allowed: ${allowedLanguages.join(', ')})`)
+  } catch (e) {
+    console.error('[nfo-csv] Export failed:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/strm/sync-languages - Manually trigger NFO language scan and update settings
+router.post('/strm/sync-languages', async (req, res) => {
+  try {
+    console.log('[nfo-sync] Manual language sync triggered via API')
+    const result = await autoSyncVodLanguages()
+
+    if (result) {
+      res.json({
+        success: true,
+        message: `Synced ${result.detected} detected languages. Total allowed: ${result.total}`,
+        detected: result.detected,
+        total: result.total,
+        languages: result.languages
+      })
+    } else {
+      res.status(500).json({ success: false, error: 'Sync failed' })
+    }
+  } catch (e) {
+    console.error('[nfo-sync] Manual sync failed:', e)
+    res.status(500).json({ success: false, error: e.message })
+  }
+})
 
 export default router

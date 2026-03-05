@@ -334,6 +334,9 @@ const vodLoading = ref(false)
 const vodSaving = ref(false)
 const vodSaved = ref(false)
 const vodError = ref('')
+const vodCsvLoading = ref(false)
+const vodSyncLoading = ref(false)
+const vodSyncResult = ref('')
 
 async function loadVodSettings() {
   vodLoading.value = true
@@ -392,6 +395,51 @@ async function saveVodSettings() {
     vodError.value = e.message
   } finally {
     vodSaving.value = false
+  }
+}
+
+async function downloadNfoLanguageCsv() {
+  vodCsvLoading.value = true
+  try {
+    const response = await fetch('/api/strm/nfo-missing-languages')
+    if (!response.ok) throw new Error('Failed to download CSV')
+
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `nfo-missing-languages-${new Date().toISOString().split('T')[0]}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+  } catch (e) {
+    vodError.value = e.message
+  } finally {
+    vodCsvLoading.value = false
+  }
+}
+
+async function syncNfoLanguages() {
+  vodSyncLoading.value = true
+  vodSyncResult.value = ''
+  vodError.value = ''
+  try {
+    const response = await fetch('/api/strm/sync-languages', { method: 'POST' })
+    const data = await response.json()
+
+    if (data.success) {
+      vodSyncResult.value = data.message
+      // Reload settings to show updated languages
+      await loadVodSettings()
+      setTimeout(() => { vodSyncResult.value = '' }, 5000)
+    } else {
+      throw new Error(data.error || 'Sync failed')
+    }
+  } catch (e) {
+    vodError.value = e.message
+  } finally {
+    vodSyncLoading.value = false
   }
 }
 
@@ -863,6 +911,43 @@ onMounted(async () => {
           </button>
           <span v-if="vodSaved" class="text-xs text-green-400">✓ Saved</span>
           <span v-if="vodError" class="text-xs text-red-400">⚠ {{ vodError }}</span>
+        </div>
+
+        <!-- CSV Export for Missing Languages -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-100">📊 Language Issues Export</p>
+              <p class="text-xs text-slate-500 mt-0.5">Download CSV of content without allowed languages or missing NFO data</p>
+            </div>
+            <button
+              @click="downloadNfoLanguageCsv"
+              :disabled="vodCsvLoading"
+              class="px-4 py-2 text-xs bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-white font-semibold rounded-lg transition-colors flex items-center gap-2 shrink-0"
+            >
+              <span v-if="vodCsvLoading" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              <span>⬇ Export CSV</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Update Languages from NFO -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-100">🔄 Update Languages</p>
+              <p class="text-xs text-slate-500 mt-0.5">Scan all movie.nfo and tvshow.nfo files and update allowed languages in settings</p>
+            </div>
+            <button
+              @click="syncNfoLanguages"
+              :disabled="vodSyncLoading"
+              class="px-4 py-2 text-xs bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-white font-semibold rounded-lg transition-colors flex items-center gap-2 shrink-0"
+            >
+              <span v-if="vodSyncLoading" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              <span>🔄 Sync Languages</span>
+            </button>
+          </div>
+          <p v-if="vodSyncResult" class="mt-2 text-xs text-emerald-400">✓ {{ vodSyncResult }}</p>
         </div>
 
         <!-- Info Box -->

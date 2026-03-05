@@ -2,6 +2,7 @@ import express from 'express'
 import { join } from 'node:path'
 import db from '../db.js'
 import { connectClient, getActiveSessions, killSession } from '../streamer.js'
+import { getActiveVodSessions, killVodSession } from '../vod-streamer.js'
 import { getCompositeSession } from '../composite-streamer.js'
 
 const router = express.Router()
@@ -321,14 +322,31 @@ router.get('/internal-stream/composite-:compositeId-:role', async (req, res) => 
 // ── API Endpoints ─────────────────────────────────────────────────────────────
 // These will be mounted under /api/streams/
 
-// GET /api/streams  — list active stream sessions
+// GET /api/streams  — list active stream sessions (both Live TV and VOD)
 router.get('/', (req, res) => {
-  res.json(getActiveSessions())
+  const liveSessions = getActiveSessions()
+  const vodSessions = getActiveVodSessions()
+  const allSessions = [...liveSessions, ...vodSessions]
+
+  // Enrich with channel details from database
+  const enriched = allSessions.map(session => {
+    const channel = db.prepare('SELECT tvg_name, group_title, tvg_logo FROM playlist_channels WHERE id = ?').get(session.channelId)
+    return {
+      ...session,
+      tvg_name: channel?.tvg_name || session.channelName,
+      group_title: channel?.group_title || null,
+      tvg_logo: channel?.tvg_logo || null,
+      isVod: channel?.group_title?.startsWith('Series:') || channel?.group_title?.startsWith('Movie:') || false
+    }
+  })
+
+  res.json(enriched)
 })
 
-// DELETE /api/streams/:channelId  — kill a stream session
+// DELETE /api/streams/:channelId  — kill a stream session (Live TV or VOD)
 router.delete('/:channelId', (req, res) => {
   killSession(req.params.channelId)
+  killVodSession(req.params.channelId)
   res.json({ ok: true })
 })
 

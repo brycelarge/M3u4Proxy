@@ -9,9 +9,129 @@ import { readFileSync, writeFileSync, readdirSync, unlinkSync, existsSync, mkdir
 import { join, basename, extname, dirname } from 'node:path'
 import Database from 'better-sqlite3'
 import { getVodSettings } from './routes/settings.js'
+import { xml2json } from 'xml-js'
 
 const STRM_BASE_DIR = process.env.STRM_EXPORT_DIR || '/data/vod-strm'
 const METADATA_EXT = '.m3u4prox.json'
+
+// Helper to check if a folder is managed by m3u4prox (has our marker file)
+function isManagedFolder(dirPath) {
+  return existsSync(join(dirPath, METADATA_EXT))
+}
+
+// Helper to safely delete a directory only if it's managed by us and empty
+function safeDeleteManagedDir(dirPath, deletedDirs) {
+  try {
+    if (!isManagedFolder(dirPath)) {
+      return false
+    }
+
+    const files = readdirSync(dirPath).filter(f => f !== METADATA_EXT && !f.startsWith('.'))
+    if (files.length === 0) {
+      // Remove marker file first
+      try {
+        unlinkSync(join(dirPath, METADATA_EXT))
+      } catch (e) {
+        // Ignore if marker doesn't exist
+      }
+      rmdirSync(dirPath)
+      console.log(`[strm] Removed managed empty directory: ${dirPath}`)
+      deletedDirs.add(dirPath)
+      return true
+    }
+  } catch (e) {
+    // Ignore errors
+  }
+  return false
+}
+
+// Parse NFO file to extract language information
+function parseNfoLanguages(nfoPath) {
+  try {
+    const content = readFileSync(nfoPath, 'utf-8')
+    const jsonStr = xml2json(content, { compact: true, spaces: 2 })
+    const result = JSON.parse(jsonStr)
+
+    const languages = []
+
+    // Extract from fileinfo/streamdetails (common in both movie and tvshow NFOs)
+    const fileinfo = result.movie?.fileinfo || result.tvshow?.fileinfo || result.episodedetails?.fileinfo
+    if (fileinfo?.streamdetails) {
+      const audio = fileinfo.streamdetails.audio
+      if (audio) {
+        const audioStreams = Array.isArray(audio) ? audio : [audio]
+        for (const stream of audioStreams) {
+          const lang = stream.language?._text || stream.language
+          if (lang) {
+            languages.push(String(lang).toLowerCase())
+          }
+        }
+      }
+    }
+
+    // Also check for language field directly
+    const langField = result.movie?.language?._text || result.tvshow?.language?._text
+    if (langField) {
+      languages.push(String(langField).toLowerCase())
+    }
+
+    return [...new Set(languages)]
+  } catch (e) {
+    return []
+  }
+}
+
+// Check if series/movie has allowed language based on NFO
+function checkNfoLanguage(folderPath, vodSettings) {
+  try {
+    if (!vodSettings.vod_allowed_languages || vodSettings.vod_allowed_languages.length === 0) {
+      return { allowed: true, reason: 'No language filter set' }
+    }
+
+    if (vodSettings.vod_language_filter_mode === 'disabled') {
+      return { allowed: true, reason: 'Language filter disabled' }
+    }
+
+    const allowedSet = new Set(vodSettings.vod_allowed_languages.map(l => l.toLowerCase()))
+
+    // Check for tvshow.nfo (series) or movie.nfo (movie)
+    const tvshowNfo = join(folderPath, 'tvshow.nfo')
+    const movieNfo = join(folderPath, 'movie.nfo')
+
+    let nfoPath = null
+    let contentType = null
+
+    if (existsSync(tvshowNfo)) {
+      nfoPath = tvshowNfo
+      contentType = 'series'
+    } else if (existsSync(movieNfo)) {
+      nfoPath = movieNfo
+      contentType = 'movie'
+    }
+
+    if (!nfoPath) {
+      // No NFO found - check if we should include content without language data
+      // Default: include (conservative approach)
+      return { allowed: true, reason: 'No NFO file found', contentType: 'unknown' }
+    }
+
+    const languages = parseNfoLanguages(nfoPath)
+
+    if (languages.length === 0) {
+      return { allowed: true, reason: 'No language data in NFO', contentType }
+    }
+
+    const hasAllowedLang = languages.some(lang => allowedSet.has(lang))
+
+    if (hasAllowedLang) {
+      return { allowed: true, reason: `Has allowed language: ${languages.filter(l => allowedSet.has(l)).join(', ')}`, contentType, languages }
+    } else {
+      return { allowed: false, reason: `Languages not in allowed list: ${languages.join(', ')}`, contentType, languages }
+    }
+  } catch (e) {
+    return { allowed: true, reason: 'Error checking NFO', error: e.message }
+  }
+}
 
 function getPlaylistStrmDir(playlistName) {
   const sanitized = playlistName
@@ -20,6 +140,7 @@ function getPlaylistStrmDir(playlistName) {
     .replace(/^-|-$/g, '')
   return join(STRM_BASE_DIR, sanitized)
 }
+
 
 function sanitizeFilename(name) {
   return name
@@ -185,7 +306,7 @@ function scanExistingFiles(strmDir) {
       if (!file.endsWith(METADATA_EXT)) continue
 
       metadataCount++
-      if (metadataCount <= 3) {
+      if (metadataCount <= 3 || file.includes('Untitled')) {
         console.log(`[strm] Processing metadata file #${metadataCount}: "${file}"`)
       }
 
@@ -196,15 +317,16 @@ function scanExistingFiles(strmDir) {
       try {
         const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'))
 
-        if (metadataCount <= 3) {
+        if (metadataCount <= 3 || file.includes('Untitled')) {
           console.log(`[strm] Read metadata, checking STRM exists: "${strmPath}", exists="${existsSync(strmPath)}"`)
+          console.log(`[strm] Metadata content: normalizedName="${metadata.normalizedName}", normalized_name="${metadata.normalized_name}", channelId="${metadata.channelId}"`)
         }
 
         if (existsSync(strmPath)) {
           // Use normalized_name as key for matching across provider changes
           // Handle both camelCase (old) and snake_case (new) formats
           const key = metadata.normalizedName || metadata.normalized_name || metadata.channelId
-          if (metadataCount <= 3) {
+          if (metadataCount <= 3 || file.includes('Untitled')) {
             console.log(`[strm] Found metadata: key="${key}", channelId="${metadata.channelId}", file="${file}"`)
           }
           map.set(key, {
@@ -216,7 +338,7 @@ function scanExistingFiles(strmDir) {
             fullMetadataPath: metadataPath
           })
         } else {
-          if (metadataCount <= 3) {
+          if (metadataCount <= 3 || file.includes('Untitled')) {
             console.log(`[strm] STRM file missing, deleting orphaned metadata: "${file}"`)
           }
           // Orphaned metadata file - delete it
@@ -331,8 +453,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
       SELECT
         pc.*,
         sc.meta,
-        sc.normalized_name,
-        pc.id as channel_id
+        sc.normalized_name
       FROM playlist_channels pc
       LEFT JOIN source_channels sc ON pc.source_id = sc.source_id AND pc.url = sc.url
       WHERE pc.playlist_id = ?
@@ -360,14 +481,80 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   // Load VOD settings for filtering
   const vodSettings = getVodSettings()
 
-  // Build deduplicated dataset first
-  // For series: use full tvg_name (includes S01E01) to keep all episodes
-  // For movies: use normalized_name to remove duplicates across categories
-  const uniqueContent = new Map()
+  // Build deduplicated dataset grouped by series/movie level (not episode)
+  // For filtering purposes, we need to group episodes by series
+  const seriesGroups = new Map() // seriesName -> { episodes: [], folderPath: null }
+  const movieItems = new Map() // normalized_name -> channel
 
+  let movieDebugCount = 0
   for (const channel of channels) {
-    // Check VOD blocked titles filter
-    if (vodSettings.vod_blocked_titles?.length > 0) {
+    const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
+    const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
+
+    if (isSeriesGroup && seriesInfo.isSeries) {
+      // Group by series name (not individual episode)
+      const seriesKey = seriesInfo.seriesName.toLowerCase().trim()
+      if (!seriesGroups.has(seriesKey)) {
+        seriesGroups.set(seriesKey, {
+          seriesName: seriesInfo.seriesName,
+          episodes: [],
+          folderPath: null,
+          year: null
+        })
+      }
+      seriesGroups.get(seriesKey).episodes.push(channel)
+
+      // Extract year from metadata if available
+      if (channel.meta) {
+        const meta = typeof channel.meta === 'string' ? JSON.parse(channel.meta) : channel.meta
+        if (meta.releaseDate || meta.release_date || meta.year) {
+          seriesGroups.get(seriesKey).year = meta.releaseDate || meta.release_date || meta.year
+        }
+      }
+    } else {
+      // Movies are handled individually
+      const matchKey = channel.normalized_name || String(channel.id) || channel.url
+      if (matchKey === 'undefined' || !matchKey) {
+        console.log(`[strm] DEBUG: Movie has no matchKey - id: ${channel.id}, normalized_name: ${channel.normalized_name}, url: ${channel.url?.substring(0, 50)}`)
+      }
+      if (movieDebugCount < 5) {
+        console.log(`[strm] DEBUG Movie #${movieDebugCount + 1}: "${channel.tvg_name}" -> matchKey="${matchKey}" (normalized_name="${channel.normalized_name}", id="${channel.id}")`)
+        movieDebugCount++
+      }
+      if (!movieItems.has(matchKey)) {
+        movieItems.set(matchKey, channel)
+      } else {
+        skippedList.push({
+          name: channel.tvg_name,
+          group: channel.group_title,
+          reason: `Duplicate movie (key: ${matchKey})`
+        })
+        stats.skipped++
+      }
+    }
+  }
+
+  // Check VOD blocked titles filter at series/movie level
+  if (vodSettings.vod_blocked_titles?.length > 0) {
+    // Filter blocked series
+    for (const [seriesKey, seriesData] of seriesGroups.entries()) {
+      const nameLower = seriesData.seriesName.toLowerCase()
+      const isBlocked = vodSettings.vod_blocked_titles.some(blocked =>
+        blocked && nameLower.includes(blocked.toLowerCase())
+      )
+      if (isBlocked) {
+        skippedList.push({
+          name: seriesData.seriesName,
+          group: 'Series',
+          reason: 'Series blocked by title filter'
+        })
+        stats.filtered += seriesData.episodes.length
+        seriesGroups.delete(seriesKey)
+      }
+    }
+
+    // Filter blocked movies
+    for (const [movieKey, channel] of movieItems.entries()) {
       const nameLower = (channel.tvg_name || '').toLowerCase()
       const isBlocked = vodSettings.vod_blocked_titles.some(blocked =>
         blocked && nameLower.includes(blocked.toLowerCase())
@@ -376,173 +563,309 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
         skippedList.push({
           name: channel.tvg_name,
           group: channel.group_title,
-          reason: 'Blocked by title filter'
+          reason: 'Movie blocked by title filter'
         })
         stats.filtered++
-        continue
-      }
-    }
-
-    const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
-    const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
-
-    // For series episodes, use full name to keep each episode unique
-    // For movies, use normalized name to deduplicate across categories
-    const matchKey = (isSeriesGroup && seriesInfo.isSeries)
-      ? channel.tvg_name
-      : (channel.normalized_name || String(channel.id))
-
-    if (!uniqueContent.has(matchKey)) {
-      uniqueContent.set(matchKey, channel)
-    } else {
-      skippedList.push({
-        name: channel.tvg_name,
-        group: channel.group_title,
-        reason: 'Duplicate'
-      })
-      stats.skipped++
-      if (process.env.DEBUG) {
-        console.log(`[strm] Skipping duplicate: "${channel.tvg_name}" (already have "${uniqueContent.get(matchKey).tvg_name}")`)
+        movieItems.delete(movieKey)
       }
     }
   }
 
-  console.log(`[strm] Processing ${uniqueContent.size} unique items (${stats.skipped} duplicates skipped)`)
+  // Determine folder paths for series and check NFO language before processing
+  const seriesToProcess = new Map()
+  const seriesToSkip = new Map()
 
-  // Build a set of all normalized names in the NEW dataset
-  const newContentKeys = new Set(uniqueContent.keys())
+  for (const [seriesKey, seriesData] of seriesGroups.entries()) {
+    const meta = seriesData.episodes[0].meta ?
+      (typeof seriesData.episodes[0].meta === 'string' ? JSON.parse(seriesData.episodes[0].meta) : seriesData.episodes[0].meta) : null
+    const year = seriesData.year || (meta ? (meta.releaseDate || meta.release_date || meta.year || '') : '')
 
-  // Now process the deduplicated dataset
-  let debugCount = 0
-  for (const [matchKey, channel] of uniqueContent.entries()) {
-    // Force .ts extension for VOD URLs (provider requirement)
+    const baseName = seriesData.seriesName
+    const folderWithoutYear = sanitizeFilename(baseName)
+    const folderWithYear = year ? sanitizeFilename(`${baseName} (${year})`) : null
+
+    // Determine which folder to use
+    let seriesFolder = folderWithoutYear
+    if (folderWithYear && existsSync(join(strmDir, folderWithYear))) {
+      seriesFolder = folderWithYear
+    } else if (existsSync(join(strmDir, folderWithoutYear))) {
+      seriesFolder = folderWithoutYear
+    } else if (folderWithYear && meta) {
+      seriesFolder = folderWithYear
+    }
+
+    const seriesRootDir = join(strmDir, seriesFolder)
+    seriesData.folderPath = seriesRootDir
+
+    // Check NFO language at series level (before processing any episodes)
+    const langCheck = checkNfoLanguage(seriesRootDir, vodSettings)
+
+    if (!langCheck.allowed) {
+      skippedList.push({
+        name: seriesData.seriesName,
+        group: 'Series',
+        reason: `Series filtered: ${langCheck.reason}`
+      })
+      stats.filtered += seriesData.episodes.length
+      seriesToSkip.set(seriesKey, seriesData)
+
+      // If deleteOrphans is enabled, mark this series for deletion
+      if (deleteOrphans && existsSync(seriesRootDir)) {
+        console.log(`[strm] Series "${seriesData.seriesName}" will be removed due to language filter`)
+        seriesToSkip.set(seriesKey, { ...seriesData, delete: true })
+      }
+      continue
+    }
+
+    seriesToProcess.set(seriesKey, seriesData)
+  }
+
+  // Check NFO language for movies
+  const moviesToProcess = new Map()
+
+  for (const [movieKey, channel] of movieItems.entries()) {
+    const meta = channel.meta ? (typeof channel.meta === 'string' ? JSON.parse(channel.meta) : channel.meta) : null
+    let year = extractYear(channel.tvg_name || '')
+    if (!year && meta) {
+      year = meta.releaseDate || meta.release_date || meta.year || null
+    }
+
+    const baseName = (channel.tvg_name || 'Unknown').replace(/\(\d{4}\)/, '').trim()
+    const movieFolder = year ? sanitizeFilename(`${baseName} (${year})`) : sanitizeFilename(baseName)
+    const movieDir = join(strmDir, movieFolder)
+
+    // Check NFO language at movie level
+    const langCheck = checkNfoLanguage(movieDir, vodSettings)
+
+    if (!langCheck.allowed) {
+      skippedList.push({
+        name: channel.tvg_name,
+        group: channel.group_title,
+        reason: `Movie filtered: ${langCheck.reason}`
+      })
+      stats.filtered++
+
+      // If deleteOrphans is enabled, mark for deletion
+      if (deleteOrphans && existsSync(movieDir)) {
+        console.log(`[strm] Movie "${channel.tvg_name}" will be removed due to language filter`)
+        moviesToProcess.set(movieKey, { channel, movieDir, delete: true })
+      }
+      continue
+    }
+
+    moviesToProcess.set(movieKey, { channel, movieDir })
+  }
+
+  console.log(`[strm] Processing ${seriesToProcess.size} series (${seriesToSkip.size} filtered), ${moviesToProcess.size} movies (${movieItems.size - moviesToProcess.size} filtered)`)
+
+  // Build a set of all keys in the NEW dataset (for orphan detection)
+  const newContentKeys = new Set()
+  for (const seriesData of seriesToProcess.values()) {
+    for (const ep of seriesData.episodes) {
+      newContentKeys.add(ep.tvg_name)
+    }
+  }
+  for (const { channel } of moviesToProcess.values()) {
+    newContentKeys.add(channel.normalized_name || String(channel.id))
+  }
+
+  // Delete series marked for removal (language filtered with deleteOrphans=true)
+  for (const [seriesKey, seriesData] of seriesToSkip.entries()) {
+    if (seriesData.delete && existsSync(seriesData.folderPath)) {
+      console.log(`[strm] DEBUG: Would delete filtered series: ${seriesData.seriesName} at ${seriesData.folderPath}`)
+      // TODO: Uncomment for production - currently disabled for testing
+      /*
+      console.log(`[strm] Deleting filtered series: ${seriesData.seriesName}`)
+      // Delete all contents recursively
+      const deleteRecursive = (dir) => {
+        if (!existsSync(dir)) return
+        const files = readdirSync(dir)
+        for (const file of files) {
+          const fullPath = join(dir, file)
+          if (statSync(fullPath).isDirectory()) {
+            deleteRecursive(fullPath)
+          } else {
+            unlinkSync(fullPath)
+          }
+        }
+        // Only delete if managed
+        if (isManagedFolder(dir)) {
+          try {
+            rmdirSync(dir)
+            console.log(`[strm] Deleted series directory: ${dir}`)
+            stats.deleted++
+          } catch (e) {
+            console.warn(`[strm] Could not delete directory: ${dir} - ${e.message}`)
+          }
+        } else {
+          console.log(`[strm] Skipping unmanaged directory: ${dir}`)
+        }
+      }
+      deleteRecursive(seriesData.folderPath)
+      */
+    }
+  }
+
+  // Process series episodes
+  for (const [seriesKey, seriesData] of seriesToProcess.entries()) {
+    const seriesRootDir = seriesData.folderPath
+    const meta = seriesData.episodes[0].meta ?
+      (typeof seriesData.episodes[0].meta === 'string' ? JSON.parse(seriesData.episodes[0].meta) : seriesData.episodes[0].meta) : null
+
+    // Ensure series root directory exists
+    if (!existsSync(seriesRootDir)) {
+      mkdirSync(seriesRootDir, { recursive: true })
+    }
+
+    // Create marker file in series root folder
+    const seriesMarkerPath = join(seriesRootDir, METADATA_EXT)
+    if (!existsSync(seriesMarkerPath)) {
+      const seriesMetadata = {
+        type: 'series',
+        name: seriesData.seriesName,
+        year: seriesData.year,
+        episodeCount: seriesData.episodes.length,
+        lastUpdated: new Date().toISOString()
+      }
+      writeFileSync(seriesMarkerPath, JSON.stringify(seriesMetadata, null, 2), 'utf8')
+    }
+
+    // Create tvshow.nfo if doesn't exist
+    const tvshowNfoPath = join(seriesRootDir, 'tvshow.nfo')
+    if (!existsSync(tvshowNfoPath)) {
+      const year = seriesData.year || ''
+      const plot = meta?.plot || ''
+      const tvshowNfo = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<tvshow>
+  <title>${escapeXml(seriesData.seriesName)}</title>
+  ${year ? `<year>${escapeXml(year)}</year>` : ''}
+  ${plot ? `<plot>${escapeXml(plot)}</plot>` : ''}
+  <episode>${seriesData.episodes.length}</episode>
+</tvshow>`
+      writeFileSync(tvshowNfoPath, tvshowNfo, 'utf8')
+    }
+
+    // Process each episode
+    for (const channel of seriesData.episodes) {
+      const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
+      if (!seriesInfo.isSeries) continue
+
+      const seasonFolder = `Season ${String(seriesInfo.season).padStart(2, '0')}`
+      const seasonDir = join(seriesRootDir, seasonFolder)
+
+      // Create season directory
+      if (!existsSync(seasonDir)) {
+        mkdirSync(seasonDir, { recursive: true })
+      }
+
+      // Force .ts extension for VOD URLs
+      let channelUrl = channel.url
+      if (channelUrl && !channelUrl.endsWith('.ts')) {
+        channelUrl = channelUrl.replace(/\.(mkv|mp4|avi|m4v)$/i, '.ts')
+      }
+
+      const proxyUrl = `${baseUrl}/stream/${channel.id}?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+
+      const filename = buildFilename(channel)
+      const metadataFilename = filename.replace('.strm', METADATA_EXT)
+      const strmPath = join(seasonDir, filename)
+      const metadataPath = join(seasonDir, metadataFilename)
+
+      const metadata = buildMetadata(channel, playlistId, proxyUrl)
+      const nfoContent = buildNfoContent(channel, seriesInfo)
+
+      const existingEntry = existing.get(channel.tvg_name)
+
+      try {
+        if (existingEntry) {
+          const oldStrmPath = existingEntry.fullStrmPath
+          const oldMetadataPath = existingEntry.fullMetadataPath
+          const oldUrl = readFileSync(oldStrmPath, 'utf8').trim()
+
+          if (oldUrl !== proxyUrl) {
+            console.log(`[strm] Updating URL for: ${existingEntry.strmFile}`)
+            writeFileSync(oldStrmPath, proxyUrl, 'utf8')
+            writeFileSync(oldMetadataPath, JSON.stringify(metadata, null, 2), 'utf8')
+            stats.updated++
+          }
+        } else {
+          console.log(`[strm] Creating: ${filename}`)
+          writeFileSync(strmPath, proxyUrl, 'utf8')
+          writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf8')
+          // Episode NFO in season folder
+          const episodeNfoPath = join(seasonDir, filename.replace('.strm', '.nfo'))
+          if (!existsSync(episodeNfoPath)) {
+            writeFileSync(episodeNfoPath, nfoContent, 'utf8')
+          }
+          stats.created++
+        }
+      } catch (e) {
+        console.error(`[strm] Error processing ${channel.tvg_name}:`, e.message)
+        errorList.push({ name: channel.tvg_name, error: e.message })
+        stats.errors++
+      }
+    }
+  }
+
+  // Process movies
+  for (const [movieKey, movieData] of moviesToProcess.entries()) {
+    const { channel, movieDir, delete: shouldDelete } = movieData
+
+    // Delete if marked for removal
+    if (shouldDelete && existsSync(movieDir)) {
+      console.log(`[strm] DEBUG: Would delete filtered movie: ${channel.tvg_name} at ${movieDir}`)
+      // TODO: Uncomment for production - currently disabled for testing
+      /*
+      console.log(`[strm] Deleting filtered movie: ${channel.tvg_name}`)
+      const files = readdirSync(movieDir)
+      for (const file of files) {
+        unlinkSync(join(movieDir, file))
+      }
+      if (isManagedFolder(movieDir)) {
+        rmdirSync(movieDir)
+        console.log(`[strm] Deleted movie directory: ${movieDir}`)
+        stats.deleted++
+      }
+      */
+      continue
+    }
+
+    // Ensure movie directory exists
+    if (!existsSync(movieDir)) {
+      mkdirSync(movieDir, { recursive: true })
+    }
+
+    // Force .ts extension for VOD URLs
     let channelUrl = channel.url
     if (channelUrl && !channelUrl.endsWith('.ts')) {
       channelUrl = channelUrl.replace(/\.(mkv|mp4|avi|m4v)$/i, '.ts')
     }
 
     const proxyUrl = `${baseUrl}/stream/${channel.id}?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-    const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
-
-    // Debug first few items
-    if (debugCount < 3) {
-      console.log(`[strm] DEBUG: matchKey="${matchKey}", tvg_name="${channel.tvg_name}", existing.has="${existing.has(matchKey)}"`)
-      debugCount++
-    }
-
-    // Check if this is a series based on group_title prefix OR filename pattern
-    const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
-
-    // Skip series without proper season/episode info
-    if (isSeriesGroup && !seriesInfo.isSeries) {
-      if (process.env.DEBUG) {
-        console.log(`[strm] Skipping series without S01E01 pattern: "${channel.tvg_name}"`)
-      }
-      skippedList.push({
-        name: channel.tvg_name,
-        group: channel.group_title,
-        reason: 'No S01E01 pattern'
-      })
-      stats.skipped++
-      continue
-    }
-
-    // Determine target directory and track if it's a new folder
-    let targetDir = strmDir
-    let isNewFolder = false
-
-    if (seriesInfo.isSeries) {
-      // Series: Create Series/Season folders (with year only if meta exists and has year)
-      const meta = channel.meta ? (typeof channel.meta === 'string' ? JSON.parse(channel.meta) : channel.meta) : null
-      const year = meta ? (meta.releaseDate || meta.release_date || meta.year || '') : ''
-
-      const baseName = seriesInfo.seriesName
-      const folderWithoutYear = sanitizeFilename(baseName)
-      const folderWithYear = year && meta ? sanitizeFilename(`${baseName} (${year})`) : null
-      const seasonFolder = `Season ${String(seriesInfo.season).padStart(2, '0')}`
-
-      // Check which series folder exists (prefer existing folder to avoid duplicates)
-      const pathWithoutYear = join(strmDir, folderWithoutYear, seasonFolder)
-      const pathWithYear = folderWithYear ? join(strmDir, folderWithYear, seasonFolder) : null
-
-      if (existsSync(join(strmDir, folderWithoutYear))) {
-        // Use existing series folder without year
-        targetDir = pathWithoutYear
-      } else if (folderWithYear && existsSync(join(strmDir, folderWithYear))) {
-        // Use existing series folder with year
-        targetDir = pathWithYear
-      } else {
-        // Create new folder (with year if we have metadata)
-        targetDir = (year && meta) ? pathWithYear : pathWithoutYear
-      }
-
-      // Create target directory if it doesn't exist (handles new series AND new seasons)
-      if (!existsSync(targetDir)) {
-        isNewFolder = !existsSync(dirname(targetDir)) // Only mark as new if series folder is new
-        mkdirSync(targetDir, { recursive: true })
-        console.log(`[strm] Created directory: ${targetDir}`)
-      }
-    } else {
-      // Movies: Create individual folder per movie
-      const meta = channel.meta ? (typeof channel.meta === 'string' ? JSON.parse(channel.meta) : channel.meta) : null
-      let year = extractYear(channel.tvg_name || '')
-
-      // If no year in name, try metadata
-      if (!year && meta) {
-        year = meta.releaseDate || meta.release_date || meta.year || null
-      }
-
-      const baseName = (channel.tvg_name || 'Unknown').replace(/\(\d{4}\)/, '').trim()
-      const movieFolder = year ? sanitizeFilename(`${baseName} (${year})`) : sanitizeFilename(baseName)
-      targetDir = join(strmDir, movieFolder)
-
-      // Create movie directory
-      if (!existsSync(targetDir)) {
-        isNewFolder = true
-        mkdirSync(targetDir, { recursive: true })
-      }
-    }
 
     const filename = buildFilename(channel)
     const metadataFilename = filename.replace('.strm', METADATA_EXT)
-    const strmPath = join(targetDir, filename)
-    const metadataPath = join(targetDir, metadataFilename)
+    const strmPath = join(movieDir, filename)
+    const metadataPath = join(movieDir, metadataFilename)
 
     const metadata = buildMetadata(channel, playlistId, proxyUrl)
+    const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
     const nfoContent = buildNfoContent(channel, seriesInfo)
 
-    // Determine NFO path and whether to create it
-    // For series: tvshow.nfo goes in series root folder (not season folder)
-    // For movies: movie.nfo goes in movie folder
-    let nfoPath = null
-    let shouldCreateNfo = false
-
-    if (seriesInfo.isSeries) {
-      // Series: tvshow.nfo in series root folder
-      const seriesRootDir = dirname(targetDir) // Go up from season folder to series folder
-      nfoPath = join(seriesRootDir, 'tvshow.nfo')
-      // Only create if it doesn't exist (never overwrite Jellyfin's enriched data)
-      shouldCreateNfo = !existsSync(nfoPath)
-    } else {
-      // Movie: movie.nfo in movie folder
-      nfoPath = join(targetDir, 'movie.nfo')
-      // Only create if it doesn't exist (never overwrite Jellyfin's enriched data)
-      shouldCreateNfo = !existsSync(nfoPath)
+    // Create movie.nfo if doesn't exist
+    const movieNfoPath = join(movieDir, 'movie.nfo')
+    if (!existsSync(movieNfoPath)) {
+      writeFileSync(movieNfoPath, nfoContent, 'utf8')
     }
-    const existingEntry = existing.get(matchKey)
+
+    const existingEntry = existing.get(channel.normalized_name || String(channel.id))
 
     try {
       if (existingEntry) {
-        // Channel exists - check if URL needs updating
         const oldStrmPath = existingEntry.fullStrmPath
         const oldMetadataPath = existingEntry.fullMetadataPath
         const oldUrl = readFileSync(oldStrmPath, 'utf8').trim()
 
-        if (stats.updated < 1) {
-          console.log(`[strm] COMPARE: "${oldUrl.substring(0,100)}" vs "${proxyUrl.substring(0,100)}" equal=${oldUrl === proxyUrl}`)
-        }
-
-        // Compare URLs - if different, update the file
         if (oldUrl !== proxyUrl) {
           console.log(`[strm] Updating URL for: ${existingEntry.strmFile}`)
           writeFileSync(oldStrmPath, proxyUrl, 'utf8')
@@ -550,13 +873,9 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
           stats.updated++
         }
       } else {
-        // New channel - create files (NFO only if new folder or doesn't exist)
         console.log(`[strm] Creating: ${filename}`)
         writeFileSync(strmPath, proxyUrl, 'utf8')
         writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf8')
-        if (shouldCreateNfo) {
-          writeFileSync(nfoPath, nfoContent, 'utf8')
-        }
         stats.created++
       }
     } catch (e) {
@@ -566,8 +885,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     }
   }
 
-  // Delete files that exist on disk but are NOT in the new dataset
-  // Only if deleteOrphans is enabled (prevents accidental deletion during normal exports)
+  // Delete orphaned files (not in new dataset)
   const deletedDirs = new Set()
   if (deleteOrphans) {
     console.log(`[strm] Checking for orphaned files to delete...`)
@@ -592,46 +910,26 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     console.log(`[strm] Skipping orphan deletion (deleteOrphans=false)`)
   }
 
-  // Clean up empty directories (movies, seasons, series)
+  // Clean up empty directories using safe deletion
   for (const dir of deletedDirs) {
-    try {
-      // Check if directory is empty
-      const files = readdirSync(dir)
-      if (files.length === 0) {
-        rmdirSync(dir)
-        console.log(`[strm] Removed empty directory: ${dir}`)
+    safeDeleteManagedDir(dir, deletedDirs)
 
-        // Also check parent directory (for series folders after removing last season)
-        const parentDir = dirname(dir)
-        if (parentDir !== strmDir && existsSync(parentDir)) {
-          const parentFiles = readdirSync(parentDir)
-          if (parentFiles.length === 0) {
-            rmdirSync(parentDir)
-            console.log(`[strm] Removed empty parent directory: ${parentDir}`)
-          }
-        }
-      }
-    } catch (e) {
-      // Ignore errors - directory might not be empty or already deleted
+    // Check parent directory for series (season's parent is series root)
+    const parentDir = dirname(dir)
+    if (parentDir !== strmDir && existsSync(parentDir)) {
+      safeDeleteManagedDir(parentDir, deletedDirs)
     }
   }
 
-  // Clean up orphaned folders - ONLY remove if empty to protect user data
+  // Clean up orphaned folders at top level
   try {
     const allItems = readdirSync(strmDir)
     for (const item of allItems) {
       const itemPath = join(strmDir, item)
       if (!statSync(itemPath).isDirectory()) continue
 
-      try {
-        const files = readdirSync(itemPath)
-        if (files.length === 0) {
-          rmdirSync(itemPath)
-          console.log(`[strm] Removed empty orphaned directory: ${item}`)
-        }
-      } catch (e) {
-        // Ignore errors accessing folders
-      }
+      // Only delete if managed and empty
+      safeDeleteManagedDir(itemPath, deletedDirs)
     }
   } catch (e) {
     console.error(`[strm] Error cleaning folders:`, e.message)

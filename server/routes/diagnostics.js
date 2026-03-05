@@ -9,10 +9,28 @@ router.get('/diagnostics/ip', async (req, res) => {
     const { execFile } = await import('node:child_process')
     const { promisify } = await import('node:util')
     const execFileAsync = promisify(execFile)
-    const { stdout } = await execFileAsync('curl', ['-s', 'https://api.ipify.org?format=json'])
-    res.json(JSON.parse(stdout))
+    // Use ipapi.co for full geolocation data
+    const { stdout } = await execFileAsync('curl', ['-s', '--max-time', '10', 'https://ipapi.co/json/'])
+    const data = JSON.parse(stdout)
+    res.json({
+      ip: data.ip,
+      country: data.country_name,
+      city: data.city,
+      org: data.org,
+      raw: data
+    })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    // Fallback to simple IP if geolocation fails
+    try {
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const execFileAsync = promisify(execFile)
+      const { stdout } = await execFileAsync('curl', ['-s', '--max-time', '5', 'https://api.ipify.org?format=json'])
+      const { ip } = JSON.parse(stdout)
+      res.json({ ip, country: null, city: null, org: null })
+    } catch (fallbackErr) {
+      res.status(500).json({ error: e.message })
+    }
   }
 })
 
@@ -56,10 +74,35 @@ router.get('/diagnostics/vpn', async (req, res) => {
     const { execFile } = await import('node:child_process')
     const { promisify } = await import('node:util')
     const execFileAsync = promisify(execFile)
-    const { stdout } = await execFileAsync('ip', ['route', 'show', 'default'])
-    const match = stdout.match(/via\s+(\S+)/)
-    const gateway = match ? match[1] : null
-    res.json({ gateway, raw: stdout.trim() })
+
+    // Check if tun0 interface exists and is UP
+    let vpnActive = false
+    try {
+      const { stdout: linkStdout } = await execFileAsync('ip', ['link', 'show', 'tun0'])
+      vpnActive = linkStdout.includes('state UP') || linkStdout.includes('UP')
+    } catch (e) {
+      // tun0 doesn't exist
+      vpnActive = false
+    }
+
+    // Check if default route goes via tun0
+    let defaultViaTun = false
+    let gateway = null
+    try {
+      const { stdout: routeStdout } = await execFileAsync('ip', ['route', 'show', 'default'])
+      const match = routeStdout.match(/via\s+(\S+)/)
+      gateway = match ? match[1] : null
+      defaultViaTun = routeStdout.includes('tun0') || routeStdout.includes('dev tun')
+    } catch (e) {
+      // No default route
+    }
+
+    res.json({
+      vpnActive,
+      defaultViaTun,
+      gateway,
+      raw: { vpnActive, defaultViaTun, gateway }
+    })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
