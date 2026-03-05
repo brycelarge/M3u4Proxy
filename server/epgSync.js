@@ -134,91 +134,59 @@ export async function syncEpgSites(db, { onProgress } = {}) {
   if (!res.ok) throw new Error(`Failed to download zip: ${res.status}`)
 
   log('Parsing ZIP entries…')
-  const arrayBuffer = await res.arrayBuffer()
-  const buf = Buffer.from(arrayBuffer)
+  const { Readable } = await import('node:stream')
+  const stream = Readable.fromWeb(res.body)
 
   // Parse ZIP entries — extract *.channels.xml (parse into DB) and *.config.js (write to disk)
   const wantFile = (fname) =>
     fname.includes('/sites/') &&
     (fname.endsWith('.channels.xml') || fname.endsWith('.config.js'))
 
-  const { inflateRawSync } = await import('node:zlib')
-
   const allChannels = []
   let fileCount = 0
   let configCount = 0
-  let pos = 0
 
   mkdirSync(SITES_DIR, { recursive: true })
 
-  while (pos < buf.length - 4) {
-    const sig = buf.readUInt32LE(pos)
+  // Use the streaming zip extractor
+  for await (const entry of streamZipEntries(stream, wantFile)) {
+    const { path: fname, data: fileBuf } = entry
 
-    if (sig !== LOCAL_SIG) { pos++; continue }
+    try {
+      // Path: epg-master/sites/dstv.com/dstv.com_za.channels.xml
+      const parts    = fname.split('/')
+      const siteName = parts[parts.length - 2]
+      const filename = parts[parts.length - 1]
 
-    const flags     = buf.readUInt16LE(pos + 6)
-    const compress  = buf.readUInt16LE(pos + 8)
-    const compSize  = buf.readUInt32LE(pos + 18)
-    const fnameLen  = buf.readUInt16LE(pos + 26)
-    const extraLen  = buf.readUInt16LE(pos + 28)
-    const fname     = buf.toString('utf8', pos + 30, pos + 30 + fnameLen)
-    const dataStart = pos + 30 + fnameLen + extraLen
-
-    if (fname.endsWith('/') || compSize === 0) {
-      pos = dataStart + compSize
-      continue
-    }
-
-    if (wantFile(fname)) {
-      try {
-        const compData = buf.slice(dataStart, dataStart + compSize)
-        let fileBuf
-        if (compress === 0) {
-          fileBuf = compData
-        } else if (compress === 8) {
-          fileBuf = inflateRawSync(compData)
-        } else {
-          pos = dataStart + compSize
+      if (filename.endsWith('.channels.xml')) {
+        const channels = parseChannelsXml(fileBuf.toString('utf8'), siteName, filename)
+        allChannels.push(...channels)
+        fileCount++
+        if (fileCount % 50 === 0) log(`Parsed ${fileCount} channel files, ${allChannels.length} channels so far…`)
+      } else if (filename.endsWith('.config.js')) {
+        // Write config.js to disk so epg-grabber can import it
+        const siteDir = path.join(SITES_DIR, siteName)
+        try {
+          // Create directory with proper permissions
+          mkdirSync(siteDir, { recursive: true, mode: 0o755 })
+        } catch (err) {
+          console.error(`[epg-sync] Failed to create directory ${siteDir}: ${err.message}`)
           continue
         }
 
-        // Path: epg-master/sites/dstv.com/dstv.com_za.channels.xml
-        const parts    = fname.split('/')
-        const siteName = parts[parts.length - 2]
-        const filename = parts[parts.length - 1]
-
-        if (filename.endsWith('.channels.xml')) {
-          const channels = parseChannelsXml(fileBuf.toString('utf8'), siteName, filename)
-          allChannels.push(...channels)
-          fileCount++
-          if (fileCount % 50 === 0) log(`Parsed ${fileCount} channel files, ${allChannels.length} channels so far…`)
-        } else if (filename.endsWith('.config.js')) {
-          // Write config.js to disk so epg-grabber can import it
-          const siteDir = path.join(SITES_DIR, siteName)
-          try {
-            // Create directory with proper permissions
-            mkdirSync(siteDir, { recursive: true, mode: 0o755 })
-          } catch (err) {
-            console.error(`[epg-sync] Failed to create directory ${siteDir}: ${err.message}`)
-            continue
-          }
-
-          const configPath = path.join(siteDir, filename)
-          try {
-            writeFileSync(configPath, fileBuf, { mode: 0o644 })
-            // Convert CommonJS config to ES Module format
-            processConfigFile(configPath)
-            configCount++
-          } catch (writeErr) {
-            console.error(`[epg-sync] Failed to write ${configPath}: ${writeErr.message}`)
-          }
+        const configPath = path.join(siteDir, filename)
+        try {
+          writeFileSync(configPath, fileBuf, { mode: 0o644 })
+          // Convert CommonJS config to ES Module format
+          processConfigFile(configPath)
+          configCount++
+        } catch (writeErr) {
+          console.error(`[epg-sync] Failed to write ${configPath}: ${writeErr.message}`)
         }
-      } catch (e) {
-        console.warn(`[epg-sync] Failed to process ${fname}: ${e.message}`)
       }
+    } catch (e) {
+      console.warn(`[epg-sync] Failed to process ${fname}: ${e.message}`)
     }
-
-    pos = dataStart + compSize
   }
 
   log(`Parsed ${fileCount} channel files, ${allChannels.length} channels. Wrote ${configCount} config files. Writing to DB…`)

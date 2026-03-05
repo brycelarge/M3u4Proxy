@@ -151,17 +151,26 @@ async function pump(session) {
       let lastDataTime = Date.now()
       const STALL_TIMEOUT = 30000 // 30 seconds without data = stalled
 
-      while (true) {
-        // Add timeout to detect stalled streams
-        const readPromise = reader.read()
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Stream stalled - no data received')), STALL_TIMEOUT)
-        )
+      // Active watchdog to catch silent TCP hangs
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastDataTime > STALL_TIMEOUT && !session.dead) {
+          console.error(`[stream] Watchdog triggered for "${session.channelName}": No data received for ${STALL_TIMEOUT/1000}s. Forcing reconnect...`)
+          try { session.abortCtrl.abort() } catch(e) {}
+        }
+      }, 5000)
 
-        const { done, value } = await Promise.race([readPromise, timeoutPromise])
-        if (done || session.dead) break
+      try {
+        while (true) {
+          // Add timeout to detect stalled streams at the reader level
+          const readPromise = reader.read()
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Stream stalled - no data received')), STALL_TIMEOUT)
+          )
 
-        lastDataTime = Date.now()
+          const { done, value } = await Promise.race([readPromise, timeoutPromise])
+          if (done || session.dead) break
+
+          lastDataTime = Date.now()
         session.bytesIn += value.length
         const now = Date.now()
         const elapsed = (now - session._lastTick) / 1000
@@ -271,6 +280,9 @@ async function pump(session) {
       // Stream ended cleanly — reconnect if clients still waiting
       if (session.clients.size === 0) break
       console.log(`[stream] Stream ended for "${session.channelName}" — reconnecting in ${RECONNECT_DELAY}ms…`)
+      } finally {
+        clearInterval(watchdog)
+      }
     } catch (e) {
       if (e.name === 'AbortError' || session.dead) break
       console.error(`[stream] Error for "${session.channelName}":`, e.message)
