@@ -124,7 +124,6 @@ function parseXmlSimple(xml) {
       if (inferredLang) {
         result.languages.push(inferredLang)
         result.inferredFromCountry = country
-        console.log(`[nfo-parser] Inferred language '${inferredLang}' from country '${country}' for: ${result.title}`)
       }
     }
   }

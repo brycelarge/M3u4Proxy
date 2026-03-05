@@ -285,9 +285,6 @@ function scanExistingFiles(strmDir) {
 
   function scanDirectory(dir, relativePath = '') {
     const files = readdirSync(dir)
-    if (metadataCount < 5) {
-      console.log(`[strm] Scanning ${dir}: found ${files.length} items`)
-    }
 
     for (const file of files) {
       const fullPath = join(dir, file)
@@ -299,17 +296,9 @@ function scanExistingFiles(strmDir) {
         continue
       }
 
-      if (metadataCount < 5 && file.includes('.json')) {
-        console.log(`[strm] Checking file: "${file}", endsWith="${file.endsWith(METADATA_EXT)}", METADATA_EXT="${METADATA_EXT}"`)
-      }
-
       if (!file.endsWith(METADATA_EXT)) continue
 
       metadataCount++
-      if (metadataCount <= 3 || file.includes('Untitled')) {
-        console.log(`[strm] Processing metadata file #${metadataCount}: "${file}"`)
-      }
-
       const metadataPath = fullPath
       const strmFile = file.replace(METADATA_EXT, '.strm')
       const strmPath = join(dir, strmFile)
@@ -317,18 +306,10 @@ function scanExistingFiles(strmDir) {
       try {
         const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'))
 
-        if (metadataCount <= 3 || file.includes('Untitled')) {
-          console.log(`[strm] Read metadata, checking STRM exists: "${strmPath}", exists="${existsSync(strmPath)}"`)
-          console.log(`[strm] Metadata content: normalizedName="${metadata.normalizedName}", normalized_name="${metadata.normalized_name}", channelId="${metadata.channelId}"`)
-        }
-
         if (existsSync(strmPath)) {
           // Use normalized_name as key for matching across provider changes
           // Handle both camelCase (old) and snake_case (new) formats
           const key = metadata.normalizedName || metadata.normalized_name || metadata.channelId
-          if (metadataCount <= 3 || file.includes('Untitled')) {
-            console.log(`[strm] Found metadata: key="${key}", channelId="${metadata.channelId}", file="${file}"`)
-          }
           map.set(key, {
             strmFile,
             metadataFile: file,
@@ -338,10 +319,6 @@ function scanExistingFiles(strmDir) {
             fullMetadataPath: metadataPath
           })
         } else {
-          if (metadataCount <= 3 || file.includes('Untitled')) {
-            console.log(`[strm] STRM file missing, deleting orphaned metadata: "${file}"`)
-          }
-          // Orphaned metadata file - delete it
           unlinkSync(metadataPath)
         }
       } catch (e) {
@@ -355,7 +332,7 @@ function scanExistingFiles(strmDir) {
 }
 
 export async function exportVodToStrm(playlistId, baseUrl, username, password, options = {}) {
-  const { deleteOrphans = false } = options
+  const { deleteOrphans = true } = options
   console.log(`[strm] Starting export for playlist ${playlistId} (deleteOrphans: ${deleteOrphans})`)
 
   // Auto-sync VOD languages from NFO files before export
@@ -486,7 +463,6 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const seriesGroups = new Map() // seriesName -> { episodes: [], folderPath: null }
   const movieItems = new Map() // normalized_name -> channel
 
-  let movieDebugCount = 0
   for (const channel of channels) {
     const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
     const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
@@ -514,13 +490,6 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     } else {
       // Movies are handled individually
       const matchKey = channel.normalized_name || String(channel.id) || channel.url
-      if (matchKey === 'undefined' || !matchKey) {
-        console.log(`[strm] DEBUG: Movie has no matchKey - id: ${channel.id}, normalized_name: ${channel.normalized_name}, url: ${channel.url?.substring(0, 50)}`)
-      }
-      if (movieDebugCount < 5) {
-        console.log(`[strm] DEBUG Movie #${movieDebugCount + 1}: "${channel.tvg_name}" -> matchKey="${matchKey}" (normalized_name="${channel.normalized_name}", id="${channel.id}")`)
-        movieDebugCount++
-      }
       if (!movieItems.has(matchKey)) {
         movieItems.set(matchKey, channel)
       } else {
@@ -656,9 +625,10 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     moviesToProcess.set(movieKey, { channel, movieDir })
   }
 
-  console.log(`[strm] Processing ${seriesToProcess.size} series (${seriesToSkip.size} filtered), ${moviesToProcess.size} movies (${movieItems.size - moviesToProcess.size} filtered)`)
+  console.log(`[strm] Processing ${seriesToProcess.size} series (${seriesToSkip.size} filtered), ${moviesToProcess.size} movies (${stats.skipped} duplicates, ${movieItems.size - moviesToProcess.size} filtered)`)
 
   // Build a set of all keys in the NEW dataset (for orphan detection)
+  // Use the same key format as existing metadata files (normalized_name from channel)
   const newContentKeys = new Set()
   for (const seriesData of seriesToProcess.values()) {
     for (const ep of seriesData.episodes) {
@@ -666,20 +636,21 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     }
   }
   for (const { channel } of moviesToProcess.values()) {
-    newContentKeys.add(channel.normalized_name || String(channel.id))
+    // Match the key format used in scanExistingFiles: metadata.normalizedName || metadata.normalized_name || metadata.channelId
+    // Since buildMetadata writes normalizedName (camelCase), use that
+    const key = channel.normalized_name || String(channel.id)
+    newContentKeys.add(key)
   }
 
   // Delete series marked for removal (language filtered with deleteOrphans=true)
   for (const [seriesKey, seriesData] of seriesToSkip.entries()) {
     if (seriesData.delete && existsSync(seriesData.folderPath)) {
-      console.log(`[strm] DEBUG: Would delete filtered series: ${seriesData.seriesName} at ${seriesData.folderPath}`)
-      // TODO: Uncomment for production - currently disabled for testing
-      /*
       console.log(`[strm] Deleting filtered series: ${seriesData.seriesName}`)
       // Delete all contents recursively
       const deleteRecursive = (dir) => {
         if (!existsSync(dir)) return
         const files = readdirSync(dir)
+
         for (const file of files) {
           const fullPath = join(dir, file)
           if (statSync(fullPath).isDirectory()) {
@@ -702,7 +673,6 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
         }
       }
       deleteRecursive(seriesData.folderPath)
-      */
     }
   }
 
@@ -813,9 +783,6 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
     // Delete if marked for removal
     if (shouldDelete && existsSync(movieDir)) {
-      console.log(`[strm] DEBUG: Would delete filtered movie: ${channel.tvg_name} at ${movieDir}`)
-      // TODO: Uncomment for production - currently disabled for testing
-      /*
       console.log(`[strm] Deleting filtered movie: ${channel.tvg_name}`)
       const files = readdirSync(movieDir)
       for (const file of files) {
@@ -826,7 +793,6 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
         console.log(`[strm] Deleted movie directory: ${movieDir}`)
         stats.deleted++
       }
-      */
       continue
     }
 
@@ -858,7 +824,10 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
       writeFileSync(movieNfoPath, nfoContent, 'utf8')
     }
 
-    const existingEntry = existing.get(channel.normalized_name || String(channel.id))
+    // Match key format from scanExistingFiles: metadata.normalizedName (camelCase)
+    // The existing Map uses normalizedName from old metadata files
+    const lookupKey = channel.normalized_name || String(channel.id)
+    const existingEntry = existing.get(lookupKey)
 
     try {
       if (existingEntry) {
