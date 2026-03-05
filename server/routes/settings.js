@@ -4,6 +4,25 @@ import { startContentUpdateScheduler, startEpgGrabCron, startEnrichCron } from '
 
 const router = express.Router()
 
+// ── VOD Settings Helpers ───────────────────────────────────────────────────────
+export function getVodSettings() {
+  const settings = db.prepare('SELECT * FROM settings WHERE key LIKE ?').all('vod_%')
+  const result = {}
+  for (const row of settings) {
+    try {
+      result[row.key] = JSON.parse(row.value)
+    } catch {
+      result[row.key] = row.value
+    }
+  }
+  // Ensure defaults
+  return {
+    vod_allowed_languages: result.vod_allowed_languages || ['eng'],
+    vod_language_filter_mode: result.vod_language_filter_mode || 'disabled',
+    vod_blocked_titles: result.vod_blocked_titles || []
+  }
+}
+
 // ── Settings ──────────────────────────────────────────────────────────────────
 router.get('/settings', (req, res) => {
   const rows = db.prepare('SELECT * FROM settings').all()
@@ -32,6 +51,39 @@ router.put('/settings', (req, res) => {
   }
 
   res.json({ ok: true })
+})
+
+// ── VOD Settings ──────────────────────────────────────────────────────────────
+// GET /api/vod/settings - Get VOD-specific settings
+router.get('/vod/settings', (req, res) => {
+  res.json(getVodSettings())
+})
+
+// GET /api/vod/languages - Get languages for VOD settings UI (NFO + always eng)
+router.get('/vod/languages', async (req, res) => {
+  try {
+    // Fetch from STRM scanner
+    const response = await fetch(`http://localhost:${process.env.PORT || 3005}/api/strm/languages`)
+    const data = await response.json()
+
+    // Get current settings
+    const vodSettings = getVodSettings()
+
+    res.json({
+      languages: data.languages || ['eng'],
+      totalChannels: data.totalChannels || 0,
+      withLanguageData: data.withLanguageData || 0,
+      currentSettings: vodSettings
+    })
+  } catch (e) {
+    // Return default with just eng if scanner fails
+    res.json({
+      languages: ['eng'],
+      totalChannels: 0,
+      withLanguageData: 0,
+      currentSettings: getVodSettings()
+    })
+  }
 })
 
 // ── STRM Export ───────────────────────────────────────────────────────────────
