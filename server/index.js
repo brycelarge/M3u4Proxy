@@ -751,6 +751,80 @@ app.get('/api/sources/:id/groups', (req, res) => {
   res.json({ groups, total, cached: groups.length > 0 })
 })
 
+// Get channels for a prefixed group key across all sources
+app.get('/api/sources/all/channels', (req, res) => {
+  const groupKey = req.query.group  // e.g. "ky-tv › Sports"
+  const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null
+  const limit    = Math.min(parseInt(req.query.limit  || '2000'), 5000)
+  const offset   = parseInt(req.query.offset || '0')
+
+  const cacheKey = `all-v3:${sourceId || ''}:${groupKey || 'all'}:${limit}:${offset}`
+  const cached = getCached(cacheKey)
+  if (cached) return res.json(cached)
+
+  if (!groupKey) {
+    const total = db.prepare('SELECT COUNT(*) as c FROM source_channels').get().c
+    const rows = db.prepare(`
+      SELECT sc.id,sc.tvg_id,sc.tvg_name,sc.tvg_logo,sc.group_title,sc.url,sc.source_id,s.name as source_name
+      FROM source_channels sc
+      JOIN sources s ON s.id = sc.source_id
+      ORDER BY sc.id LIMIT ? OFFSET ?
+    `).all(limit, offset)
+    const result = {
+      total, offset, limit,
+      channels: rows.map(r => ({
+        id:          String(r.id),
+        name:        r.tvg_name,
+        logo:        r.tvg_logo,
+        group:       `${r.source_name} › ${r.group_title}`,
+        group_title: r.group_title,
+        source_id:   r.source_id,
+        source_name: r.source_name,
+        url:         r.url,
+        tvg_id:      r.tvg_id,
+      }))
+    }
+    setCache(cacheKey, result)
+    return res.json(result)
+  }
+  // Parse "sourceName › groupTitle" key
+  const sep = ' › '
+  const sepIdx = groupKey.indexOf(sep)
+  if (sepIdx === -1) return res.status(400).json({ error: 'Invalid group key format' })
+  const groupTitle = groupKey.slice(sepIdx + sep.length)
+
+  // Query all channels with this group_title across all sources
+  const total = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE group_title = ?').get(groupTitle).c
+
+  const rows = db.prepare(`
+    SELECT sc.id, sc.tvg_id, sc.tvg_name, sc.tvg_logo, sc.group_title, sc.url, sc.source_id, sc.normalized_name, sc.quality, s.name as source_name
+    FROM source_channels sc
+    JOIN sources s ON sc.source_id = s.id
+    WHERE sc.group_title = ?
+    ORDER BY sc.id
+    LIMIT ? OFFSET ?
+  `).all(groupTitle, limit, offset)
+
+  const result = {
+    total, offset, limit,
+    channels: rows.map(r => ({
+      id:              String(r.id),
+      name:            r.tvg_name,
+      logo:            r.tvg_logo,
+      group:           groupKey,
+      group_title:     r.group_title,
+      source_id:       r.source_id,
+      source_name:     r.source_name,
+      url:             r.url,
+      tvg_id:          r.tvg_id,
+      normalized_name: r.normalized_name,
+      quality:         r.quality,
+    }))
+  }
+  setCache(cacheKey, result)
+  res.json(result)
+})
+
 // Get channels for a specific source and group
 app.get('/api/sources/:id/channels', (req, res) => {
   const sourceId = parseInt(req.params.id)
@@ -813,84 +887,6 @@ app.get('/api/sources/:id/channels', (req, res) => {
     }))
   }
 
-  setCache(cacheKey, result)
-  res.json(result)
-})
-
-// Get channels for a prefixed group key across all sources
-app.get('/api/sources/all/channels', (req, res) => {
-  const groupKey = req.query.group  // e.g. "ky-tv › Sports"
-  const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null
-  const limit    = Math.min(parseInt(req.query.limit  || '2000'), 5000)
-  const offset   = parseInt(req.query.offset || '0')
-
-  const cacheKey = `all:${sourceId || ''}:${groupKey || 'all'}:${limit}:${offset}`
-  const cached = getCached(cacheKey)
-  if (cached) return res.json(cached)
-
-  if (!groupKey) {
-    const total = db.prepare('SELECT COUNT(*) as c FROM source_channels').get().c
-    const rows = db.prepare(`
-      SELECT sc.id,sc.tvg_id,sc.tvg_name,sc.tvg_logo,sc.group_title,sc.url,sc.source_id,s.name as source_name
-      FROM source_channels sc
-      JOIN sources s ON s.id = sc.source_id
-      ORDER BY sc.id LIMIT ? OFFSET ?
-    `).all(limit, offset)
-    const result = {
-      total, offset, limit,
-      channels: rows.map(r => ({
-        id:          String(r.id),
-        name:        r.tvg_name,
-        logo:        r.tvg_logo,
-        group:       `${r.source_name} › ${r.group_title}`,
-        group_title: r.group_title,
-        source_id:   r.source_id,
-        source_name: r.source_name,
-        url:         r.url,
-        tvg_id:      r.tvg_id,
-      }))
-    }
-    setCache(cacheKey, result)
-    return res.json(result)
-  }
-  // Parse "sourceName › groupTitle" key
-  const sep = ' › '
-  const sepIdx = groupKey.indexOf(sep)
-  if (sepIdx === -1) return res.status(400).json({ error: 'Invalid group key format' })
-  const groupTitle = groupKey.slice(sepIdx + sep.length)
-
-  // If source_id is provided, use it directly. Otherwise look up by name (may find wrong source if duplicates exist)
-  let source
-  if (sourceId) {
-    source = db.prepare('SELECT * FROM sources WHERE id = ?').get(sourceId)
-    if (!source) return res.status(404).json({ error: `Source ID ${sourceId} not found` })
-  } else {
-    const sourceName = groupKey.slice(0, sepIdx)
-    source = db.prepare('SELECT * FROM sources WHERE name = ?').get(sourceName)
-    if (!source) return res.status(404).json({ error: `Source "${sourceName}" not found` })
-  }
-
-  const total = db.prepare('SELECT COUNT(*) as c FROM source_channels WHERE source_id = ? AND group_title = ?').get(source.id, groupTitle).c
-
-  const rows = db.prepare(
-    'SELECT id,tvg_id,tvg_name,tvg_logo,group_title,url,source_id,normalized_name,quality FROM source_channels WHERE source_id = ? AND group_title = ? ORDER BY id LIMIT ? OFFSET ?'
-  ).all(source.id, groupTitle, limit, offset)
-  const result = {
-    total, offset, limit,
-    channels: rows.map(r => ({
-      id:              String(r.id),
-      name:            r.tvg_name,
-      logo:            r.tvg_logo,
-      group:           groupKey,
-      group_title:     r.group_title,
-      source_id:       r.source_id,
-      source_name:     source.name,
-      url:             r.url,
-      tvg_id:          r.tvg_id,
-      normalized_name: r.normalized_name,
-      quality:         r.quality,
-    }))
-  }
   setCache(cacheKey, result)
   res.json(result)
 })
@@ -4815,6 +4811,7 @@ app.use((req, res, next) => {
   res.status(404).send('Not found')
 })
 
-app.listen(PORT, () => {
-  console.log(`M3u4Proxy server running on http://localhost:${PORT}`)
+app.listen(PORT, '0.0.0.0', () => {
+  const host = process.env.HOST_IP || 'localhost'
+  console.log(`M3u4Proxy server running on http://${host}:${PORT}`)
 })

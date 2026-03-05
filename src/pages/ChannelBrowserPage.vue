@@ -55,6 +55,18 @@ function openCreatePlaylistModal() {
   showPlaylistModal.value = true
 }
 
+function openEditPlaylistModal() {
+  const playlist = allPlaylists.value.find(p => p.id === activePlaylistId.value)
+  if (!playlist) return
+
+  playlistForm.value = {
+    name: playlist.name,
+    type: playlist.playlist_type || 'live'
+  }
+  isEditingPlaylist.value = true
+  showPlaylistModal.value = true
+}
+
 async function createPlaylist() {
   if (!playlistForm.value.name.trim()) return
 
