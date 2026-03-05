@@ -825,6 +825,28 @@ app.get('/api/sources/all/channels', (req, res) => {
   res.json(result)
 })
 
+// Bulk fetch specific channel IDs (for review modal / export)
+app.post('/api/source-channels/by-ids', (req, res) => {
+  const { channelIds } = req.body
+  if (!Array.isArray(channelIds) || channelIds.length === 0) {
+    return res.json([])
+  }
+
+  // Limit to prevent abuse
+  const MAX_IDS = 50000
+  const ids = channelIds.slice(0, MAX_IDS)
+
+  // Build placeholders for SQL IN clause
+  const placeholders = ids.map(() => '?').join(',')
+  const channels = db.prepare(
+    `SELECT id, tvg_id, tvg_name, tvg_logo, group_title, url, source_id, normalized_name, quality
+     FROM source_channels
+     WHERE id IN (${placeholders})`
+  ).all(...ids)
+
+  res.json(channels)
+})
+
 // Get channels for a specific source and group
 app.get('/api/sources/:id/channels', (req, res) => {
   const sourceId = parseInt(req.params.id)

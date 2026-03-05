@@ -584,60 +584,25 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     }
   }
 
-  // Clean up orphaned folders (folders without any .m3u4prox.json metadata files)
-  // This handles content from old exports before metadata tracking was added
-  function hasMetadataInTree(dirPath) {
-    const items = readdirSync(dirPath)
-    for (const item of items) {
-      const itemPath = join(dirPath, item)
-      const stat = statSync(itemPath)
-
-      if (stat.isFile() && item.endsWith(METADATA_EXT)) {
-        return true
-      }
-      if (stat.isDirectory()) {
-        if (hasMetadataInTree(itemPath)) {
-          return true
-        }
-      }
-    }
-    return false
-  }
-
-  function deleteRecursive(dirPath) {
-    const items = readdirSync(dirPath)
-    for (const item of items) {
-      const itemPath = join(dirPath, item)
-      const stat = statSync(itemPath)
-
-      if (stat.isDirectory()) {
-        deleteRecursive(itemPath)
-        rmdirSync(itemPath)
-      } else {
-        unlinkSync(itemPath)
-      }
-    }
-  }
-
+  // Clean up orphaned folders - ONLY remove if empty to protect user data
   try {
     const allItems = readdirSync(strmDir)
     for (const item of allItems) {
       const itemPath = join(strmDir, item)
       if (!statSync(itemPath).isDirectory()) continue
 
-      // Check if folder tree has any metadata files (recursively)
-      const hasMetadata = hasMetadataInTree(itemPath)
-
-      if (!hasMetadata) {
-        // Folder has no metadata anywhere in tree - it's orphaned from old export
-        console.log(`[strm] Removing orphaned folder (no metadata): ${item}`)
-        deleteRecursive(itemPath)
-        rmdirSync(itemPath)
-        stats.deleted++
+      try {
+        const files = readdirSync(itemPath)
+        if (files.length === 0) {
+          rmdirSync(itemPath)
+          console.log(`[strm] Removed empty orphaned directory: ${item}`)
+        }
+      } catch (e) {
+        // Ignore errors accessing folders
       }
     }
   } catch (e) {
-    console.error(`[strm] Error cleaning orphaned folders:`, e.message)
+    console.error(`[strm] Error cleaning folders:`, e.message)
   }
 
   db.close()
