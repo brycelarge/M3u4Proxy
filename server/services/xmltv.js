@@ -112,10 +112,46 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
         const prog = parseProgBlock(progContent)
         const enriched = applyEnrichment(prog, showMap, epMap)
 
-        // Add enriched poster if available and not already present
-        if (enriched.icon && !/<icon\b/.test(progContent)) {
+        // Handle both <icon> and <image> tags (some EPGs use <image> instead of <icon>)
+        const hasIcon = /<icon\b/.test(progContent)
+        const hasImage = /<image\b/.test(progContent)
+
+        // Extract existing image URL if present
+        let existingImageUrl = null
+        if (hasImage && !hasIcon) {
+          const imageMatch = progContent.match(/<image[^>]*>\s*([^<]+)\s*<\/image>/)
+          if (imageMatch) {
+            existingImageUrl = imageMatch[1].trim()
+            // Remove <image> tag and replace with <icon>
+            progContent = progContent.replace(/<image[^>]*>[\s\S]*?<\/image>/, '')
+          }
+        }
+
+        // Replace or add enriched poster
+        if (enriched.icon) {
           const proxyUrl = `${hostUrl}/api/logo?url=${encodeURIComponent(enriched.icon)}`
+          if (hasIcon) {
+            // Replace existing icon
+            progContent = progContent.replace(/<icon\s+src="[^"]*"\s*\/>/, `<icon src="${escapeXml(proxyUrl)}" />`)
+          } else {
+            // Add new icon
+            progContent = progContent.replace('</programme>', `  <icon src="${escapeXml(proxyUrl)}" />\n</programme>`)
+          }
+        } else if (existingImageUrl) {
+          // Use existing image URL from <image> tag
+          const proxyUrl = `${hostUrl}/api/logo?url=${encodeURIComponent(existingImageUrl)}`
           progContent = progContent.replace('</programme>', `  <icon src="${escapeXml(proxyUrl)}" />\n</programme>`)
+        } else {
+          // Fix any existing icon URLs to use our proxy
+          const iconMatch = progContent.match(/<icon\s+src="([^"]+)"\s*\/>/)
+          if (iconMatch) {
+            const originalUrl = iconMatch[1]
+            // Only proxy external URLs, not already proxied ones
+            if (!originalUrl.startsWith('/api/logo') && !originalUrl.includes('/api/logo?url=')) {
+              const proxyUrl = `${hostUrl}/api/logo?url=${encodeURIComponent(originalUrl)}`
+              progContent = progContent.replace(/<icon\s+src="([^"]+)"\s*\/>/, `<icon src="${escapeXml(proxyUrl)}" />`)
+            }
+          }
         }
 
         // Add enriched description if available and not already present
@@ -123,15 +159,9 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
           progContent = progContent.replace('</programme>', `  <desc>${escapeXml(enriched.desc)}</desc>\n</programme>`)
         }
 
-        // Fix any existing icon URLs to use our proxy
-        const iconMatch = progContent.match(/<icon\s+src="([^"]+)"\s*\/>/)
-        if (iconMatch) {
-          const originalUrl = iconMatch[1]
-          // Only proxy external URLs, not already proxied ones
-          if (!originalUrl.startsWith('/api/logo') && !originalUrl.includes('/api/logo?url=')) {
-            const proxyUrl = `${hostUrl}/api/logo?url=${encodeURIComponent(originalUrl)}`
-            progContent = progContent.replace(/<icon\s+src="([^"]+)"\s*\/>/, `<icon src="${escapeXml(proxyUrl)}" />`)
-          }
+        // Preserve or add episode-num if available
+        if (enriched.episode && !/<episode-num\b/.test(progContent)) {
+          progContent = progContent.replace('</programme>', `  <episode-num system="xmltv_ns">${escapeXml(enriched.episode)}</episode-num>\n</programme>`)
         }
 
         programmes_xml.push(progContent)

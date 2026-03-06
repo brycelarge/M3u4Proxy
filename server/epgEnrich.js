@@ -141,10 +141,36 @@ export function escapeXml(s) {
 // Parse XMLTV date format (YYYYMMDDHHmmss +ZZZZ) to ISO string
 function parseXmltvDate(str) {
   if (!str) return null
-  const clean = str.replace(/[^0-9]/g, '')
-  if (clean.length < 14) return null
+
+  // Extract timestamp and timezone offset
+  // Format: YYYYMMDDHHmmss +ZZZZ or YYYYMMDDHHmmss -ZZZZ
+  const match = str.match(/^(\d{14})\s*([+-]\d{4})/)
+  if (!match) return null
+
+  const [, timestamp, offset] = match
+
   try {
-    return new Date(`${clean.slice(0,4)}-${clean.slice(4,6)}-${clean.slice(6,8)}T${clean.slice(8,10)}:${clean.slice(10,12)}:${clean.slice(12,14)}Z`).toISOString()
+    // Parse timestamp components
+    const year = timestamp.slice(0, 4)
+    const month = timestamp.slice(4, 6)
+    const day = timestamp.slice(6, 8)
+    const hour = timestamp.slice(8, 10)
+    const minute = timestamp.slice(10, 12)
+    const second = timestamp.slice(12, 14)
+
+    // Parse timezone offset (+0200 or -0500)
+    const offsetSign = offset[0]
+    const offsetHours = parseInt(offset.slice(1, 3), 10)
+    const offsetMinutes = parseInt(offset.slice(3, 5), 10)
+    const offsetTotalMinutes = offsetSign === '+'
+      ? (offsetHours * 60 + offsetMinutes)
+      : -(offsetHours * 60 + offsetMinutes)
+
+    // Create date in the specified timezone and convert to UTC
+    const localDate = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}`)
+    const utcDate = new Date(localDate.getTime() - (offsetTotalMinutes * 60 * 1000))
+
+    return utcDate.toISOString()
   } catch {
     return null
   }
