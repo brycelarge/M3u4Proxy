@@ -278,6 +278,69 @@ const diagSpeed     = ref(null)
 const diagRunning   = ref({ ip: false, vpn: false, speed: false })
 const diagError     = ref({ ip: null, vpn: null, speed: null })
 
+// ── VPN Config state ─────────────────────────────────────────────────────────
+const vpnConfigs       = ref([])
+const currentVpnConfig = ref('')  // Currently active config
+const selectedVpnConfig = ref('')  // Selected in dropdown for switching
+const filteredVpnConfigs = computed(() => {
+  let filtered = vpnConfigs.value
+  if (vpnProtocolFilter.value !== 'all') {
+    filtered = filtered.filter(c => c.protocol === vpnProtocolFilter.value)
+  }
+  // Exclude currently active config from options
+  if (currentVpnConfig.value) {
+    filtered = filtered.filter(c => c.path !== currentVpnConfig.value)
+  }
+  return filtered
+})
+const vpnProvider      = ref('')
+const vpnProtocolFilter = ref('udp')
+const vpnChanging      = ref(false)
+const vpnChangeError   = ref('')
+const vpnChangeSuccess = ref('')
+
+async function loadVpnConfigs() {
+  try {
+    const data = await fetch('/api/diagnostics/vpn-configs').then(r => r.json())
+    vpnConfigs.value = data.configs || []
+    currentVpnConfig.value = data.current || ''
+    vpnProvider.value = data.provider || 'NORDVPN'
+  } catch (e) {
+    console.error('Failed to load VPN configs:', e)
+  }
+}
+
+async function changeVpnConfig() {
+  if (!selectedVpnConfig.value) return
+  vpnChanging.value = true
+  vpnChangeError.value = ''
+  vpnChangeSuccess.value = ''
+  try {
+    const r = await fetch('/api/diagnostics/vpn-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: selectedVpnConfig.value })
+    })
+    const data = await r.json()
+    if (!r.ok) throw new Error(data.error || 'Failed to change VPN config')
+    vpnChangeSuccess.value = data.message || 'VPN config switched'
+    if (data.note) {
+      vpnChangeSuccess.value += '. ' + data.note
+    }
+    // Update current config to the newly selected one
+    currentVpnConfig.value = selectedVpnConfig.value
+    // Clear selection
+    selectedVpnConfig.value = ''
+    setTimeout(() => { vpnChangeSuccess.value = '' }, 8000)
+    setTimeout(runVpnCheck, 6000)
+    setTimeout(runIpCheck, 8000)
+  } catch (e) {
+    vpnChangeError.value = e.message
+  } finally {
+    vpnChanging.value = false
+  }
+}
+
 async function runIpCheck() {
   diagRunning.value.ip = true; diagError.value.ip = null; diagIp.value = null
   try { diagIp.value = await fetch('/api/diagnostics/ip').then(r => r.json()) }
@@ -447,6 +510,7 @@ onMounted(async () => {
   await load()
   await loadProxySettings()
   await loadVodSettings()
+  await loadVpnConfigs()
 })
 </script>
 
@@ -1125,6 +1189,58 @@ onMounted(async () => {
           </div>
           <p v-else-if="diagError.vpn" class="text-xs text-red-400">⚠ {{ diagError.vpn }}</p>
           <p v-else class="text-xs text-slate-600">Not checked yet</p>
+        </div>
+
+        <!-- VPN Config Selector -->
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4" v-if="vpnConfigs.length > 0">
+          <div class="flex items-center gap-3 mb-3 flex-wrap">
+            <span class="text-sm font-semibold text-slate-100 flex-1">🌐 VPN Server</span>
+            <span class="text-[10px] text-slate-500">{{ vpnProvider }} · {{ vpnConfigs.length }} configs available</span>
+          </div>
+
+          <!-- Current Config Display -->
+          <div v-if="currentVpnConfig" class="mb-3 p-2 bg-cyan-500/10 border border-cyan-500/20 rounded-lg">
+            <p class="text-xs text-cyan-400">
+              <span class="font-semibold">Current:</span> {{ vpnConfigs.find(c => c.path === currentVpnConfig)?.name || currentVpnConfig }}
+            </p>
+          </div>
+
+          <div class="flex items-center gap-3 flex-wrap">
+            <div class="shrink-0 relative">
+              <select v-model="vpnProtocolFilter"
+                class="w-24 bg-[#22263a] border border-[#2e3250] rounded-lg px-2 py-2 text-xs text-slate-200 outline-none focus:border-cyan-500 appearance-none">
+                <option value="udp">UDP</option>
+                <option value="tcp">TCP</option>
+                <option value="all">All</option>
+              </select>
+              <span class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] pointer-events-none">▾</span>
+            </div>
+            <div class="flex-1 min-w-48 relative">
+              <select v-model="selectedVpnConfig"
+                class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-cyan-500 appearance-none">
+                <option value="">— Select VPN server —</option>
+                <option v-for="cfg in filteredVpnConfigs" :key="cfg.path" :value="cfg.path">
+                  {{ cfg.name }} ({{ cfg.protocol.toUpperCase() }})
+                </option>
+              </select>
+              <span class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] pointer-events-none">▾</span>
+            </div>
+            <button @click="changeVpnConfig" :disabled="vpnChanging || !selectedVpnConfig"
+              class="px-4 py-2 text-xs bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors shrink-0 flex items-center gap-2">
+              <span v-if="vpnChanging" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              <span>{{ vpnChanging ? 'Switching…' : 'Switch' }}</span>
+            </button>
+          </div>
+
+          <p class="text-[10px] text-slate-500 mt-2">
+            Protocol: {{ vpnProtocolFilter.toUpperCase() }} ·
+            Showing {{ filteredVpnConfigs.length }} of {{ vpnConfigs.length }} configs
+          </p>
+
+          <div v-if="vpnChangeSuccess" class="mt-3 p-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+            <p class="text-xs text-emerald-400">✓ {{ vpnChangeSuccess }}</p>
+          </div>
+          <p v-if="vpnChangeError" class="mt-2 text-xs text-red-400">⚠ {{ vpnChangeError }}</p>
         </div>
 
         <!-- Speed Test -->

@@ -127,4 +127,115 @@ router.get('/diagnostics/vpn', async (req, res) => {
   }
 })
 
+// ── VPN Config Management ──────────────────────────────────────────────────
+
+// List available VPN configs
+router.get('/diagnostics/vpn-configs', async (req, res) => {
+  try {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+
+    const provider = process.env.OPENVPN_PROVIDER || 'NORDVPN'
+    const vpnDir = process.env.VPN_DIR || '/data/config/openvpn'
+    const providerDir = path.join(vpnDir, provider.toLowerCase())
+    const listFile = path.join(providerDir, 'list.txt')
+
+    // Read current config from /tmp/.openvpn-switch-config (runtime switch) or fall back to env
+    let currentConfig = process.env.OPENVPN_CONFIG || ''
+    const switchConfigFile = '/tmp/.openvpn-switch-config'
+    if (fs.existsSync(switchConfigFile)) {
+      const switchConfig = fs.readFileSync(switchConfigFile, 'utf-8').trim()
+      if (switchConfig) {
+        currentConfig = switchConfig.replace(path.join(vpnDir, provider.toLowerCase()) + '/', '')
+      }
+    }
+
+    if (!fs.existsSync(listFile)) {
+      return res.json({ configs: [], current: currentConfig, provider })
+    }
+
+    const content = fs.readFileSync(listFile, 'utf-8')
+    const configs = content
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && line.endsWith('.ovpn'))
+      .map(config => ({
+        path: config,
+        name: path.basename(config, '.ovpn'),
+        protocol: config.includes('tcp') ? 'tcp' : 'udp'
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    res.json({
+      configs,
+      current: currentConfig,
+      provider,
+      vpnEnabled: process.env.VPN_ENABLED === 'true'
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Get current VPN config
+router.get('/diagnostics/vpn-config', (req, res) => {
+  res.json({
+    current: process.env.OPENVPN_CONFIG || '',
+    provider: process.env.OPENVPN_PROVIDER || 'CUSTOM',
+    vpnEnabled: process.env.VPN_ENABLED === 'true',
+    protocol: process.env.OPENVPN_PROTOCOL || 'udp'
+  })
+})
+
+// Switch VPN config
+router.post('/diagnostics/vpn-config', async (req, res) => {
+  try {
+    const { config } = req.body
+    if (!config) {
+      return res.status(400).json({ error: 'Config path is required' })
+    }
+
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const execFileAsync = promisify(execFile)
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+
+    const VPN_DIR = process.env.VPN_DIR || '/data/config/openvpn'
+    const provider = process.env.OPENVPN_PROVIDER || 'NORDVPN'
+    const VPCONFIG_OVERRIDE_FILE="/tmp/.openvpn-switch-config"
+    // Config path from list is relative to provider dir (e.g., 'ovpn_udp/za128.nordvpn.com.udp.ovpn')
+    const configFullPath = path.join(VPN_DIR, provider.toLowerCase(), config)
+
+    // Verify config file exists
+    if (!fs.existsSync(configFullPath)) {
+      return res.status(400).json({
+        error: `Config file not found: ${configFullPath}`,
+        hint: 'Make sure the config file exists'
+      })
+    }
+
+    // Write the switch-config file to /tmp for runtime switching (clears on container reboot)
+    const switchConfigFile = '/tmp/.openvpn-switch-config'
+    fs.writeFileSync(switchConfigFile, configFullPath, 'utf-8')
+
+    // Trigger OpenVPN restart via signal file (s6 service will handle the kill)
+    const restartSignalFile = '/tmp/.openvpn-restart-signal'
+    fs.writeFileSync(restartSignalFile, Date.now().toString(), 'utf-8')
+
+    // Small delay to ensure file is flushed
+    await new Promise(resolve => setTimeout(resolve, 500))
+
+    res.json({
+      success: true,
+      config,
+      configPath: configFullPath,
+      message: `VPN config switched to ${config}`,
+      note: 'OpenVPN is restarting with new config. Wait 5-10 seconds then check VPN Status and Public IP.'
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 export default router

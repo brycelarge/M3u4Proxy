@@ -4,7 +4,10 @@
 cd /app || exit 1
 
 # Ensure EPG directories exist and have correct permissions
-/bin/mkdir -p /data/epg/tmp /data/epg-sites /data/vod-strm 2>/dev/null || true
+/bin/mkdir -p /data/epg/tmp /data/epg-sites /data/vod-strm /data/output 2>/dev/null || true
+
+# Create /output symlink for backward compatibility with configs using /output paths
+[ ! -L /output ] && /bin/ln -sf /data/output /output 2>/dev/null || true
 
 # Ensure symbolic links exist
 [ ! -L /epg ] && /bin/ln -sf /data/epg /epg
