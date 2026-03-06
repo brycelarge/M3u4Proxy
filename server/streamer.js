@@ -84,7 +84,11 @@ class Session extends EventEmitter {
 
   addClient(res) {
     this.clients.add(res)
-    res.on('close', () => this.removeClient(res))
+
+    const cleanup = () => this.removeClient(res)
+    res.on('close', cleanup)
+    res.on('error', cleanup)
+    res.on('finish', cleanup)
   }
 
   removeClient(res) {
@@ -336,13 +340,17 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
     // 3. Start listening for the NEXT live chunks
     session.on('chunk', onChunk)
 
-    // 4. Register client ONLY for the "no clients left" logic
-    // DO NOT let the loop in pump() write to this 'res' object
-    session.clients.add(res)
+    // 4. Register client with proper cleanup handlers
+    session.addClient(res)
 
     res.on('close', () => {
       session.off('chunk', onChunk)
-      session.removeClient(res)
+    })
+    res.on('error', () => {
+      session.off('chunk', onChunk)
+    })
+    res.on('finish', () => {
+      session.off('chunk', onChunk)
     })
     return
   }
@@ -374,11 +382,16 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
   }
 
   session.on('chunk', onChunk)
-  session.clients.add(res)
+  session.addClient(res)
 
   res.on('close', () => {
     session.off('chunk', onChunk)
-    session.removeClient(res)
+  })
+  res.on('error', () => {
+    session.off('chunk', onChunk)
+  })
+  res.on('finish', () => {
+    session.off('chunk', onChunk)
   })
 
   pump(session)

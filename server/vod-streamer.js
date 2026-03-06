@@ -38,7 +38,11 @@ class VodSession extends EventEmitter {
     }
 
     this.clients.add(res)
-    res.on('close', () => this.removeClient(res))
+
+    const cleanup = () => this.removeClient(res)
+    res.on('close', cleanup)
+    res.on('error', cleanup)
+    res.on('finish', cleanup)
   }
 
   removeClient(res) {
