@@ -9,14 +9,14 @@ router.get('/diagnostics/ip', async (req, res) => {
     const { execFile } = await import('node:child_process')
     const { promisify } = await import('node:util')
     const execFileAsync = promisify(execFile)
-    // Use ipapi.co for full geolocation data
-    const { stdout } = await execFileAsync('curl', ['-s', '--max-time', '10', 'https://ipapi.co/json/'])
+    // Use ip-api.com (no HTTPS issues, more reliable)
+    const { stdout } = await execFileAsync('curl', ['-s', '--max-time', '10', 'http://ip-api.com/json/'])
     const data = JSON.parse(stdout)
     res.json({
-      ip: data.ip,
-      country: data.country_name,
+      ip: data.query,
+      country: data.country,
       city: data.city,
-      org: data.org,
+      org: data.isp,
       raw: data
     })
   } catch (e) {
