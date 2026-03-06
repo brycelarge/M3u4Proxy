@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { api } from '../composables/useApi.js'
 
 const tab         = ref('hdhr')
@@ -1113,7 +1113,14 @@ onMounted(async () => {
             </div>
             <div class="flex items-center gap-2">
               <span :class="diagVpn.defaultViaTun ? 'text-emerald-400' : 'text-amber-400'">{{ diagVpn.defaultViaTun ? '✓' : '⚠' }}</span>
-              <span class="text-xs" :class="diagVpn.defaultViaTun ? 'text-emerald-300' : 'text-amber-300'">Traffic {{ diagVpn.defaultViaTun ? 'routed via VPN' : 'NOT routed via VPN' }}</span>
+              <span class="text-xs" :class="diagVpn.defaultViaTun ? 'text-emerald-300' : 'text-amber-300'">
+                {{ diagVpn.defaultViaTun
+                  ? (diagVpn.routingMethod === 'split' ? 'Split routing via VPN' : 'Default route via VPN')
+                  : 'NOT routed via VPN' }}
+              </span>
+            </div>
+            <div v-if="diagVpn.gateway" class="text-[10px] text-slate-500">
+              Gateway: {{ diagVpn.gateway }}
             </div>
           </div>
           <p v-else-if="diagError.vpn" class="text-xs text-red-400">⚠ {{ diagError.vpn }}</p>

@@ -85,16 +85,35 @@ router.get('/diagnostics/vpn', async (req, res) => {
       vpnActive = false
     }
 
-    // Check if default route goes via tun0
+    // Check if default route goes via tun0 (including split tunnel routes)
     let defaultViaTun = false
     let gateway = null
     try {
-      const { stdout: routeStdout } = await execFileAsync('ip', ['route', 'show', 'default'])
-      const match = routeStdout.match(/via\s+(\S+)/)
-      gateway = match ? match[1] : null
-      defaultViaTun = routeStdout.includes('tun0') || routeStdout.includes('dev tun')
+      const { stdout: routeStdout } = await execFileAsync('ip', ['route', 'show'])
+
+      // Method 1: Default route via tun0
+      const defaultRouteMatch = routeStdout.match(/default\s+via\s+(\S+)\s+dev\s+(\S+)/)
+      if (defaultRouteMatch) {
+        gateway = defaultRouteMatch[1]
+        if (defaultRouteMatch[2] === 'tun0') {
+          defaultViaTun = true
+        }
+      }
+
+      // Method 2: Split tunnel routes (0.0.0.0/1 and 128.0.0.0/1 via tun0)
+      // NordVPN and others use this instead of replacing default route
+      const hasSplit0 = /0\.0\.0\.0\/1.*dev\s+tun0/.test(routeStdout)
+      const hasSplit128 = /128\.0\.0\.0\/1.*dev\s+tun0/.test(routeStdout)
+
+      if (hasSplit0 && hasSplit128) {
+        defaultViaTun = true
+        if (!gateway) {
+          const splitGateway = routeStdout.match(/0\.0\.0\.0\/1\s+via\s+(\S+)/)
+          if (splitGateway) gateway = splitGateway[1]
+        }
+      }
     } catch (e) {
-      // No default route
+      // No routes
     }
 
     res.json({
