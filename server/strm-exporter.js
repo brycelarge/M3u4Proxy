@@ -632,7 +632,9 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const newContentKeys = new Set()
   for (const seriesData of seriesToProcess.values()) {
     for (const ep of seriesData.episodes) {
-      newContentKeys.add(ep.tvg_name)
+      // Match the key format from scanExistingFiles: metadata.normalizedName || metadata.normalized_name || metadata.channelId
+      const key = ep.normalized_name || String(ep.id)
+      newContentKeys.add(key)
     }
   }
   for (const { channel } of moviesToProcess.values()) {
@@ -744,7 +746,9 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
       const metadata = buildMetadata(channel, playlistId, proxyUrl)
       const nfoContent = buildNfoContent(channel, seriesInfo)
 
-      const existingEntry = existing.get(channel.tvg_name)
+      // Match key format from scanExistingFiles: metadata.normalizedName || metadata.normalized_name || metadata.channelId
+      const lookupKey = channel.normalized_name || String(channel.id)
+      const existingEntry = existing.get(lookupKey)
 
       try {
         if (existingEntry) {
