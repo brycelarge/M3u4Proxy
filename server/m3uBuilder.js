@@ -65,8 +65,23 @@ export function buildM3U(channels, epgMap = new Map(), opts = {}) {
  * Creates parent directories if needed.
  */
 export function writeM3U(outputPath, content) {
-  mkdirSync(path.dirname(outputPath), { recursive: true })
-  writeFileSync(outputPath, content, 'utf8')
+  try {
+    // Ensure output directory exists
+    const outputDir = path.dirname(outputPath)
+    if (!fs.existsSync(outputDir)) {
+      try {
+        fs.mkdirSync(outputDir, { recursive: true })
+      } catch (mkdirErr) {
+        if (mkdirErr.code === 'EACCES' || mkdirErr.code === 'EPERM') {
+          throw new Error(`Permission denied creating directory '${outputDir}'. Ensure the output path is writable by the m3u4prox user. Current path: ${outputPath}`)
+        }
+        throw mkdirErr
+      }
+    }
+    fs.writeFileSync(outputPath, content, 'utf-8')
+  } catch (e) {
+    throw new Error(`Failed to write M3U to ${outputPath}: ${e.message}`)
+  }
 }
 
 /**
