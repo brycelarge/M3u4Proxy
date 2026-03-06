@@ -57,10 +57,7 @@ COPY root/ /
 
 # can we not create directories and set permissions here?
 
-RUN find /etc/openvpn -name 'update.sh' -exec chmod +x {} + && \
-    find /etc/openvpn -name 'map.sh'    -exec chmod +x {} + && \
-    find /etc/openvpn -name 'up.sh'     -exec chmod +x {} + && \
-    find /etc/s6-overlay/s6-rc.d -name 'run' -exec chmod +x {} + && \
+RUN find /etc/s6-overlay/s6-rc.d -name 'run' -exec chmod +x {} + && \
     find /etc/s6-overlay/s6-rc.d -name 'up'  -exec chmod +x {} + && \
     chmod +x /scripts/*.sh
 
