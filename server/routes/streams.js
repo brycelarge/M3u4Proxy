@@ -2,6 +2,7 @@ import express from 'express'
 import { join } from 'node:path'
 import db from '../db.js'
 import { connectClient, getActiveSessions, killSession } from '../streamer.js'
+import { connectFfmpegClient, getActiveFfmpegSessions, isFfmpegRemuxEnabled, killFfmpegSession } from '../ffmpeg-streamer.js'
 import { getActiveVodSessions, killVodSession } from '../vod-streamer.js'
 import { getCompositeSession } from '../composite-streamer.js'
 
@@ -44,6 +45,11 @@ router.get('/stream/:channelId', async (req, res) => {
     }
 
     // Live TV — use shared buffer
+    if (isFfmpegRemuxEnabled()) {
+      await connectFfmpegClient(channelId, row.url, row.tvg_name, res, row.source_id || null, username)
+      return
+    }
+
     await connectClient(channelId, row.url, row.tvg_name, res, row.source_id || null, username)
   } catch (err) {
     console.error(`[stream] Error proxying channel ${channelId}:`, err)
@@ -300,22 +306,29 @@ router.get('/composite-stream/:id/:segment', async (req, res) => {
 router.get('/internal-stream/composite-:compositeId-:role', async (req, res) => {
   const { compositeId, role } = req.params
 
+  console.log(`[internal-stream] Request for composite-${compositeId}-${role}`)
+
   try {
     const source = db.prepare(`
-      SELECT css.*, pc.url, pc.tvg_name, pc.source_id
+      SELECT css.*, pc.url, pc.tvg_name, pc.source_id, pc.id as channel_id
       FROM composite_stream_sources css
       JOIN playlist_channels pc ON css.source_channel_id = pc.id
       WHERE css.composite_stream_id = ? AND css.role = ?
     `).get(compositeId, role)
 
     if (!source) {
-      return res.status(404).json({ error: 'Source not found' })
+      console.error(`[internal-stream] Source not found for composite-${compositeId}-${role}`)
+      return res.status(404).end('Source not found')
     }
 
-    await connectClient(source.source_channel_id, source.url, source.tvg_name, res, source.source_id, req.username)
+    console.log(`[internal-stream] Connecting to channel ${source.channel_id} (${source.tvg_name})`)
+    console.log(`[internal-stream] URL: ${source.url}`)
+
+    await connectClient(source.channel_id, source.url, source.tvg_name, res, source.source_id, req.username)
   } catch (error) {
-    console.error('[internal-stream] Failed:', error)
-    res.status(500).json({ error: error.message })
+    console.error(`[internal-stream] Failed for composite-${compositeId}-${role}:`, error.message)
+    console.error(`[internal-stream] Stack:`, error.stack)
+    res.status(500).end('Internal stream error')
   }
 })
 
@@ -325,8 +338,9 @@ router.get('/internal-stream/composite-:compositeId-:role', async (req, res) => 
 // GET /api/streams  — list active stream sessions (both Live TV and VOD)
 router.get('/', (req, res) => {
   const liveSessions = getActiveSessions()
+  const ffmpegSessions = getActiveFfmpegSessions()
   const vodSessions = getActiveVodSessions()
-  const allSessions = [...liveSessions, ...vodSessions]
+  const allSessions = [...liveSessions, ...ffmpegSessions, ...vodSessions]
 
   // Enrich with channel details from database
   const enriched = allSessions.map(session => {
@@ -346,6 +360,7 @@ router.get('/', (req, res) => {
 // DELETE /api/streams/:channelId  — kill a stream session (Live TV or VOD)
 router.delete('/:channelId', (req, res) => {
   killSession(req.params.channelId)
+  killFfmpegSession(req.params.channelId)
   killVodSession(req.params.channelId)
   res.json({ ok: true })
 })

@@ -16,6 +16,11 @@ router.get('/logo', async (req, res) => {
   const url = req.query.url
   if (!url) return res.status(400).end()
 
+  // Reject local file paths (Jellyfin metadata paths)
+  if (url.startsWith('/') || url.startsWith('file://')) {
+    return res.status(400).end()
+  }
+
   // Derive a stable filename from the URL
   const hash = createHash('md5').update(url).digest('hex')
   const ext = url.split('?')[0].match(/\.(png|jpg|jpeg|gif|webp|svg|ico)$/i)?.[1]?.toLowerCase() || 'png'
@@ -24,7 +29,9 @@ router.get('/logo', async (req, res) => {
   // Serve from cache if exists
   if (existsSync(file)) {
     res.setHeader('Cache-Control', 'public, max-age=604800') // 7 days
-    res.setHeader('Content-Type', ext === 'svg' ? 'image/svg+xml' : `image/${ext}`)
+    // Normalize jpg to jpeg for proper mime type
+    const mimeExt = ext === 'jpg' ? 'jpeg' : ext
+    res.setHeader('Content-Type', ext === 'svg' ? 'image/svg+xml' : `image/${mimeExt}`)
     const { createReadStream } = await import('node:fs')
     return createReadStream(file).pipe(res)
   }
@@ -37,7 +44,9 @@ router.get('/logo', async (req, res) => {
     })
     if (!upstream.ok) return res.status(upstream.status).end()
 
-    const ct = upstream.headers.get('content-type') || `image/${ext}`
+    // Normalize jpg to jpeg for proper mime type
+    const mimeExt = ext === 'jpg' ? 'jpeg' : ext
+    const ct = upstream.headers.get('content-type') || `image/${mimeExt}`
     const buf = Buffer.from(await upstream.arrayBuffer())
     writeFileSync(file, buf)
 
@@ -82,20 +91,39 @@ router.get('/hdhr/status', (req, res) => {
 
 // ── Proxy settings ────────────────────────────────────────────────────────────
 router.get('/proxy-settings', (req, res) => {
-  const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
-  const bufferSeconds = setting ? parseFloat(setting.value) : getBufferSeconds()
-  res.json({ bufferSeconds })
+  const bufferSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
+  const remuxSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('remux_live_tv')
+
+  const bufferSeconds = bufferSetting ? parseFloat(bufferSetting.value) : getBufferSeconds()
+  const remuxLiveTv = remuxSetting ? remuxSetting.value === 'true' : false
+
+  res.json({ bufferSeconds, remuxLiveTv })
 })
 
 router.put('/proxy-settings', (req, res) => {
-  const { bufferSeconds } = req.body
-  const val = parseFloat(bufferSeconds)
-  if (isNaN(val) || val < 0 || val > 30) {
-    return res.status(400).json({ error: 'bufferSeconds must be 0-30' })
-  }
+  const { bufferSeconds, remuxLiveTv } = req.body
+
   try {
-    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('proxy_buffer_seconds', String(val))
-    res.json({ ok: true, bufferSeconds: val })
+    if (bufferSeconds !== undefined) {
+      const val = parseFloat(bufferSeconds)
+      if (isNaN(val) || val < 0 || val > 30) {
+        return res.status(400).json({ error: 'bufferSeconds must be 0-30' })
+      }
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('proxy_buffer_seconds', String(val))
+    }
+
+    if (remuxLiveTv !== undefined) {
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('remux_live_tv', String(remuxLiveTv))
+    }
+
+    const bufferSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
+    const remuxSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('remux_live_tv')
+
+    res.json({
+      ok: true,
+      bufferSeconds: bufferSetting ? parseFloat(bufferSetting.value) : getBufferSeconds(),
+      remuxLiveTv: remuxSetting ? remuxSetting.value === 'true' : false
+    })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

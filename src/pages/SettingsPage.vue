@@ -234,17 +234,19 @@ const TABS = [
 ]
 
 // ── Proxy settings ───────────────────────────────────────────────────────────
-const proxySettings     = ref({ bufferSeconds: 0 })
+const proxySettings     = ref({ bufferSeconds: 0, remuxLiveTv: false })
 const proxySaving       = ref(false)
 const proxySaved        = ref(false)
 const proxyError        = ref('')
 const proxyBufferInput  = ref(0)
+const proxyRemuxInput   = ref(false)
 
 async function loadProxySettings() {
   try {
     const d = await fetch('/api/proxy-settings').then(r => r.json())
     proxySettings.value    = d
     proxyBufferInput.value = d.bufferSeconds
+    proxyRemuxInput.value  = d.remuxLiveTv
   } catch {}
 }
 
@@ -256,7 +258,10 @@ async function saveProxySettings() {
     const r = await fetch('/api/proxy-settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bufferSeconds: proxyBufferInput.value }),
+      body: JSON.stringify({
+        bufferSeconds: proxyBufferInput.value,
+        remuxLiveTv: proxyRemuxInput.value
+      }),
     })
     const d = await r.json()
     if (!r.ok) throw new Error(d.error)
@@ -679,6 +684,17 @@ onMounted(async () => {
           <input v-model.number="proxyBufferInput" type="number" min="0" max="30" step="0.5"
             class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50">
           <p class="text-[10px] text-slate-600 mt-1.5">0 = disabled, 3 = recommended for stability, higher = more delay but better jitter protection</p>
+        </div>
+
+        <div>
+          <label class="flex items-center gap-3 cursor-pointer">
+            <input v-model="proxyRemuxInput" type="checkbox"
+              class="w-4 h-4 rounded border-[#2e3250] bg-[#22263a] text-indigo-500 focus:ring-indigo-500/50">
+            <div>
+              <span class="text-xs text-slate-300 font-medium">FFmpeg Remux Live TV</span>
+              <p class="text-[10px] text-slate-600 mt-0.5">Remux all live TV streams through FFmpeg for better compatibility (may increase CPU usage)</p>
+            </div>
+          </label>
         </div>
 
         <div class="flex items-center gap-3">

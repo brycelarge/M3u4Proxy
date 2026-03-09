@@ -702,20 +702,18 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
       writeFileSync(seriesMarkerPath, JSON.stringify(seriesMetadata, null, 2), 'utf8')
     }
 
-    // Create tvshow.nfo if doesn't exist
+    // Create/update tvshow.nfo
     const tvshowNfoPath = join(seriesRootDir, 'tvshow.nfo')
-    if (!existsSync(tvshowNfoPath)) {
-      const year = seriesData.year || ''
-      const plot = meta?.plot || ''
-      const tvshowNfo = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    const year = seriesData.year || ''
+    const plot = meta?.plot || ''
+    const tvshowNfo = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <tvshow>
   <title>${escapeXml(seriesData.seriesName)}</title>
   ${year ? `<year>${escapeXml(year)}</year>` : ''}
   ${plot ? `<plot>${escapeXml(plot)}</plot>` : ''}
   <episode>${seriesData.episodes.length}</episode>
 </tvshow>`
-      writeFileSync(tvshowNfoPath, tvshowNfo, 'utf8')
-    }
+    writeFileSync(tvshowNfoPath, tvshowNfo, 'utf8')
 
     // Process each episode
     for (const channel of seriesData.episodes) {

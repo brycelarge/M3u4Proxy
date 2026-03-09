@@ -102,6 +102,26 @@ export class CompositeSession extends EventEmitter {
       throw new Error('No source channels configured')
     }
 
+    // Validate source URLs are accessible
+    const unavailableSources = []
+    for (const source of sources) {
+      try {
+        const testResponse = await fetch(source.url, {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(5000)
+        })
+        if (!testResponse.ok) {
+          unavailableSources.push(`${source.tvg_name} (${testResponse.status})`)
+        }
+      } catch (error) {
+        unavailableSources.push(`${source.tvg_name} (${error.message})`)
+      }
+    }
+
+    if (unavailableSources.length > 0) {
+      throw new Error(`Source channels unavailable: ${unavailableSources.join(', ')}`)
+    }
+
     for (const source of sources) {
       const internalUrl = `http://localhost:${this.internalStreamPort}/internal-stream/composite-${this.compositeId}-${source.role}`
 

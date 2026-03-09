@@ -11,6 +11,22 @@ export function escapeXml(str) {
     .replace(/'/g, '&#39;')
 }
 
+function normalizeCategory(groupTitle) {
+  if (!groupTitle) return null
+  const value = groupTitle.trim().toLowerCase()
+
+  if (value.startsWith('movie')) return 'Movie'
+  if (value.startsWith('series')) return 'Drama'
+  if (value.includes('kid') || value.includes('children') || value.includes('family')) return 'Children'
+  if (value.includes('sport')) return 'Sports'
+  if (value.includes('news')) return 'News'
+  if (value.includes('documentary') || value.includes('docu')) return 'Documentary'
+  if (value.includes('music')) return 'Music'
+  if (value.includes('comedy')) return 'Comedy'
+  if (value.includes('drama')) return 'Drama'
+  return null
+}
+
 export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
   // Build channel XML from playlist
   const channels_xml = mappedChannels.map(ch => {
@@ -32,6 +48,10 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
     // Add group as category if set in Review & Group
     if (groupTitle) {
       xml += `\n    <category>${escapeXml(groupTitle)}</category>`
+      const normalizedCategory = normalizeCategory(groupTitle)
+      if (normalizedCategory && normalizedCategory.toLowerCase() !== groupTitle.trim().toLowerCase()) {
+        xml += `\n    <category>${escapeXml(normalizedCategory)}</category>`
+      }
     }
 
     xml += `\n  </channel>`
@@ -51,6 +71,7 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
   // Build set of wanted channel IDs - include source_tvg_id, target_tvg_id, and custom_tvg_id
   const wantedIds = new Set()
   const idToEpgId = {}
+  const epgIdToGroupTitle = {}
 
   mappedChannels.forEach(ch => {
     // The final epg_id used in channel definitions
@@ -59,6 +80,7 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
     // Add the final epg_id to wanted set
     wantedIds.add(finalEpgId)
     idToEpgId[finalEpgId] = finalEpgId
+    epgIdToGroupTitle[finalEpgId] = ch.group_title || null
 
     // Add original tvg_id and map it to final epg_id
     if (ch.tvg_id && ch.tvg_id !== finalEpgId) {
@@ -162,6 +184,16 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
         // Preserve or add episode-num if available
         if (enriched.episode && !/<episode-num\b/.test(progContent)) {
           progContent = progContent.replace('</programme>', `  <episode-num system="xmltv_ns">${escapeXml(enriched.episode)}</episode-num>\n</programme>`)
+        }
+
+        // Always add channel group as category for Jellyfin filtering
+        const groupTitle = epgIdToGroupTitle[targetEpgId]
+        if (groupTitle) {
+          progContent = progContent.replace('</programme>', `  <category lang="en">${escapeXml(groupTitle)}</category>\n</programme>`)
+          const normalizedCategory = normalizeCategory(groupTitle)
+          if (normalizedCategory && normalizedCategory.toLowerCase() !== groupTitle.trim().toLowerCase()) {
+            progContent = progContent.replace('</programme>', `  <category lang="en">${escapeXml(normalizedCategory)}</category>\n</programme>`)
+          }
         }
 
         programmes_xml.push(progContent)
