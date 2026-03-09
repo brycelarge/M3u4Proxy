@@ -27,6 +27,7 @@ import tmdbRoutes from './routes/tmdb.js'
 import sourceChannelsRoutes from './routes/source-channels.js'
 import playlistChannelsRoutes from './routes/playlist-channels.js'
 import strmNfoRoutes from './routes/strm-nfo.js'
+import portalRoutes from './routes/portal.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -84,6 +85,9 @@ startEnrichCron()
 // Xtream UI / API routes
 registerXtreamRoutes(app, db)
 
+// MAG Portal API routes
+app.use('/', portalRoutes)
+
 // HDHomeRun routes
 registerHdhrRoutes(app, db)
 
@@ -134,8 +138,16 @@ app.get('/{*path}', (req, res) => {
   }
 })
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   const host = process.env.HOST_IP || 'localhost'
   console.log(`M3u4Proxy server running on http://${host}:${PORT}`)
   console.log('Server version: 2026-03-05-v5 (Modular Refactor)')
+
+  // Build NFO index on startup for fast Xtream VOD/series metadata
+  try {
+    const { buildNfoIndex } = await import('./nfo-index.js')
+    buildNfoIndex()
+  } catch (e) {
+    console.error('[startup] Failed to build NFO index:', e.message)
+  }
 })

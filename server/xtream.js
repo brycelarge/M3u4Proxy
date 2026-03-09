@@ -14,90 +14,15 @@
  */
 
 import db from './db.js'
-import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { networkInterfaces } from 'node:os'
-import { GUIDE_XML } from './epgGrab.js'
 import { verifyPassword } from './auth.js'
-
-// Extract current/upcoming program from XMLTV guide for a channel
-function getEpgFromXmltv(tvgId, epgMap) {
-  if (!tvgId || !existsSync(GUIDE_XML)) return null
-
-  try {
-    const mappedId = epgMap.get(tvgId) || tvgId
-    const xmlContent = readFileSync(GUIDE_XML, 'utf8')
-
-    // Find all programmes for this channel
-    const channelRegex = new RegExp(`<programme[^>]*channel="${mappedId}"[^>]*>([\\s\\S]*?)</programme>`, 'g')
-    const programmes = []
-    let match
-
-    while ((match = channelRegex.exec(xmlContent)) !== null) {
-      const progBlock = match[0]
-      const startMatch = progBlock.match(/start="([^"]+)"/)
-      const stopMatch = progBlock.match(/stop="([^"]+)"/)
-      const titleMatch = progBlock.match(/<title[^>]*>([^<]+)<\/title>/)
-      const descMatch = progBlock.match(/<desc[^>]*>([^<]+)<\/desc>/)
-
-      if (startMatch && stopMatch) {
-        programmes.push({
-          start: startMatch[1],
-          stop: stopMatch[1],
-          title: titleMatch ? titleMatch[1] : '',
-          description: descMatch ? descMatch[1] : ''
-        })
-      }
-    }
-
-    if (programmes.length === 0) return null
-
-    // Find current or next programme
-    const now = new Date()
-    const parseXmltvTime = (str) => {
-      // XMLTV format: YYYYMMDDHHmmss +TZTZ
-      const year = parseInt(str.substring(0, 4))
-      const month = parseInt(str.substring(4, 6)) - 1
-      const day = parseInt(str.substring(6, 8))
-      const hour = parseInt(str.substring(8, 10))
-      const min = parseInt(str.substring(10, 12))
-      const sec = parseInt(str.substring(12, 14))
-      return new Date(year, month, day, hour, min, sec)
-    }
-
-    // Find current programme
-    for (const prog of programmes) {
-      const start = parseXmltvTime(prog.start)
-      const stop = parseXmltvTime(prog.stop)
-      if (now >= start && now <= stop) {
-        return {
-          title: prog.title,
-          description: prog.description,
-          start: prog.start,
-          stop: prog.stop
-        }
-      }
-    }
-
-    // If no current programme, return next upcoming
-    for (const prog of programmes) {
-      const start = parseXmltvTime(prog.start)
-      if (start > now) {
-        return {
-          title: prog.title,
-          description: prog.description,
-          start: prog.start,
-          stop: prog.stop
-        }
-      }
-    }
-
-    return null
-  } catch (e) {
-    console.error(`[xtream] Error parsing XMLTV for ${tvgId}:`, e.message)
-    return null
-  }
-}
+import { getEnrichmentMaps, parseProgBlock, applyEnrichment } from './epgEnrich.js'
+import { findNfoForChannel } from './nfo-parser.js'
+import { getNfoFromIndex } from './nfo-index.js'
+import { generateXmltv } from './services/xmltv.js'
+import { connectFfmpegClient, getActiveFfmpegSessions, isFfmpegRemuxEnabled } from './ffmpeg-streamer.js'
+import { getActiveVodSessions } from './vod-streamer.js'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getSetting(key, fallback = null) {
@@ -130,7 +55,9 @@ function getChannels(playlistId) {
   // Get all channels with their normalized names and deduplicate
   const allChannels = db.prepare(`
     SELECT
-      pc.*,
+      pc.id, pc.playlist_id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.group_title,
+      pc.url, pc.raw_extinf, pc.custom_tvg_id, pc.sort_order, pc.source_id,
+      pc.epg_source_id, pc.custom_logo, pc.content_type,
       sc.normalized_name,
       COALESCE(s.priority, 999) as source_priority,
       CASE sc.quality
@@ -179,6 +106,203 @@ function getEpgMap() {
   )
 }
 
+function parseJsonIdList(value, fallback = null) {
+  try {
+    const parsed = JSON.parse(value || '[]')
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.map(id => Number(id)).filter(Number.isFinite)
+    }
+  } catch {}
+  if (fallback !== null && fallback !== undefined) {
+    return [Number(fallback)].filter(Number.isFinite)
+  }
+  return []
+}
+
+function getUserLivePlaylistIds(user) {
+  return parseJsonIdList(user.playlist_ids, user.playlist_id)
+}
+
+function getUserVodPlaylistIds(user) {
+  return parseJsonIdList(user.vod_playlist_ids, user.vod_playlist_id)
+}
+
+function dedupeChannels(channels) {
+  const seen = new Set()
+  return channels.filter(ch => {
+    const key = ch.normalized_name || `${ch.content_type || 'live'}:${ch.tvg_name}:${ch.group_title}:${ch.url}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function getUserLiveChannels(user) {
+  const playlistIds = getUserLivePlaylistIds(user)
+  return dedupeChannels(playlistIds.flatMap(id => getChannels(id)))
+}
+
+function hasPlaylistAccess(row, allowedPlaylistIds) {
+  return allowedPlaylistIds.length === 0 || allowedPlaylistIds.includes(Number(row.playlist_id))
+}
+
+function getMappedChannelsForPlaylistIds(playlistIds) {
+  if (!Array.isArray(playlistIds) || playlistIds.length === 0) return []
+  const placeholders = playlistIds.map(() => '?').join(',')
+  const allChannels = db.prepare(`
+    SELECT pc.id, pc.playlist_id, pc.tvg_id, pc.tvg_name, pc.tvg_logo, pc.group_title,
+           pc.url, pc.raw_extinf, pc.custom_tvg_id, pc.sort_order, pc.source_id,
+           pc.epg_source_id, pc.custom_logo, pc.content_type,
+           sc.normalized_name,
+           COALESCE(s.priority, 999) as source_priority,
+           CASE sc.quality
+             WHEN 'UHD' THEN 1
+             WHEN 'FHD' THEN 2
+             WHEN 'HD' THEN 3
+             WHEN 'SD' THEN 4
+             ELSE 5
+           END as quality_order,
+           CASE
+             WHEN pc.custom_tvg_id != '' THEN pc.custom_tvg_id
+             WHEN em.target_tvg_id IS NOT NULL THEN em.target_tvg_id
+             ELSE pc.tvg_id
+           END as epg_id
+    FROM playlist_channels pc
+    LEFT JOIN source_channels sc ON sc.url = pc.url
+    LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
+    LEFT JOIN epg_mappings em ON (em.source_tvg_id = pc.tvg_id OR em.source_tvg_id = pc.custom_tvg_id)
+    WHERE pc.playlist_id IN (${placeholders})
+    ORDER BY
+      sc.normalized_name,
+      source_priority ASC,
+      quality_order ASC,
+      pc.sort_order, pc.id
+  `).all(...playlistIds)
+
+  return dedupeChannels(allChannels)
+    .filter(ch => ch.epg_id && ch.epg_id.trim())
+    .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id))
+}
+
+function buildUserXmltv(user, baseUrl) {
+  const mappedChannels = getMappedChannelsForPlaylistIds(getUserLivePlaylistIds(user))
+  const cacheRows = db.prepare('SELECT content FROM epg_cache WHERE content IS NOT NULL').all()
+  return generateXmltv(db, mappedChannels, cacheRows, baseUrl)
+}
+
+function getTargetEpgId(channel, epgMap) {
+  return channel.custom_tvg_id || epgMap.get(channel.tvg_id) || channel.tvg_id || ''
+}
+
+function getCandidateEpgIds(channel, epgMap) {
+  const finalId = getTargetEpgId(channel, epgMap)
+  const ids = new Set([finalId])
+  if (channel.tvg_id) ids.add(channel.tvg_id)
+  if (channel.custom_tvg_id) ids.add(channel.custom_tvg_id)
+
+  for (const [sourceId, targetId] of epgMap.entries()) {
+    if (targetId === finalId || targetId === channel.tvg_id || targetId === channel.custom_tvg_id) {
+      ids.add(sourceId)
+    }
+  }
+
+  return [...ids].filter(Boolean)
+}
+
+function getChannelNfoData(channelId) {
+  try {
+    return findNfoForChannel(channelId)
+  } catch {
+    return null
+  }
+}
+
+function getLiveEpgListings(channel, epgMap, limit = 4) {
+  const wantedIds = new Set(getCandidateEpgIds(channel, epgMap))
+  const cacheRows = db.prepare('SELECT content FROM epg_cache WHERE content IS NOT NULL').all()
+  const { showMap, epMap } = getEnrichmentMaps()
+  const targetEpgId = getTargetEpgId(channel, epgMap)
+  const entries = []
+  const progRe = /<programme\b[^>]*channel="([^"]*)"[^>]*>[\s\S]*?<\/programme>/g
+
+  for (const row of cacheRows) {
+    progRe.lastIndex = 0
+    let match
+    while ((match = progRe.exec(row.content)) !== null) {
+      if (!wantedIds.has(match[1])) continue
+      let progContent = match[0]
+      if (targetEpgId && targetEpgId !== match[1]) {
+        progContent = progContent.replace(`channel="${match[1]}"`, `channel="${targetEpgId}"`)
+      }
+      const enriched = applyEnrichment(parseProgBlock(progContent), showMap, epMap)
+      if (!enriched.start || !enriched.stop) continue
+      entries.push(enriched)
+    }
+  }
+
+  const now = Date.now()
+  return entries
+    .sort((a, b) => new Date(a.start) - new Date(b.start))
+    .filter(entry => new Date(entry.stop).getTime() >= now)
+    .slice(0, limit)
+}
+
+function formatXtreamDate(date) {
+  return new Date(date).toISOString().slice(0, 19).replace('T', ' ')
+}
+
+function buildShortEpgResponse(channel, epgMap, limit = 4) {
+  const listings = getLiveEpgListings(channel, epgMap, limit)
+  return {
+    epg_listings: listings.map((entry, index) => ({
+      id: String(index + 1),
+      epg_id: String(index + 1),
+      title: entry.title || '',
+      lang: 'en',
+      start: formatXtreamDate(entry.start),
+      end: formatXtreamDate(entry.stop),
+      description: entry.desc || '',
+      channel_id: entry.channel || getTargetEpgId(channel, epgMap),
+      start_timestamp: Math.floor(new Date(entry.start).getTime() / 1000),
+      stop_timestamp: Math.floor(new Date(entry.stop).getTime() / 1000),
+      now_playing: Date.now() >= new Date(entry.start).getTime() && Date.now() <= new Date(entry.stop).getTime() ? 1 : 0,
+      has_archive: 0,
+    }))
+  }
+}
+
+function buildSimpleDataTableResponse(channel, epgMap) {
+  const listings = getLiveEpgListings(channel, epgMap, 12)
+  return {
+    epg_listings: listings.map((entry, index) => ({
+      id: String(index + 1),
+      title: entry.title || '',
+      description: entry.desc || '',
+      start: formatXtreamDate(entry.start),
+      end: formatXtreamDate(entry.stop),
+      start_timestamp: Math.floor(new Date(entry.start).getTime() / 1000),
+      stop_timestamp: Math.floor(new Date(entry.stop).getTime() / 1000),
+    }))
+  }
+}
+
+function guessContainerExtension(url = '', fallback = 'ts') {
+  const match = url.toLowerCase().match(/\.(mp4|mkv|avi|3gp|flv|wmv|mov|ts|m4v)(?:\?|$)/)
+  return match ? match[1] : fallback
+}
+
+function buildLiveStreamUrl(base, user, channelId) {
+  return `${base}/live/${encodeURIComponent(user.username)}/${encodeURIComponent(user.xtreamPassword || user.password).replace(/%24/g, '$')}/${channelId}.ts`
+}
+
+function buildVodStreamUrl(base, user, channelId, extension) {
+  return `${base}/movie/${encodeURIComponent(user.username)}/${encodeURIComponent(user.xtreamPassword || user.password).replace(/%24/g, '$')}/${channelId}.${extension}`
+}
+
+function buildSeriesStreamUrl(base, user, channelId, extension) {
+  return `${base}/series/${encodeURIComponent(user.username)}/${encodeURIComponent(user.xtreamPassword || user.password).replace(/%24/g, '$')}/${channelId}.${extension}`
+}
+
 // ── User-based auth ───────────────────────────────────────────────────────────
 function touchLastConnected(username) {
   try { db.prepare(`UPDATE users SET last_connected_at = datetime('now') WHERE username = ?`).run(username) } catch {}
@@ -189,26 +313,27 @@ async function lookupUser(username, password) {
   if (!user) return null
   if (!await verifyPassword(password, user.password)) return null
   if (user.expires_at && new Date(user.expires_at) < new Date()) return null
+  user.xtreamPassword = password
   touchLastConnected(username)
   return user
 }
 
 function getActiveCons(username) {
-  // Count active stream sessions belonging to this user
-  // Sessions are keyed by channelId; we track user via session metadata
   try {
     const { getActiveSessions } = globalThis.__streamer || {}
-    if (!getActiveSessions) return 0
-    return getActiveSessions().filter(s => s.username === username).length
+    const live = getActiveSessions ? getActiveSessions() : []
+    const ffmpeg = getActiveFfmpegSessions()
+    const vod = getActiveVodSessions()
+    return [...live, ...ffmpeg, ...vod].filter(s => s.username === username).length
   } catch { return 0 }
 }
 
-function buildUserInfo(user, base) {
+function buildUserInfo(user, base, plainPassword) {
   const expTs = user.expires_at ? Math.floor(new Date(user.expires_at).getTime() / 1000) : null
   return {
     user_info: {
       username:        user.username,
-      password:        user.password,
+      password:        plainPassword,
       message:         'M3u4Proxy',
       auth:            1,
       status:          'Active',
@@ -258,7 +383,10 @@ function buildCategories(channels) {
 
 function getVodChannels(playlistId) {
   return db.prepare(
-    'SELECT * FROM playlist_channels WHERE playlist_id = ? ORDER BY group_title, tvg_name'
+    `SELECT pc.*, sc.meta, sc.normalized_name
+     FROM playlist_channels pc
+     LEFT JOIN source_channels sc ON pc.source_id = sc.source_id AND pc.url = sc.url
+     WHERE pc.playlist_id = ? ORDER BY pc.group_title, pc.tvg_name`
   ).all(playlistId)
 }
 
@@ -266,7 +394,11 @@ function getMovieChannels(playlistIds) {
   if (!Array.isArray(playlistIds) || playlistIds.length === 0) return []
   const placeholders = playlistIds.map(() => '?').join(',')
   return db.prepare(
-    `SELECT * FROM playlist_channels WHERE playlist_id IN (${placeholders}) AND content_type = 'movie' ORDER BY group_title, tvg_name`
+    `SELECT pc.*, sc.meta, sc.normalized_name
+     FROM playlist_channels pc
+     LEFT JOIN source_channels sc ON pc.source_id = sc.source_id AND pc.url = sc.url
+     WHERE pc.playlist_id IN (${placeholders}) AND pc.content_type = 'movie'
+     ORDER BY pc.group_title, pc.tvg_name`
   ).all(...playlistIds)
 }
 
@@ -274,7 +406,11 @@ function getSeriesChannels(playlistIds) {
   if (!Array.isArray(playlistIds) || playlistIds.length === 0) return []
   const placeholders = playlistIds.map(() => '?').join(',')
   return db.prepare(
-    `SELECT * FROM playlist_channels WHERE playlist_id IN (${placeholders}) AND content_type = 'series' ORDER BY group_title, tvg_name`
+    `SELECT pc.*, sc.meta, sc.normalized_name
+     FROM playlist_channels pc
+     LEFT JOIN source_channels sc ON pc.source_id = sc.source_id AND pc.url = sc.url
+     WHERE pc.playlist_id IN (${placeholders}) AND pc.content_type = 'series'
+     ORDER BY pc.group_title, pc.tvg_name`
   ).all(...playlistIds)
 }
 
@@ -311,6 +447,8 @@ function buildSeriesCategories(channels) {
 }
 
 function buildSeriesList(channels) {
+  const cats = buildSeriesCategories(channels)
+  const catMap = new Map(cats.map(c => [c.category_name, c.category_id]))
   // Group episodes by series name
   // Series name comes from metadata (stored when fetching from upstream)
   const seriesMap = new Map()
@@ -318,10 +456,12 @@ function buildSeriesList(channels) {
   for (const ch of channels) {
     if (!ch.tvg_name) continue
 
+    const meta = ch.meta ? (typeof ch.meta === 'string' ? JSON.parse(ch.meta) : ch.meta) : {}
+
     // Try to get series name from metadata first, fallback to parsing tvg_name
     let seriesName
-    if (ch.meta && (ch.meta.name || ch.meta.title)) {
-      seriesName = ch.meta.name || ch.meta.title
+    if (meta.name || meta.title) {
+      seriesName = meta.name || meta.title
     } else {
       // Fallback: Extract series name from tvg_name (everything before SxxExx)
       const match = ch.tvg_name.match(/^(.+?)\s+S\d+E\d+/i)
@@ -334,7 +474,7 @@ function buildSeriesList(channels) {
         episodes: [],
         cover: ch.tvg_logo || '',
         category: ch.group_title || 'Uncategorized',
-        meta: ch.meta || null
+        meta
       })
     }
     seriesMap.get(seriesName).episodes.push(ch)
@@ -344,14 +484,10 @@ function buildSeriesList(channels) {
   const series = []
   let idx = 1
   for (const [name, data] of seriesMap) {
-    // Remove 'Series:' prefix from category for display
     const displayCategory = data.category.startsWith('Series:') ? data.category.substring(7).trim() : data.category
-
-    // Parse metadata if available
     const meta = data.meta ? (typeof data.meta === 'string' ? JSON.parse(data.meta) : data.meta) : {}
-
     const rating = meta.rating ? parseFloat(meta.rating) : 0
-    const rating5 = meta.rating_5based !== undefined ? meta.rating_5based : (rating ? rating / 2 : 0)
+    const rating5 = meta.rating_5based !== undefined ? meta.rating_5based : (rating ? Number((rating / 2).toFixed(1)) : 0)
 
     series.push({
       num: idx,
@@ -369,7 +505,7 @@ function buildSeriesList(channels) {
       backdrop_path: meta.backdrop_path || (meta.cover ? [meta.cover] : []),
       youtube_trailer: meta.youtube_trailer || meta.trailer || '',
       episode_run_time: meta.episode_run_time !== undefined ? meta.episode_run_time : 0,
-      category_id: String(meta.category_id || '1'),
+      category_id: String(catMap.get(displayCategory) || '1'),
       tmdb_id: meta.tmdb_id || ''
     })
     idx++
@@ -378,11 +514,22 @@ function buildSeriesList(channels) {
   return series
 }
 
+// Cache series list to avoid rebuilding on every get_series_info request
+let seriesListCache = null
+let seriesListCacheTime = 0
+const SERIES_LIST_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
 async function buildSeriesInfo(seriesId, channels, base, username, password) {
   try {
     // Find all episodes for this series
     // seriesId is the index in the series list (1-based)
-    const seriesList = buildSeriesList(channels)
+    const now = Date.now()
+    if (!seriesListCache || (now - seriesListCacheTime) > SERIES_LIST_CACHE_TTL) {
+      seriesListCache = buildSeriesList(channels)
+      seriesListCacheTime = now
+    }
+    const seriesList = seriesListCache
+
     if (seriesId < 1 || seriesId > seriesList.length) {
       return { info: {}, episodes: {}, seasons: [] }
     }
@@ -395,16 +542,15 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
       ? `${base}/series/${encodeURIComponent(username)}/${encodeURIComponent(password).replace(/%24/g, '$')}`
       : null
 
-    // Import NFO parser to read enriched metadata from Jellyfin
-    const { findNfoForChannel } = await import('./nfo-parser.js')
-
   // Get all episodes for this series
   const episodes = channels.filter(ch => {
     if (!ch.tvg_name) return false
 
+    const meta = ch.meta ? (typeof ch.meta === 'string' ? JSON.parse(ch.meta) : ch.meta) : {}
+
     // Try to match by metadata first
-    if (ch.meta && (ch.meta.name || ch.meta.title)) {
-      const metaName = ch.meta.name || ch.meta.title
+    if (meta.name || meta.title) {
+      const metaName = meta.name || meta.title
       return metaName === seriesName
     }
 
@@ -427,12 +573,14 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
       seasonMap.set(seasonNum, [])
     }
 
-    // Try to get enriched metadata from NFO file in Jellyfin's vod-strm directory
-    const nfoData = findNfoForChannel(ep.id)
-    const poster = nfoData?.poster || ep.tvg_logo || ''
+    // Use fast NFO index lookup
+    const nfoData = getNfoFromIndex(ep.id)
+    // Try multiple image fields: thumb (episode-specific), poster, fanart, or fallback to series cover
+    const episodeImage = nfoData?.thumb || nfoData?.poster || nfoData?.fanart || series.cover || ep.tvg_logo || ''
     const runtime = nfoData?.runtime ? parseInt(nfoData.runtime) : 0
 
-    const directSource = streamBase ? `${streamBase}/${ep.id}.mkv` : ep.url || ''
+    const extension = guessContainerExtension(ep.url, 'mkv')
+    const directSource = streamBase ? `${streamBase}/${ep.id}.${extension}` : ep.url || ''
 
     const addedTimestamp = Math.floor(Date.now() / 1000).toString()
 
@@ -440,12 +588,13 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
       id: String(ep.id),
       episode_num: episodeNum,
       title: nfoData?.title || ep.tvg_name,
-      container_extension: 'mkv',
+      container_extension: extension,
       info: {
-        movie_image: poster,
-        cover: poster,
+        movie_image: episodeImage,
+        cover: episodeImage,
+        cover_big: episodeImage,
         plot: nfoData?.plot || '',
-        duration: runtime ? `${Math.floor(runtime / 60)}:${String(runtime % 60).padStart(2, '0')}` : '',
+        duration: runtime ? `${String(Math.floor(runtime / 60)).padStart(2, '0')}:${String(runtime % 60).padStart(2, '0')}:00` : '',
         duration_secs: runtime * 60,
         video: {},
         audio: {},
@@ -453,7 +602,7 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
         rating: nfoData?.rating ? String(nfoData.rating) : '',
         releasedate: nfoData?.releaseDate || ''
       },
-      custom_sid: streamBase ? `${streamBase}/${ep.id}.mkv` : '',
+      custom_sid: streamBase ? `${streamBase}/${ep.id}.${extension}` : '',
       added: addedTimestamp,
       season: seasonNum,
       direct_source: directSource
@@ -481,10 +630,10 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
     episodesObj[String(seasonNum)] = eps.sort((a, b) => a.episode_num - b.episode_num)
   }
 
-      const response = {
+    const response = {
       info: series,
       episodes: episodesObj,
-      seasons: seasons.sort((a, b) => parseInt(a.season) - parseInt(b.season))
+      seasons: seasons.sort((a, b) => a.season_number - b.season_number)
     }
 
     return response
@@ -498,28 +647,34 @@ async function buildSeriesInfo(seriesId, channels, base, username, password) {
 function buildVodStreams(channels, base, user) {
   const cats   = buildVodCategories(channels)
   const catMap = new Map(cats.map(c => [c.category_name, c.category_id]))
-  const streamBase = user
-    ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
-    : null
 
   return channels.map((ch, idx) => {
     const g = ch.group_title || 'Uncategorized'
     const displayName = g.startsWith('Movie:') ? g.substring(6).trim() : g
     const categoryId = catMap.get(displayName) || '1'
+    const meta = ch.meta ? (typeof ch.meta === 'string' ? JSON.parse(ch.meta) : ch.meta) : {}
+    const extension = guessContainerExtension(ch.url, 'mkv')
+    const rating = meta.rating ? parseFloat(meta.rating) : 0
+    const rating5 = meta.rating_5based !== undefined ? meta.rating_5based : (rating ? Number((rating / 2).toFixed(1)) : 0)
+    const streamIcon = meta.cover || meta.poster
+      ? `${base}/api/proxy-image?url=${encodeURIComponent(meta.cover || meta.poster)}`
+      : (ch.tvg_logo ? `${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}` : '')
 
     return {
       num:              idx + 1,
-      name:             ch.tvg_name,
+      name:             meta.title || meta.name || ch.tvg_name,
       stream_type:      'movie',
       stream_id:        ch.id,
-      stream_icon:      ch.tvg_logo ? `${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}` : '',
+      stream_icon:      streamIcon,
+      rating:           rating ? String(rating) : '',
+      rating_5based:    rating5,
       added:            '0',
       is_adult:         '0',
       category_id:      categoryId,
       category_ids:     [categoryId],
-      container_extension: 'ts',
-      direct_source:    streamBase ? `${streamBase}/${ch.id}` : ch.url,
-      custom_sid:       streamBase ? `${streamBase}/${ch.id}` : '',
+      container_extension: extension,
+      direct_source:    user ? buildVodStreamUrl(base, user, ch.id, extension) : ch.url,
+      custom_sid:       user ? buildVodStreamUrl(base, user, ch.id, extension) : '',
     }
   })
 }
@@ -527,9 +682,6 @@ function buildVodStreams(channels, base, user) {
 function buildStreams(channels, base, epgMap, user) {
   const groupIds = buildCategories(channels)
   const catMap   = new Map(groupIds.map(c => [c.category_name, c.category_id]))
-  const streamBase = user
-    ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
-    : null
 
   return channels.map((ch, idx) => {
     const tvgId = epgMap.get(ch.tvg_id) || ch.custom_tvg_id || ch.tvg_id || ''
@@ -544,9 +696,9 @@ function buildStreams(channels, base, epgMap, user) {
       is_adult:      '0',
       category_id:   catMap.get(ch.group_title || 'Uncategorized') || '1',
       category_ids:  [catMap.get(ch.group_title || 'Uncategorized') || '1'],
-      custom_sid:    streamBase ? `${streamBase}/${ch.id}` : '',
+      custom_sid:    user ? buildLiveStreamUrl(base, user, ch.id) : '',
       tv_archive:    0,
-      direct_source: streamBase ? `${streamBase}/${ch.id}` : '',
+      direct_source: user ? buildLiveStreamUrl(base, user, ch.id) : '',
       tv_archive_duration: 0,
     }
   })
@@ -554,10 +706,11 @@ function buildStreams(channels, base, epgMap, user) {
 
 // ── M3U builder for a user ────────────────────────────────────────────────────
 function buildM3UForUser(user, base) {
-  if (!user.playlist_id) return '#EXTM3U\n'
-  const channels = getChannels(user.playlist_id)
+  const playlistIds = getUserLivePlaylistIds(user)
+  if (!playlistIds.length) return '#EXTM3U\n'
+  const channels = getUserLiveChannels(user)
   const epgMap   = getEpgMap()
-  const epgUrl   = existsSync(GUIDE_XML) ? `${base}/guide.xml` : ''
+  const epgUrl   = `${base}/xtream/xmltv.php?username=${encodeURIComponent(user.username)}&password=${encodeURIComponent(user.xtreamPassword || user.password).replace(/%24/g, '$')}`
   const lines    = [`#EXTM3U url-tvg="${epgUrl}"`]
   channels.forEach((ch, idx) => {
     const tvgId = epgMap.get(ch.tvg_id) || ch.custom_tvg_id || ch.tvg_id || ''
@@ -565,7 +718,7 @@ function buildM3UForUser(user, base) {
     const logo  = ch.tvg_logo ? ` tvg-logo="${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}"` : ''
     const group = ch.group_title ? ` group-title="${ch.group_title}"` : ''
     lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${ch.tvg_name}" tvg-chno="${chno}"${logo}${group},${ch.tvg_name}`)
-    lines.push(`${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}/${ch.id}`)
+    lines.push(buildLiveStreamUrl(base, user, ch.id))
   })
   return lines.join('\n')
 }
@@ -588,40 +741,12 @@ export function registerXtreamRoutes(app) {
       return res.json({ user_info: { auth: 0 } })
     }
 
-    if (!action) return res.json(buildUserInfo(user, base))
+    if (!action) return res.json(buildUserInfo(user, base, p))
 
     const epgMap     = getEpgMap()
 
-    // Get channels from all assigned live playlists
-    let liveChans = []
-    try {
-      const playlistIds = JSON.parse(user.playlist_ids || '[]')
-      if (playlistIds.length > 0) {
-        for (const id of playlistIds) {
-          liveChans.push(...getChannels(id))
-        }
-      } else if (user.playlist_id) {
-        // Fallback to old single playlist
-        liveChans = getChannels(user.playlist_id)
-      }
-    } catch {
-      if (user.playlist_id) {
-        liveChans = getChannels(user.playlist_id)
-      }
-    }
-
-    // Get VOD playlist IDs
-    let vodPlaylistIds = []
-    try {
-      vodPlaylistIds = JSON.parse(user.vod_playlist_ids || '[]')
-      if (vodPlaylistIds.length === 0 && user.vod_playlist_id) {
-        vodPlaylistIds = [user.vod_playlist_id]
-      }
-    } catch {
-      if (user.vod_playlist_id) {
-        vodPlaylistIds = [user.vod_playlist_id]
-      }
-    }
+    const liveChans = getUserLiveChannels(user)
+    const vodPlaylistIds = getUserVodPlaylistIds(user)
 
     // Get movie and series channels separately
     const movieChans = getMovieChannels(vodPlaylistIds)
@@ -654,42 +779,43 @@ export function registerXtreamRoutes(app) {
         const vodId = req.query.vod_id || req.body?.vod_id
         const ch = vodId ? movieChans.find(c => String(c.id) === String(vodId)) : null
         if (!ch) return res.json({ info: {}, movie_data: {} })
-        const streamBase = user
-          ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
-          : null
-
-        // Try to get enriched metadata from NFO file
-        const { findNfoForChannel } = await import('./nfo-parser.js')
-        const nfoData = findNfoForChannel(ch.id)
-
-        const rating5 = nfoData?.rating ? (parseFloat(nfoData.rating) / 2).toFixed(1) : ''
-        const poster = nfoData?.poster ? `${base}/api/proxy-image?url=${encodeURIComponent(nfoData.poster)}` : ch.tvg_logo || ''
+        const categories = buildVodCategories(movieChans)
+        const group = ch.group_title || 'Uncategorized'
+        const displayName = group.startsWith('Movie:') ? group.substring(6).trim() : group
+        const categoryId = String(categories.find(c => c.category_name === displayName)?.category_id || '1')
+        const nfoData = getChannelNfoData(ch.id)
+        const rating5 = nfoData?.rating ? Number((parseFloat(nfoData.rating) / 2).toFixed(1)) : 0
+        const poster = nfoData?.poster ? `${base}/api/proxy-image?url=${encodeURIComponent(nfoData.poster)}` : (ch.tvg_logo ? `${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}` : '')
+        const extension = guessContainerExtension(ch.url, 'mkv')
 
         return res.json({
           info: {
-            tmdb_id:       nfoData?.tmdb_id || '',
+            tmdb_id:       nfoData?.tmdbId || '',
             name:          nfoData?.title || ch.tvg_name,
-            o_name:        nfoData?.original_title || ch.tvg_name,
+            o_name:        nfoData?.originalTitle || ch.tvg_name,
             cover_big:     poster,
             movie_image:   poster,
-            releasedate:   nfoData?.release_date || '',
+            backdrop_path: nfoData?.fanart ? [`${base}/api/proxy-image?url=${encodeURIComponent(nfoData.fanart)}`] : [],
+            releasedate:   nfoData?.releaseDate || '',
             episode_run_time: nfoData?.runtime ? String(nfoData.runtime) : '',
             youtube_trailer: '',
-            genre:         nfoData?.genre || ch.group_title || '',
+            genre:         Array.isArray(nfoData?.genre) ? nfoData.genre.join(', ') : (nfoData?.genre || ch.group_title || ''),
             plot:          nfoData?.plot || '',
-            cast:          nfoData?.actor || '',
-            director:      nfoData?.director || '',
+            cast:          Array.isArray(nfoData?.actor) ? nfoData.actor.join(', ') : '',
+            director:      Array.isArray(nfoData?.director) ? nfoData.director.join(', ') : '',
             rating:        nfoData?.rating ? String(nfoData.rating) : '',
             rating_5based: rating5,
+            duration_secs: nfoData?.runtime ? parseInt(nfoData.runtime, 10) * 60 : 0,
+            duration:      nfoData?.runtime ? `${String(Math.floor(parseInt(nfoData.runtime, 10) / 60)).padStart(2, '0')}:${String(parseInt(nfoData.runtime, 10) % 60).padStart(2, '0')}:00` : '',
           },
           movie_data: {
             stream_id:           ch.id,
             name:                nfoData?.title || ch.tvg_name,
             added:               '0',
-            category_id:         '1',
-            container_extension: 'ts',
-            custom_sid:          streamBase ? `${streamBase}/${ch.id}` : '',
-            direct_source:       streamBase ? `${streamBase}/${ch.id}` : ch.url,
+            category_id:         categoryId,
+            container_extension: extension,
+            custom_sid:          buildVodStreamUrl(base, user, ch.id, extension),
+            direct_source:       buildVodStreamUrl(base, user, ch.id, extension),
           },
         })
       }
@@ -725,14 +851,23 @@ export function registerXtreamRoutes(app) {
       }
 
       case 'get_short_epg':
-      case 'get_simple_data_table':
-        return res.json({ epg_listings: [] })
+      {
+        const streamId = req.query.stream_id || req.body?.stream_id
+        const limit = Math.max(1, Math.min(parseInt(req.query.limit || req.body?.limit || '4', 10), 12))
+        const ch = streamId ? liveChans.find(c => String(c.id) === String(streamId)) : null
+        if (!ch) return res.json({ epg_listings: [] })
+        return res.json(buildShortEpgResponse(ch, epgMap, limit))
+      }
+
+      case 'get_simple_data_table': {
+        const streamId = req.query.stream_id || req.body?.stream_id
+        const ch = streamId ? liveChans.find(c => String(c.id) === String(streamId)) : null
+        if (!ch) return res.json({ epg_listings: [] })
+        return res.json(buildSimpleDataTableResponse(ch, epgMap))
+      }
 
       case 'get_epg': {
-        // GSE Smart IPTV uses this to get VOD info
         const streamId = req.query.stream_id || req.body?.stream_id
-
-        // Search in live, movies, and series
         let ch = streamId ? liveChans.find(c => String(c.id) === String(streamId)) : null
         let streamType = 'live'
 
@@ -745,73 +880,87 @@ export function registerXtreamRoutes(app) {
           streamType = 'series'
         }
         if (!ch) {
-          return res.json([])
+          console.log(`[xtream] get_epg: channel ${streamId} not found`)
+          return res.json({ epg_listings: [] })
         }
 
-        const streamBase = user
-          ? `${base}/xtream/${encodeURIComponent(user.username)}/${encodeURIComponent(user.password).replace(/%24/g, '$')}`
-          : null
+        console.log(`[xtream] get_epg: stream_id=${streamId} type=${streamType} name=${ch.tvg_name}`)
 
-        // Get enrichment data based on stream type
         let nfoData = null
         let epgData = null
 
         if (streamType === 'live') {
-          // For live TV, get EPG data from XMLTV guide
-          epgData = getEpgFromXmltv(ch.tvg_id, epgMap)
+          epgData = getLiveEpgListings(ch, epgMap, 1)[0] || null
         } else {
-          // For movies and series, get NFO metadata
-          const { findNfoForChannel } = await import('./nfo-parser.js')
-          nfoData = findNfoForChannel(ch.id)
+          nfoData = getNfoFromIndex(ch.id)
+          console.log(`[xtream] get_epg NFO lookup for ${ch.id}: ${nfoData ? 'found' : 'not found'}`)
+          if (nfoData) {
+            console.log(`[xtream] NFO data: title=${nfoData.title}, plot=${nfoData.plot?.substring(0, 50)}...`)
+          }
         }
 
-        // Determine category
+        // For movies/series, return get_vod_info format instead of EPG listings
+        if (streamType === 'movie' && nfoData) {
+          const g = ch.group_title || 'Uncategorized'
+          const displayName = g.startsWith('Movie:') ? g.substring(6).trim() : g
+          const cats = buildVodCategories(movieChans)
+          const catMap = new Map(cats.map(c => [c.category_name, c.category_id]))
+          const categoryId = catMap.get(displayName) || '1'
+          const rating5 = nfoData.rating ? Number((parseFloat(nfoData.rating) / 2).toFixed(1)) : 0
+          const poster = nfoData.poster ? `${base}/api/proxy-image?url=${encodeURIComponent(nfoData.poster)}` : (ch.tvg_logo ? `${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}` : '')
+          const extension = guessContainerExtension(ch.url, 'mkv')
+
+          return res.json({
+            info: {
+              tmdb_id: nfoData.tmdbId || '',
+              name: nfoData.title || ch.tvg_name,
+              o_name: nfoData.originalTitle || ch.tvg_name,
+              cover_big: poster,
+              movie_image: poster,
+              backdrop_path: nfoData.fanart ? [`${base}/api/proxy-image?url=${encodeURIComponent(nfoData.fanart)}`] : [],
+              releasedate: nfoData.releaseDate || nfoData.year || '',
+              episode_run_time: nfoData.runtime ? String(nfoData.runtime) : '',
+              youtube_trailer: '',
+              genre: Array.isArray(nfoData.genre) ? nfoData.genre.join(', ') : (nfoData.genre || ''),
+              plot: nfoData.plot || '',
+              cast: Array.isArray(nfoData.actor) ? nfoData.actor.join(', ') : '',
+              director: Array.isArray(nfoData.director) ? nfoData.director.join(', ') : '',
+              rating: nfoData.rating ? String(nfoData.rating) : '',
+              rating_5based: rating5,
+              duration_secs: nfoData.runtime ? parseInt(nfoData.runtime, 10) * 60 : 0,
+              duration: nfoData.runtime ? `${String(Math.floor(parseInt(nfoData.runtime, 10) / 60)).padStart(2, '0')}:${String(parseInt(nfoData.runtime, 10) % 60).padStart(2, '0')}:00` : '',
+            },
+            movie_data: {
+              stream_id: ch.id,
+              name: nfoData.title || ch.tvg_name,
+              added: '0',
+              category_id: categoryId,
+              container_extension: extension,
+              custom_sid: buildVodStreamUrl(base, user, ch.id, extension),
+              direct_source: buildVodStreamUrl(base, user, ch.id, extension),
+            },
+          })
+        }
+
+        // For live TV, return EPG listings format
         const g = ch.group_title || 'Uncategorized'
-        const displayName = g.startsWith('Movie:') ? g.substring(6).trim() :
-                           g.startsWith('Series:') ? g.substring(7).trim() : g
-        const cats = streamType === 'movie' ? buildVodCategories(movieChans) :
-                     streamType === 'series' ? buildSeriesCategories(seriesChans) :
-                     buildCategories(liveChans)
+        const displayName = g.startsWith('Series:') ? g.substring(7).trim() : g
+        const cats = streamType === 'series' ? buildSeriesCategories(seriesChans) : buildCategories(liveChans)
         const catMap = new Map(cats.map(c => [c.category_name, c.category_id]))
         const categoryId = catMap.get(displayName) || '1'
 
-        const response = [{
-          num: 1,
-          name: epgData?.title || nfoData?.title || ch.tvg_name,
-          stream_type: streamType,
-          stream_id: ch.id,
-          stream_icon: ch.tvg_logo ? `${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}` : '',
-          epg_channel_id: ch.tvg_id || '',
-          added: '0',
-          custom_sid: streamBase ? `${streamBase}/${ch.id}` : '',
-          tv_archive: 0,
-          direct_source: streamBase ? `${streamBase}/${ch.id}` : ch.url,
-          tv_archive_duration: 0,
-          category_id: categoryId,
-          category_ids: [categoryId],
-          thumbnail: nfoData?.poster ? `${base}/api/proxy-image?url=${encodeURIComponent(nfoData.poster)}` : '',
-          // EPG enrichment for live TV
-          ...(epgData && {
-            description: epgData.description || '',
-            start: epgData.start || '',
-            stop: epgData.stop || '',
-            now_playing: epgData.title || ''
-          }),
-          // NFO enrichment for movies/series
-          ...(nfoData && {
-            description: nfoData.plot || '',
-            rating: nfoData.rating || '',
-            year: nfoData.year || '',
-            genre: Array.isArray(nfoData.genre) ? nfoData.genre.join(', ') : nfoData.genre || '',
-            director: Array.isArray(nfoData.director) ? nfoData.director.join(', ') : nfoData.director || '',
-            cast: Array.isArray(nfoData.actor) ? nfoData.actor.join(', ') : nfoData.actor || '',
-            tmdb_id: nfoData.tmdbId || '',
-            imdb_id: nfoData.imdbId || '',
-            backdrop: nfoData.fanart ? `${base}/api/proxy-image?url=${encodeURIComponent(nfoData.fanart)}` : ''
-          })
-        }]
+        const listing = {
+          id: String(ch.id),
+          epg_id: getTargetEpgId(ch, epgMap),
+          title: epgData?.title || ch.tvg_name,
+          lang: 'en',
+          start: epgData?.start || '',
+          end: epgData?.stop || '',
+          description: epgData?.desc || '',
+          channel_id: getTargetEpgId(ch, epgMap)
+        }
 
-        return res.json(response)
+        return res.json({ epg_listings: [listing] })
       }
 
       default:
@@ -857,18 +1006,16 @@ export function registerXtreamRoutes(app) {
     const p    = req.query.password || ''
     const user = await lookupUser(u, p)
     if (!user) return res.status(401).send('Unauthorized')
-    if (!existsSync(GUIDE_XML)) return res.status(404).send('No EPG data yet')
     res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-    res.sendFile(resolve(GUIDE_XML))
+    res.send(buildUserXmltv(user, getBaseUrl(req)))
   })
 
   app.get('/xmltv.php', async (req, res) => {
     const u = req.query.username || ''; const p = req.query.password || ''
     const user = await lookupUser(u, p)
     if (!user) return res.status(401).send('Unauthorized')
-    if (!existsSync(GUIDE_XML)) return res.status(404).send('No EPG data yet')
     res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-    res.sendFile(resolve(GUIDE_XML))
+    res.send(buildUserXmltv(user, getBaseUrl(req)))
   })
 
   // ── API: server info for Settings page ───────────────────────────────────
@@ -884,7 +1031,7 @@ export function registerXtreamRoutes(app) {
       player_api: `${base}/xtream/player_api.php`,
       get_php:    `${base}/xtream/get.php`,
       xmltv:      `${base}/xtream/xmltv.php`,
-      stream_url: `${base}/xtream/{username}/{password}/{stream_id}`,
+      stream_url: `${base}/live/{username}/{password}/{stream_id}.ts`,
       lan_base:   lanBase,
       lan_player_api: lanBase ? `${lanBase}/xtream/player_api.php` : null,
     })
@@ -926,15 +1073,18 @@ export function registerXtreamRoutes(app) {
     }))
   })
 
-  // ── VOD Stream URL: /movie/:user/:pass/:channelId.ts ─────────────────────
+  // ── VOD Stream URL: /movie/:user/:pass/:channelId.ext ────────────────────
   app.get('/movie/:user/:pass/:channelId', async (req, res) => {
     const { user: u, pass: p, channelId: rawId } = req.params
-    const channelId = rawId.replace(/\.ts$/, '')
+    const channelId = rawId.replace(/\.(mp4|mkv|avi|3gp|flv|wmv|mov|ts|m4v)$/i, '')
 
     console.log(`[xtream] VOD stream request: /movie/${u}/***/${rawId} (id: ${channelId})`)
 
     const user = await lookupUser(decodeURIComponent(u), decodeURIComponent(p))
-    if (!user) return res.status(401).send('Unauthorized')
+    if (!user) {
+      console.log(`[xtream] VOD auth failed for user: ${u}`)
+      return res.status(401).send('Unauthorized')
+    }
 
     const active = getActiveCons(user.username)
     if (user.max_connections > 0 && active >= user.max_connections) {
@@ -942,14 +1092,21 @@ export function registerXtreamRoutes(app) {
     }
 
     const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
-    if (!row) return res.status(404).send('Channel not found')
+    if (!row) {
+      console.log(`[xtream] VOD channel ${channelId} not found in database`)
+      return res.status(404).send('Channel not found')
+    }
 
-    if (user.vod_playlist_id && Number(row.playlist_id) !== Number(user.vod_playlist_id)) {
+    const vodPlaylists = getUserVodPlaylistIds(user)
+    const hasAccess = hasPlaylistAccess(row, vodPlaylists)
+    if (!hasAccess) {
+      console.log(`[xtream] VOD access denied: channel playlist=${row.playlist_id}, user playlists=${JSON.stringify(vodPlaylists)}`)
       return res.status(403).send('Forbidden')
     }
 
     console.log(`[xtream] Streaming VOD ${channelId}: ${row.tvg_name}`)
 
+    const source = row.source_id ? db.prepare('SELECT force_ts_extension FROM sources WHERE id = ?').get(row.source_id) : null
     const { connectVodClient } = await import('./vod-streamer.js')
     await connectVodClient(
       channelId,
@@ -958,13 +1115,14 @@ export function registerXtreamRoutes(app) {
       req,
       res,
       user.username,
+      source
     )
   })
 
-  // ── Series Stream URL: /series/:user/:pass/:channelId.mkv ─────────────────
+  // ── Series Stream URL: /series/:user/:pass/:channelId.ext ─────────────────
   app.get('/series/:user/:pass/:channelId', async (req, res) => {
     const { user: u, pass: p, channelId: rawId } = req.params
-    const channelId = rawId.replace(/\.mkv$/, '')
+    const channelId = rawId.replace(/\.(mp4|mkv|avi|3gp|flv|wmv|mov|ts|m4v)$/i, '')
 
     console.log(`[xtream] Series stream request: /series/${u}/***/${rawId} (id: ${channelId})`)
 
@@ -979,12 +1137,13 @@ export function registerXtreamRoutes(app) {
     const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
     if (!row) return res.status(404).send('Channel not found')
 
-    if (user.vod_playlist_id && Number(row.playlist_id) !== Number(user.vod_playlist_id)) {
+    if (!hasPlaylistAccess(row, getUserVodPlaylistIds(user))) {
       return res.status(403).send('Forbidden')
     }
 
     console.log(`[xtream] Streaming Series ${channelId}: ${row.tvg_name}`)
 
+    const source = row.source_id ? db.prepare('SELECT force_ts_extension FROM sources WHERE id = ?').get(row.source_id) : null
     const { connectVodClient } = await import('./vod-streamer.js')
     await connectVodClient(
       channelId,
@@ -993,12 +1152,14 @@ export function registerXtreamRoutes(app) {
       req,
       res,
       user.username,
+      source
     )
   })
 
-  // ── Stream URL: /xtream/:user/:pass/:channelId ────────────────────────────
-  app.get('/xtream/:user/:pass/:channelId', async (req, res) => {
-    const { user: u, pass: p, channelId } = req.params
+  // ── Stream URL: /xtream/:user/:pass/:channelId and /live/:user/:pass/:channelId.ts ──
+  const handleLiveStream = async (req, res) => {
+    const { user: u, pass: p, channelId: rawId } = req.params
+    const channelId = String(rawId).replace(/\.(ts|m3u8)$/i, '')
     const user = await lookupUser(decodeURIComponent(u), decodeURIComponent(p))
     if (!user) return res.status(401).send('Unauthorized')
 
@@ -1010,18 +1171,19 @@ export function registerXtreamRoutes(app) {
     const row = db.prepare('SELECT * FROM playlist_channels WHERE id = ?').get(channelId)
     if (!row) return res.status(404).send('Channel not found')
 
-    if (user.playlist_id && Number(row.playlist_id) !== Number(user.playlist_id)) {
+    if (!hasPlaylistAccess(row, getUserLivePlaylistIds(user))) {
       return res.status(403).send('Forbidden')
     }
 
+    if (isFfmpegRemuxEnabled()) {
+      await connectFfmpegClient(channelId, row.url, row.tvg_name, res, row.source_id || null, user.username)
+      return
+    }
+
     const { connectClient } = await import('./streamer.js')
-    await connectClient(
-      channelId,
-      row.url,
-      row.tvg_name,
-      res,
-      row.source_id || null,
-      user.username,
-    )
-  })
+    await connectClient(channelId, row.url, row.tvg_name, res, row.source_id || null, user.username)
+  }
+
+  app.get('/xtream/:user/:pass/:channelId', handleLiveStream)
+  app.get('/live/:user/:pass/:channelId', handleLiveStream)
 }

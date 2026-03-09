@@ -122,10 +122,14 @@ async function save() {
   error.value   = ''
   try {
     const payload = {
-      ...form.value,
-      playlist_id:     form.value.playlist_id ? Number(form.value.playlist_id) : null,
+      username:        form.value.username,
+      password:        form.value.password,
+      playlist_ids:    form.value.playlist_ids || [],
+      vod_playlist_ids: form.value.vod_playlist_ids || [],
       max_connections: Number(form.value.max_connections) || 1,
       expires_at:      form.value.expires_at || null,
+      active:          form.value.active,
+      notes:           form.value.notes || '',
     }
     if (editing.value) {
       await fetch(`/api/users/${editing.value.id}`, {
@@ -154,16 +158,32 @@ async function remove(u) {
 }
 
 async function toggleActive(u) {
+  // Parse playlist IDs from JSON or migrate from legacy single IDs
+  let liveIds = []
+  try {
+    liveIds = JSON.parse(u.playlist_ids || '[]')
+  } catch {
+    if (u.playlist_id) liveIds = [u.playlist_id]
+  }
+
+  let vodIds = []
+  try {
+    vodIds = JSON.parse(u.vod_playlist_ids || '[]')
+  } catch {
+    if (u.vod_playlist_id) vodIds = [u.vod_playlist_id]
+  }
+
   await fetch(`/api/users/${u.id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       username:        u.username,
-      password:        u.password,
-      playlist_id:     u.playlist_id || null,
+      password:        '',
+      playlist_ids:    liveIds,
+      vod_playlist_ids: vodIds,
       max_connections: u.max_connections,
       expires_at:      u.expires_at || '3000-01-01',
       active:          !u.active,
-      notes:           u.notes || null,
+      notes:           u.notes || '',
     }),
   })
   await load()

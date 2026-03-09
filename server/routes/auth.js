@@ -56,14 +56,16 @@ router.post('/users', async (req, res) => {
   if (!username || !password) return res.status(400).json({ error: 'username and password required' })
   try {
     const hashed = await hashPassword(password)
-    // Support multiple playlists by storing as JSON or first ID (legacy compat)
-    // For now, we'll just take the first ID if array is provided
-    const playlistId = Array.isArray(playlist_ids) ? playlist_ids[0] : playlist_ids
-    const vodPlaylistId = Array.isArray(vod_playlist_ids) ? vod_playlist_ids[0] : vod_playlist_ids
+
+    // Store as JSON arrays and sync legacy single-ID columns
+    const liveIds = Array.isArray(playlist_ids) ? playlist_ids : (playlist_ids ? [playlist_ids] : [])
+    const vodIds = Array.isArray(vod_playlist_ids) ? vod_playlist_ids : (vod_playlist_ids ? [vod_playlist_ids] : [])
+    const playlistId = liveIds.length > 0 ? liveIds[0] : null
+    const vodPlaylistId = vodIds.length > 0 ? vodIds[0] : null
 
     const result = db.prepare(
-      'INSERT INTO users (username, password, playlist_id, vod_playlist_id, max_connections, expires_at, active, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(username, hashed, playlistId, vodPlaylistId, Number(max_connections) || 1, expires_at, active ? 1 : 0, notes)
+      'INSERT INTO users (username, password, playlist_id, vod_playlist_id, playlist_ids, vod_playlist_ids, max_connections, expires_at, active, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(username, hashed, playlistId, vodPlaylistId, JSON.stringify(liveIds), JSON.stringify(vodIds), Number(max_connections) || 1, expires_at, active ? 1 : 0, notes)
     res.json({ id: result.lastInsertRowid })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -80,12 +82,15 @@ router.put('/users/:id', async (req, res) => {
     let hashed = existing.password
     if (password) hashed = await hashPassword(password)
 
-    const playlistId = Array.isArray(playlist_ids) ? playlist_ids[0] : playlist_ids
-    const vodPlaylistId = Array.isArray(vod_playlist_ids) ? vod_playlist_ids[0] : vod_playlist_ids
+    // Store as JSON arrays and sync legacy single-ID columns
+    const liveIds = Array.isArray(playlist_ids) ? playlist_ids : (playlist_ids ? [playlist_ids] : [])
+    const vodIds = Array.isArray(vod_playlist_ids) ? vod_playlist_ids : (vod_playlist_ids ? [vod_playlist_ids] : [])
+    const playlistId = liveIds.length > 0 ? liveIds[0] : null
+    const vodPlaylistId = vodIds.length > 0 ? vodIds[0] : null
 
     db.prepare(
-      'UPDATE users SET username=?, password=?, playlist_id=?, vod_playlist_id=?, max_connections=?, expires_at=?, active=?, notes=? WHERE id=?'
-    ).run(username, hashed, playlistId, vodPlaylistId, Number(max_connections) || 1, expires_at, active ? 1 : 0, notes, req.params.id)
+      'UPDATE users SET username=?, password=?, playlist_id=?, vod_playlist_id=?, playlist_ids=?, vod_playlist_ids=?, max_connections=?, expires_at=?, active=?, notes=? WHERE id=?'
+    ).run(username, hashed, playlistId, vodPlaylistId, JSON.stringify(liveIds), JSON.stringify(vodIds), Number(max_connections) || 1, expires_at, active ? 1 : 0, notes, req.params.id)
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })

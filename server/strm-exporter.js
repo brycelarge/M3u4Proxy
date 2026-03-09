@@ -910,6 +910,14 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
   console.log(`[strm] Export complete:`, stats)
 
+  // Rebuild NFO index to pick up newly exported NFO files
+  try {
+    const { rebuildNfoIndex } = await import('./nfo-index.js')
+    rebuildNfoIndex()
+  } catch (e) {
+    console.error(`[strm] Failed to rebuild NFO index:`, e.message)
+  }
+
   // Write skipped items to CSV file
   if (skippedList.length > 0) {
     const csvPath = join(strmDir, 'skipped-items.csv')

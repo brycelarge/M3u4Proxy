@@ -129,4 +129,52 @@ router.put('/proxy-settings', (req, res) => {
   }
 })
 
+// ── NFO Image proxy (supports local files and URLs) ──────────────────────────
+router.get('/proxy-image', async (req, res) => {
+  const imageUrl = req.query.url
+  if (!imageUrl) return res.status(400).send('Missing url parameter')
+
+  try {
+    // Check if it's a local file path (from Jellyfin STRM folder)
+    if (imageUrl.startsWith('/') || imageUrl.startsWith('file://')) {
+      const filePath = imageUrl.replace('file://', '')
+
+      if (!existsSync(filePath)) {
+        return res.status(404).send('Image not found')
+      }
+
+      // Determine content type from extension
+      const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg'
+      const mimeExt = ext === 'jpg' ? 'jpeg' : ext
+      const contentType = ext === 'svg' ? 'image/svg+xml' : `image/${mimeExt}`
+
+      res.setHeader('Cache-Control', 'public, max-age=604800') // 7 days
+      res.setHeader('Content-Type', contentType)
+
+      const { createReadStream } = await import('node:fs')
+      return createReadStream(filePath).pipe(res)
+    }
+
+    // It's a remote URL - fetch and proxy it
+    const response = await fetch(imageUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(8000)
+    })
+
+    if (!response.ok) {
+      return res.status(response.status).send('Failed to fetch image')
+    }
+
+    const contentType = response.headers.get('content-type') || 'image/jpeg'
+    res.setHeader('Content-Type', contentType)
+    res.setHeader('Cache-Control', 'public, max-age=604800')
+
+    const readable = Readable.fromWeb(response.body)
+    readable.pipe(res)
+  } catch (e) {
+    console.error('[proxy-image] Error:', e.message)
+    res.status(500).send('Failed to proxy image')
+  }
+})
+
 export default router

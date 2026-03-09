@@ -17,7 +17,7 @@
 
 import db from './db.js'
 import { execSync } from 'child_process'
-import { findNfoByTitle } from './nfo-parser.js'
+import { getNfoByTitle } from './nfo-index.js'
 
 const TMDB_BASE = 'https://api.themoviedb.org/3'
 const TMDB_IMG  = 'https://image.tmdb.org/t/p/w300'
@@ -316,8 +316,8 @@ export async function enrichGuide(_unused, { onProgress } = {}) {
         await new Promise(r => setTimeout(r, 1000))
       }
 
-      // First, try to find NFO file locally
-      const nfoData = findNfoByTitle(title)
+      // First, try to find NFO file locally using fast title index
+      const nfoData = getNfoByTitle(title)
       let result = null
 
       if (nfoData && (nfoData.plot || nfoData.poster)) {
