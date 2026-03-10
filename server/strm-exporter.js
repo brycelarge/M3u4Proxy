@@ -13,6 +13,11 @@ import { xml2json } from 'xml-js'
 
 const STRM_BASE_DIR = process.env.STRM_EXPORT_DIR || '/data/vod-strm'
 const METADATA_EXT = '.m3u4prox.json'
+const EVENT_LOOP_YIELD_INTERVAL = 250
+
+function yieldToEventLoop() {
+  return new Promise(resolve => setImmediate(resolve))
+}
 
 // Helper to check if a folder is managed by m3u4prox (has our marker file)
 function isManagedFolder(dirPath) {
@@ -476,6 +481,14 @@ function scanExistingFiles(strmDir) {
 export async function exportVodToStrm(playlistId, baseUrl, username, password, options = {}) {
   const { deleteOrphans = true } = options
   console.log(`[strm] Starting export for playlist ${playlistId} (deleteOrphans: ${deleteOrphans})`)
+  let processedLoopItems = 0
+
+  async function maybeYield() {
+    processedLoopItems++
+    if (processedLoopItems % EVENT_LOOP_YIELD_INTERVAL === 0) {
+      await yieldToEventLoop()
+    }
+  }
 
   const dbPath = process.env.DB_PATH || join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'db', 'm3u-manager.db')
   mkdirSync(dirname(dbPath), { recursive: true })
@@ -600,6 +613,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const movieItems = new Map() // normalized_name -> channel
 
   for (const channel of channels) {
+    await maybeYield()
     const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
     const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
 
@@ -643,6 +657,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   if (vodSettings.vod_blocked_titles?.length > 0) {
     // Filter blocked series
     for (const [seriesKey, seriesData] of seriesGroups.entries()) {
+      await maybeYield()
       const nameLower = seriesData.seriesName.toLowerCase()
       const isBlocked = vodSettings.vod_blocked_titles.some(blocked =>
         blocked && nameLower.includes(blocked.toLowerCase())
@@ -661,6 +676,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
     // Filter blocked movies
     for (const [movieKey, channel] of movieItems.entries()) {
+      await maybeYield()
       const nameLower = (channel.tvg_name || '').toLowerCase()
       const isBlocked = vodSettings.vod_blocked_titles.some(blocked =>
         blocked && nameLower.includes(blocked.toLowerCase())
@@ -683,6 +699,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const seriesToSkip = new Map()
 
   for (const [seriesKey, seriesData] of seriesGroups.entries()) {
+    await maybeYield()
     const meta = seriesData.episodes[0].meta ?
       (typeof seriesData.episodes[0].meta === 'string' ? JSON.parse(seriesData.episodes[0].meta) : seriesData.episodes[0].meta) : null
     const year = seriesData.year || (meta ? (meta.releaseDate || meta.release_date || meta.year || '') : '')
@@ -732,6 +749,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const moviesToProcess = new Map()
 
   for (const [movieKey, channel] of movieItems.entries()) {
+    await maybeYield()
     const meta = channel.meta ? (typeof channel.meta === 'string' ? JSON.parse(channel.meta) : channel.meta) : null
     let year = extractYear(channel.tvg_name || '')
     if (!year && meta) {
@@ -767,6 +785,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
   if (deleteOrphans) {
     for (const blockedSeriesKey of blockedSeriesKeys) {
+      await maybeYield()
       const existingSeries = Array.from(existing.values()).filter(entry => entry.isSeries && entry.normalizedName === blockedSeriesKey)
       let seriesRootDir = null
       let seriesName = blockedSeriesKey
@@ -805,6 +824,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     }
 
     for (const blockedMovieKey of blockedMovieKeys) {
+      await maybeYield()
       const existingMovie = existing.get(blockedMovieKey)
       let movieDir = null
       let movieTitle = blockedMovieKey
@@ -849,7 +869,9 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   // Use the same key format as existing metadata files (normalized_name from channel)
   const newContentKeys = new Set()
   for (const seriesData of seriesToProcess.values()) {
+    await maybeYield()
     for (const ep of seriesData.episodes) {
+      await maybeYield()
       // Match the key format from scanExistingFiles: metadata.normalizedName || metadata.normalized_name || metadata.channelId
       const key = ep.normalized_name || String(ep.id)
       newContentKeys.add(key)
@@ -864,6 +886,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
   // Delete series marked for removal (language filtered with deleteOrphans=true)
   for (const [seriesKey, seriesData] of seriesToSkip.entries()) {
+    await maybeYield()
     if (seriesData.delete && existsSync(seriesData.folderPath)) {
       console.log(`[strm] Deleting filtered series: ${seriesData.seriesName}`)
       // Delete all contents recursively
@@ -898,6 +921,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
   // Process series episodes
   for (const [seriesKey, seriesData] of seriesToProcess.entries()) {
+    await maybeYield()
     const seriesRootDir = seriesData.folderPath
     const meta = seriesData.episodes[0].meta ?
       (typeof seriesData.episodes[0].meta === 'string' ? JSON.parse(seriesData.episodes[0].meta) : seriesData.episodes[0].meta) : null
@@ -935,6 +959,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
     // Process each episode
     for (const channel of seriesData.episodes) {
+      await maybeYield()
       const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
       if (!seriesInfo.isSeries) continue
 
@@ -999,6 +1024,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
   // Process movies
   for (const [movieKey, movieData] of moviesToProcess.entries()) {
+    await maybeYield()
     const { channel, movieDir, delete: shouldDelete } = movieData
 
     // Delete if marked for removal
@@ -1080,6 +1106,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   if (deleteOrphans) {
     console.log(`[strm] Checking for orphaned files to delete...`)
     for (const [existingKey, entry] of existing.entries()) {
+      await maybeYield()
       if (!newContentKeys.has(existingKey)) {
         console.log(`[strm] Deleting: ${entry.strmFile} (no longer in playlist)`)
         try {
@@ -1102,6 +1129,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
   // Clean up empty directories using safe deletion
   for (const dir of deletedDirs) {
+    await maybeYield()
     safeDeleteManagedDir(dir, deletedDirs)
 
     // Check parent directory for series (season's parent is series root)
@@ -1115,6 +1143,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   try {
     const allItems = readdirSync(strmDir)
     for (const item of allItems) {
+      await maybeYield()
       const itemPath = join(strmDir, item)
       if (!statSync(itemPath).isDirectory()) continue
 

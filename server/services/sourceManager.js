@@ -5,6 +5,13 @@ import { fetchAndParseM3U, fetchXtreamChannels, shouldSkipByRules } from '../m3u
 import { clearCache } from './cache.js'
 import { getVodSettings } from '../routes/settings.js'
 
+const DEFAULT_DETECTED_GENRES = ['Action', 'Comedy', 'Drama', 'Documentary', 'Horror', 'Romance', 'Sci-Fi', 'Thriller']
+const EVENT_LOOP_YIELD_INTERVAL = 250
+
+function yieldToEventLoop() {
+  return new Promise(resolve => setImmediate(resolve))
+}
+
 // Helper to check if a channel should be filtered by VOD settings
 function shouldFilterVodChannel(channelName, genre, vodSettings) {
   if (!channelName) return false
@@ -74,6 +81,95 @@ function extractVodGenre(channel, contentType) {
   }
 
   return parseGenres(groupTitle)[0] || null
+}
+
+async function buildPreparedChannelArrays(channelArrays, cleanupRules, skipRules, vodSettings, sourceName) {
+  const detectedGenres = new Set(DEFAULT_DETECTED_GENRES)
+  const preparedChannelArrays = []
+  let processedCount = 0
+
+  for (const { contentType, channels: channelList } of channelArrays) {
+    const seenUrls = new Map()
+    const preparedChannels = []
+
+    for (const ch of channelList) {
+      processedCount++
+      if (processedCount % EVENT_LOOP_YIELD_INTERVAL === 0) {
+        await yieldToEventLoop()
+      }
+
+      const isLiveTv = contentType === 'live'
+      let channelName = ch.tvg_name || ''
+
+      for (const rule of cleanupRules) {
+        try {
+          if (rule.useRegex) {
+            const regex = new RegExp(rule.find, rule.flags || 'gi')
+            channelName = channelName.replace(regex, rule.replace || '')
+          } else {
+            const regex = new RegExp(rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+            channelName = channelName.replace(regex, rule.replace || '')
+          }
+        } catch (e) {
+          console.error(`[source] Cleanup rule failed for "${sourceName}":`, e.message)
+        }
+      }
+
+      if (shouldSkipByRules(channelName, skipRules)) {
+        if (process.env.DEBUG) {
+          console.log(`[source] Skipping "${channelName}" - matched skip rule`)
+        }
+        continue
+      }
+
+      const genre = extractVodGenre(ch, contentType)
+
+      if (!isLiveTv && shouldFilterVodChannel(channelName, genre, vodSettings)) {
+        if (process.env.DEBUG) {
+          console.log(`[source] Filtering VOD "${channelName}" (${genre || 'no genre'}) by VOD settings`)
+        }
+        continue
+      }
+
+      if (genre) {
+        detectedGenres.add(genre)
+      }
+
+      const { cleanedName, quality } = extractQuality(channelName.trim())
+      const normalizedName = normalizeChannelName(cleanedName)
+
+      if (isLiveTv && seenUrls.has(ch.url)) {
+        if (process.env.DEBUG) {
+          console.log(`[source] Skipping duplicate URL: "${cleanedName}" (same as "${seenUrls.get(ch.url)}")`)
+        }
+        continue
+      }
+
+      if (isLiveTv) {
+        seenUrls.set(ch.url, cleanedName)
+      }
+
+      preparedChannels.push({
+        contentType,
+        tvgId: ch.tvg_id || '',
+        cleanedName,
+        tvgLogo: ch.tvg_logo || '',
+        groupTitle: ch.group_title || 'Ungrouped',
+        url: ch.url,
+        rawExtinf: ch.raw_extinf || '',
+        quality,
+        normalizedName,
+        metaJson: ch.meta ? JSON.stringify(ch.meta) : null,
+      })
+    }
+
+    preparedChannelArrays.push({ contentType, channels: preparedChannels })
+  }
+
+  return {
+    preparedChannelArrays,
+    detectedGenres: Array.from(detectedGenres).sort((a, b) => a.localeCompare(b)),
+  }
 }
 
 export async function refreshSourceCache(sourceId) {
@@ -167,6 +263,20 @@ export async function refreshSourceCache(sourceId) {
     refreshedContentTypes.live = true
   }
 
+  let channelArrays = []
+  if (isXtream) {
+    channelArrays = [
+      { contentType: 'live', channels: channels.live || [] },
+      { contentType: 'movie', channels: channels.movie || [] },
+      { contentType: 'series', channels: channels.series || [] }
+    ]
+  } else {
+    channelArrays = [{ contentType: 'vod', channels: channels }]
+  }
+
+  const vodSettings = getVodSettings()
+  const { preparedChannelArrays, detectedGenres } = await buildPreparedChannelArrays(channelArrays, cleanupRules, skipRules, vodSettings, source.name)
+
   const insert = db.prepare(
     `INSERT INTO source_channels (source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name, meta, content_type)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -184,91 +294,18 @@ export async function refreshSourceCache(sourceId) {
   const update = db.prepare(
     'UPDATE source_channels SET tvg_id = ?, tvg_name = ?, tvg_logo = ?, group_title = ?, raw_extinf = ?, quality = ?, normalized_name = ?, meta = ?, content_type = ? WHERE source_id = ? AND url = ?'
   )
-  const replace = db.transaction((sid, chs, isXtreamSource, refreshedContentTypes = { live: true, movies: true, series: true }) => {
+  const renamePlaylistChannels = db.prepare('UPDATE playlist_channels SET tvg_name = ? WHERE url = ?')
+  const replace = db.transaction((sid, preparedArrays, refreshedContentTypes = { live: true, movies: true, series: true }, detectedGenreValues = DEFAULT_DETECTED_GENRES) => {
     // No longer delete VOD content - UPDATE by URL to preserve IDs for all content types
-
-    // For Xtream sources, process each content type separately
-    // For M3U sources, process as a single array
-    let channelArrays = []
-    if (isXtreamSource) {
-      channelArrays = [
-        { contentType: 'live', channels: chs.live || [] },
-        { contentType: 'movie', channels: chs.movie || [] },
-        { contentType: 'series', channels: chs.series || [] }
-      ]
-    } else {
-      // For M3U sources, default to 'vod' content type
-      channelArrays = [{ contentType: 'vod', channels: chs }]
-    }
 
     // Track all URLs by content type for stale deletion
     const allLiveTvUrls = new Set()
     const allMovieUrls = new Set()
     const allSeriesUrls = new Set()
 
-    const vodSettings = getVodSettings()
-    const detectedGenres = new Set(['Action', 'Comedy', 'Drama', 'Documentary', 'Horror', 'Romance', 'Sci-Fi', 'Thriller'])
-
-    for (const { contentType, channels: channelList } of channelArrays) {
-      // Track seen URLs to deduplicate (only for Live TV)
-      const seenUrls = new Map()
-
+    for (const { contentType, channels: channelList } of preparedArrays) {
       for (const ch of channelList) {
-        // Determine if this is Live TV based on content_type
-        const isLiveTv = contentType === 'live'
-        let channelName = ch.tvg_name || ''
-
-        // Apply cleanup rules before quality extraction and normalization
-        for (const rule of cleanupRules) {
-          try {
-            if (rule.useRegex) {
-              const regex = new RegExp(rule.find, rule.flags || 'gi')
-              channelName = channelName.replace(regex, rule.replace || '')
-            } else {
-              // Simple string replacement (case-insensitive)
-              const regex = new RegExp(rule.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
-              channelName = channelName.replace(regex, rule.replace || '')
-            }
-          } catch (e) {
-            console.error(`[source] Cleanup rule failed for "${source.name}":`, e.message)
-          }
-        }
-
-        // Check skip rules - exclude channels matching patterns
-        if (shouldSkipByRules(channelName, skipRules)) {
-          if (process.env.DEBUG) {
-            console.log(`[source] Skipping "${channelName}" - matched skip rule`)
-          }
-          continue
-        }
-
-        const genre = extractVodGenre(ch, contentType)
-
-        if (!isLiveTv && shouldFilterVodChannel(channelName, genre, vodSettings)) {
-          if (process.env.DEBUG) {
-            console.log(`[source] Filtering VOD "${channelName}" (${genre || 'no genre'}) by VOD settings`)
-          }
-          continue
-        }
-
-        if (genre) {
-          detectedGenres.add(genre)
-        }
-
-        // Extract quality and clean the channel name
-        const { cleanedName, quality } = extractQuality(channelName.trim())
-        const normalizedName = normalizeChannelName(cleanedName)
-
-        // Deduplicate by URL - keep first occurrence (only for Live TV)
-        if (isLiveTv && seenUrls.has(ch.url)) {
-          if (process.env.DEBUG) {
-            console.log(`[source] Skipping duplicate URL: "${cleanedName}" (same as "${seenUrls.get(ch.url)}")`)
-          }
-          continue
-        }
-        // Track URLs by content type for stale deletion
-        if (isLiveTv) {
-          seenUrls.set(ch.url, cleanedName)
+        if (contentType === 'live') {
           allLiveTvUrls.add(ch.url)
         } else if (contentType === 'movie') {
           allMovieUrls.add(ch.url)
@@ -276,17 +313,15 @@ export async function refreshSourceCache(sourceId) {
           allSeriesUrls.add(ch.url)
         }
 
-        // For ALL content types, UPDATE existing channel by URL to preserve ID
-        const groupTitle = ch.group_title || 'Ungrouped'
         const result = update.run(
-          ch.tvg_id || '',
-          cleanedName,
-          ch.tvg_logo || '',
-          groupTitle,
-          ch.raw_extinf || '',
-          quality,
-          normalizedName,
-          ch.meta ? JSON.stringify(ch.meta) : null,
+          ch.tvgId,
+          ch.cleanedName,
+          ch.tvgLogo,
+          ch.groupTitle,
+          ch.rawExtinf,
+          ch.quality,
+          ch.normalizedName,
+          ch.metaJson,
           contentType,
           sid,
           ch.url
@@ -296,24 +331,23 @@ export async function refreshSourceCache(sourceId) {
         if (result.changes === 0) {
           insert.run(
             sid,
-            ch.tvg_id || '',
-            cleanedName,
-            ch.tvg_logo || '',
-            groupTitle,
+            ch.tvgId,
+            ch.cleanedName,
+            ch.tvgLogo,
+            ch.groupTitle,
             ch.url,
-            ch.raw_extinf || '',
-            quality,
-            normalizedName,
-            ch.meta ? JSON.stringify(ch.meta) : null,
+            ch.rawExtinf,
+            ch.quality,
+            ch.normalizedName,
+            ch.metaJson,
             contentType
           )
         }
 
         // Update playlist_channels with cleaned name for channels with this URL
-        const updated = db.prepare('UPDATE playlist_channels SET tvg_name = ? WHERE url = ?')
-          .run(cleanedName, ch.url)
+        const updated = renamePlaylistChannels.run(ch.cleanedName, ch.url)
         if (updated.changes > 0 && process.env.DEBUG) {
-          console.log(`[source] Updated ${updated.changes} playlist channel(s): "${ch.tvg_name || ''}" -> "${cleanedName}"`)
+          console.log(`[source] Updated ${updated.changes} playlist channel(s) to "${ch.cleanedName}"`)
         }
       }
     }
@@ -321,7 +355,7 @@ export async function refreshSourceCache(sourceId) {
     db.prepare(`
       INSERT INTO settings (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run('vod_detected_genres', JSON.stringify(Array.from(detectedGenres).sort((a, b) => a.localeCompare(b))))
+    `).run('vod_detected_genres', JSON.stringify(detectedGenreValues))
 
     // Delete stale channels (channels that no longer exist in the source)
     // Live TV channels
@@ -582,7 +616,7 @@ export async function refreshSourceCache(sourceId) {
       db.prepare(`UPDATE sources SET ${updates.join(', ')}, last_fetched = datetime('now') WHERE id = ?`).run(sid)
     }
   })
-  replace(source.id, channels, isXtream, refreshedContentTypes)
+  replace(source.id, preparedChannelArrays, refreshedContentTypes, detectedGenres)
 
   // Calculate total channel count
   const totalCount = isXtream

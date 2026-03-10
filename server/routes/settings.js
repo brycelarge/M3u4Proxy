@@ -1,13 +1,14 @@
 import express from 'express'
 import db from '../db.js'
 import { startContentUpdateScheduler, startEpgGrabCron, startEnrichCron } from '../services/scheduler.js'
+import { getSettingsByPrefix, setSettingsValues } from '../settings-cache.js'
 
 const router = express.Router()
 const FALLBACK_GENRES = ['Action', 'Comedy', 'Drama', 'Documentary', 'Horror', 'Romance', 'Sci-Fi', 'Thriller']
 
 // ── VOD Settings Helpers ───────────────────────────────────────────────────────
 export function getVodSettings() {
-  const settings = db.prepare('SELECT * FROM settings WHERE key LIKE ?').all('vod_%')
+  const settings = Object.entries(getSettingsByPrefix('vod_')).map(([key, value]) => ({ key, value }))
   const result = {}
   for (const row of settings) {
     try {
@@ -35,11 +36,7 @@ router.get('/settings', (req, res) => {
 })
 
 router.put('/settings', (req, res) => {
-  const upsert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-  const save = db.transaction((obj) => {
-    for (const [k, v] of Object.entries(obj)) upsert.run(k, String(v))
-  })
-  save(req.body)
+  setSettingsValues(req.body)
 
   // Restart cron jobs if schedules changed
   if ('epg_grab_schedule' in req.body) {

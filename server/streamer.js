@@ -8,6 +8,7 @@
 
 import { EventEmitter } from 'node:events'
 import db from './db.js'
+import { getSettingValue } from './settings-cache.js'
 
 const MAX_RECONNECTS    = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY   = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
@@ -26,9 +27,9 @@ function hasPesStart(buf) {
 // Default 3 seconds helps absorb network jitter and connection drops.
 export function getBufferSeconds() {
   try {
-    const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
-    if (setting) {
-      return parseFloat(setting.value)
+    const setting = getSettingValue('proxy_buffer_seconds')
+    if (setting !== null) {
+      return parseFloat(setting)
     }
   } catch (e) {
     // Database not ready or error, fall back to env/default

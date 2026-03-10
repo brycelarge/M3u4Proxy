@@ -5,12 +5,9 @@ import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
 import db from '../db.js'
 import { getBufferSeconds } from '../streamer.js'
+import { getSettingValue, setSettingValue } from '../settings-cache.js'
 
 const router = express.Router()
-
-function getSettingValue(key) {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? null
-}
 
 function getDefaultFfmpegStreamOptions() {
   return '-hide_banner -loglevel error -i {input} -map 0:v:0? -map 0:a? -map 0:s? -c copy -muxdelay 0 -muxpreload 0 -f mpegts {output}'
@@ -134,27 +131,27 @@ router.put('/proxy-settings', (req, res) => {
       if (isNaN(val) || val < 0 || val > 30) {
         return res.status(400).json({ error: 'bufferSeconds must be 0-30' })
       }
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('proxy_buffer_seconds', String(val))
+      setSettingValue('proxy_buffer_seconds', String(val))
     }
 
     if (remuxLiveTv !== undefined) {
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('remux_live_tv', String(remuxLiveTv))
+      setSettingValue('remux_live_tv', String(remuxLiveTv))
     }
 
     if (streamBufferMode !== undefined) {
       if (!['ffmpeg', 'm3u4prox', 'vlc'].includes(streamBufferMode)) {
         return res.status(400).json({ error: 'streamBufferMode must be ffmpeg, m3u4prox, or vlc' })
       }
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('stream_buffer_mode', streamBufferMode)
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('remux_live_tv', String(streamBufferMode === 'ffmpeg'))
+      setSettingValue('stream_buffer_mode', streamBufferMode)
+      setSettingValue('remux_live_tv', String(streamBufferMode === 'ffmpeg'))
     }
 
     if (ffmpegOptions !== undefined) {
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('ffmpeg_stream_options', String(ffmpegOptions || '').trim() || getDefaultFfmpegStreamOptions())
+      setSettingValue('ffmpeg_stream_options', String(ffmpegOptions || '').trim() || getDefaultFfmpegStreamOptions())
     }
 
     if (vlcOptions !== undefined) {
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('vlc_stream_options', String(vlcOptions || '').trim() || getDefaultVlcStreamOptions())
+      setSettingValue('vlc_stream_options', String(vlcOptions || '').trim() || getDefaultVlcStreamOptions())
     }
 
     const updatedBufferSetting = getSettingValue('proxy_buffer_seconds')

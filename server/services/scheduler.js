@@ -6,6 +6,7 @@ import { exportVodToStrm } from '../strm-exporter.js'
 import { hashPassword } from '../auth.js'
 import { runGrab, grabState } from '../epgGrab.js'
 import { enrichGuide } from '../epgEnrich.js'
+import { getSettingValue, setSettingValue } from '../settings-cache.js'
 
 let liveRefreshCronJob = null
 let movieRefreshCronJob = null
@@ -15,7 +16,7 @@ let enrichCronJob = null
 
 export function startEpgGrabCron() {
   if (epgGrabCronJob) epgGrabCronJob.stop()
-  const schedule = db.prepare('SELECT value FROM settings WHERE key = ?').get('epg_grab_schedule')?.value || '0 23 * * *'
+  const schedule = getSettingValue('epg_grab_schedule') || '0 23 * * *'
   if (!schedule) {
     console.log('[startup] EPG grab schedule disabled')
     return
@@ -51,7 +52,7 @@ export function startEpgGrabCron() {
 
 export function startEnrichCron() {
   if (enrichCronJob) enrichCronJob.stop()
-  const schedule = db.prepare('SELECT value FROM settings WHERE key = ?').get('epg_enrich_schedule')?.value || '0 2 * * *'
+  const schedule = getSettingValue('epg_enrich_schedule') || '0 2 * * *'
   if (!schedule) {
     console.log('[startup] TMDB enrichment schedule disabled')
     return
@@ -80,10 +81,10 @@ export function startContentUpdateScheduler() {
   if (movieRefreshCronJob) movieRefreshCronJob.stop()
   if (seriesRefreshCronJob) seriesRefreshCronJob.stop()
 
-  const getLiveSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('live_refresh_schedule')?.value || '0 */6 * * *'
-  const getMovieSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('movie_refresh_schedule')?.value || '0 4 * * 0'
-  const getSeriesSchedule = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('series_refresh_schedule')?.value || '0 4 * * *'
-  const getAutoExportStrm = () => db.prepare('SELECT value FROM settings WHERE key = ?').get('auto_export_strm')?.value === '1'
+  const getLiveSchedule = () => getSettingValue('live_refresh_schedule') || '0 */6 * * *'
+  const getMovieSchedule = () => getSettingValue('movie_refresh_schedule') || '0 4 * * 0'
+  const getSeriesSchedule = () => getSettingValue('series_refresh_schedule') || '0 4 * * *'
+  const getAutoExportStrm = () => getSettingValue('auto_export_strm') === '1'
 
   // Live TV refresh schedule (applies to all sources)
   const liveSchedule = getLiveSchedule()
@@ -199,7 +200,7 @@ async function exportVodStrmFiles(contentType) {
 
   // Get or create jellyfin user
   let jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
-  let jellyfinPassword = db.prepare('SELECT value FROM settings WHERE key = ?').get('jellyfin_strm_password')?.value
+  let jellyfinPassword = getSettingValue('jellyfin_strm_password')
 
   if (!jellyfinUser) {
     const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*'
@@ -209,7 +210,7 @@ async function exportVodStrmFiles(contentType) {
       `INSERT INTO users (username, password, max_connections, active, notes)
        VALUES (?, ?, ?, ?, ?)`
     ).run('jellyfin', hashed, 0, 1, 'Auto-created for Jellyfin STRM files')
-    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('jellyfin_strm_password', jellyfinPassword)
+    setSettingValue('jellyfin_strm_password', jellyfinPassword)
     jellyfinUser = db.prepare('SELECT * FROM users WHERE username = ?').get('jellyfin')
   }
 

@@ -2,13 +2,10 @@ import { EventEmitter } from 'node:events'
 import { spawn } from 'node:child_process'
 import db from './db.js'
 import { getBufferSeconds } from './streamer.js'
+import { getSettingValue } from './settings-cache.js'
 
 const MAX_RECONNECTS = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
-
-function getSettingValue(key) {
-  return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? null
-}
 
 export function getDefaultFfmpegStreamOptions() {
   return '-loglevel error -i {input} -map 0:v:0? -map 0:a? -map 0:s? -c copy -muxdelay 0 -muxpreload 0 -f mpegts {output}'
