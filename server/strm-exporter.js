@@ -258,8 +258,8 @@ function checkNfoFilters(folderPath, vodSettings) {
     if (languageFilterEnabled) {
       if (languages.length > 0) {
         const allowedLanguageSet = new Set(vodSettings.vod_allowed_languages.map(l => normalizeLanguageValue(l)))
-        const hasAllowedLang = languages.some(lang => allowedLanguageSet.has(lang))
-        if (!hasAllowedLang) {
+        const hasDisallowedLanguage = languages.some(lang => !allowedLanguageSet.has(lang))
+        if (hasDisallowedLanguage) {
           return { allowed: false, reason: `Languages not in allowed list: ${languages.join(', ')}`, contentType, languages, genres }
         }
       }
@@ -268,8 +268,8 @@ function checkNfoFilters(folderPath, vodSettings) {
     if (genreFilterEnabled) {
       if (genres.length > 0) {
         const allowedGenreSet = new Set(vodSettings.vod_allowed_genres.map(g => g.toLowerCase()))
-        const hasAllowedGenre = genres.some(genre => allowedGenreSet.has(genre.toLowerCase()))
-        if (!hasAllowedGenre) {
+        const hasDisallowedGenre = genres.some(genre => !allowedGenreSet.has(genre.toLowerCase()))
+        if (hasDisallowedGenre) {
           return { allowed: false, reason: `Genres not in allowed list: ${genres.join(', ')}`, contentType, languages, genres }
         }
       }

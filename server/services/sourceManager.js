@@ -12,8 +12,32 @@ function yieldToEventLoop() {
   return new Promise(resolve => setImmediate(resolve))
 }
 
+function normalizeVodGenres(value) {
+  if (!value) return []
+
+  const normalizeGenre = (genreValue) => {
+    if (!genreValue) return null
+    const genre = String(genreValue)
+      .replace(/^(Movie|Series):\s*/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return genre || null
+  }
+
+  const values = Array.isArray(value) ? value : [value]
+  const genres = new Map()
+
+  for (const item of values) {
+    for (const genre of String(item).split(/[\/,]/).map(v => normalizeGenre(v)).filter(Boolean)) {
+      genres.set(genre.toLowerCase(), genre)
+    }
+  }
+
+  return Array.from(genres.values())
+}
+
 // Helper to check if a channel should be filtered by VOD settings
-function shouldFilterVodChannel(channelName, genre, vodSettings) {
+function shouldFilterVodChannel(channelName, genres, vodSettings) {
   if (!channelName) return false
 
   const nameLower = channelName.toLowerCase()
@@ -28,14 +52,16 @@ function shouldFilterVodChannel(channelName, genre, vodSettings) {
   }
 
   if (
-    genre &&
+    Array.isArray(genres) &&
+    genres.length > 0 &&
     vodSettings.vod_genre_filter_mode &&
     vodSettings.vod_genre_filter_mode !== 'disabled' &&
     Array.isArray(vodSettings.vod_allowed_genres) &&
     vodSettings.vod_allowed_genres.length > 0
   ) {
     const allowedGenres = new Set(vodSettings.vod_allowed_genres.map(value => String(value).toLowerCase()))
-    if (!allowedGenres.has(String(genre).toLowerCase())) {
+    const hasDisallowedGenre = genres.some(genre => !allowedGenres.has(String(genre).toLowerCase()))
+    if (hasDisallowedGenre) {
       return true
     }
   }
@@ -43,44 +69,30 @@ function shouldFilterVodChannel(channelName, genre, vodSettings) {
   return false
 }
 
-function extractVodGenre(channel, contentType) {
-  if (contentType !== 'movie' && contentType !== 'series' && contentType !== 'vod') return null
+function extractVodGenres(channel, contentType) {
+  if (contentType !== 'movie' && contentType !== 'series' && contentType !== 'vod') return []
 
   const meta = channel?.meta && typeof channel.meta === 'object' ? channel.meta : null
   const metaGenre = meta?.genre || meta?.genres || meta?.category_name || meta?.category
   const groupTitle = String(channel?.group_title || '')
 
   if (contentType === 'vod' && !/^Movie:\s*|^Series:\s*/i.test(groupTitle)) {
-    return null
+    return []
   }
-
-  const normalizeGenre = (value) => {
-    if (!value) return null
-    const genre = String(value)
-      .replace(/^(Movie|Series):\s*/i, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-    return genre || null
-  }
-
-  const parseGenres = (value) => String(value)
-    .split(/[\/,]/)
-    .map(v => normalizeGenre(v))
-    .filter(Boolean)
 
   if (Array.isArray(metaGenre)) {
     for (const item of metaGenre) {
-      const parsed = parseGenres(item)
-      if (parsed.length > 0) return parsed[0]
+      const parsed = normalizeVodGenres(item)
+      if (parsed.length > 0) return parsed
     }
   }
 
   if (typeof metaGenre === 'string') {
-    const firstGenre = parseGenres(metaGenre)[0]
-    if (firstGenre) return firstGenre
+    const parsed = normalizeVodGenres(metaGenre)
+    if (parsed.length > 0) return parsed
   }
 
-  return parseGenres(groupTitle)[0] || null
+  return normalizeVodGenres(groupTitle)
 }
 
 async function buildPreparedChannelArrays(channelArrays, cleanupRules, skipRules, vodSettings, sourceName) {
@@ -122,16 +134,16 @@ async function buildPreparedChannelArrays(channelArrays, cleanupRules, skipRules
         continue
       }
 
-      const genre = extractVodGenre(ch, contentType)
+      const genres = extractVodGenres(ch, contentType)
 
-      if (!isLiveTv && shouldFilterVodChannel(channelName, genre, vodSettings)) {
+      if (!isLiveTv && shouldFilterVodChannel(channelName, genres, vodSettings)) {
         if (process.env.DEBUG) {
-          console.log(`[source] Filtering VOD "${channelName}" (${genre || 'no genre'}) by VOD settings`)
+          console.log(`[source] Filtering VOD "${channelName}" (${genres.join(', ') || 'no genre'}) by VOD settings`)
         }
         continue
       }
 
-      if (genre) {
+      for (const genre of genres) {
         detectedGenres.add(genre)
       }
 
@@ -471,8 +483,8 @@ export async function refreshSourceCache(sourceId) {
         // Filter channels by blocked titles
         let filteredCount = 0
         for (const ch of sourceChannels) {
-          const genre = extractVodGenre({ group_title: ch.group_title, meta: ch.meta ? JSON.parse(ch.meta) : null }, ch.content_type)
-          if (shouldFilterVodChannel(ch.tvg_name, genre, vodSettings)) {
+          const genres = extractVodGenres({ group_title: ch.group_title, meta: ch.meta ? JSON.parse(ch.meta) : null }, ch.content_type)
+          if (shouldFilterVodChannel(ch.tvg_name, genres, vodSettings)) {
             filteredCount++
             continue
           }

@@ -4,7 +4,7 @@ import { startContentUpdateScheduler, startEpgGrabCron, startEnrichCron } from '
 import { getSettingsByPrefix, setSettingsValues } from '../settings-cache.js'
 
 const router = express.Router()
-const FALLBACK_GENRES = ['Action', 'Comedy', 'Drama', 'Documentary', 'Horror', 'Romance', 'Sci-Fi', 'Thriller']
+const FALLBACK_GENRES = ['Action', 'Adventure', 'Adult', 'Animation', 'Comedy', 'Crime', 'Documentary', 'Drama', 'Family', 'Fantasy', 'History', 'Horror', 'Music', 'Mystery', 'Romance', 'Sci-Fi', 'Science Fiction', 'Thriller', 'War', 'Western']
 
 // ── VOD Settings Helpers ───────────────────────────────────────────────────────
 export function getVodSettings() {
@@ -90,13 +90,25 @@ router.get('/vod/languages', async (req, res) => {
 
 // GET /api/vod/genres - Get genres for VOD settings UI (NFO + generic fallback)
 router.get('/vod/genres', async (req, res) => {
-  const vodSettings = getVodSettings()
-  res.json({
-    genres: vodSettings.vod_detected_genres || FALLBACK_GENRES,
-    totalChannels: 0,
-    withGenreData: 0,
-    currentSettings: vodSettings
-  })
+  try {
+    const response = await fetch(`http://localhost:${process.env.PORT || 3005}/api/strm/genres`)
+    const data = await response.json()
+    const vodSettings = getVodSettings()
+
+    res.json({
+      genres: data.genres || vodSettings.vod_detected_genres || FALLBACK_GENRES,
+      totalChannels: data.totalChannels || 0,
+      withGenreData: data.withGenreData || 0,
+      currentSettings: vodSettings
+    })
+  } catch (e) {
+    res.json({
+      genres: getVodSettings().vod_detected_genres || FALLBACK_GENRES,
+      totalChannels: 0,
+      withGenreData: 0,
+      currentSettings: getVodSettings()
+    })
+  }
 })
 
 // POST /api/vod/genres/refresh - rebuild detected genres from current VOD source data
