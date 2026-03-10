@@ -94,7 +94,7 @@ class Session extends EventEmitter {
   removeClient(res) {
     this.clients.delete(res)
     if (this.clients.size === 0) {
-      console.log(`[stream] No clients left for "${this.channelName}" — closing upstream`)
+      console.log(`[buffer-stream] No clients left for "${this.channelName}" — closing upstream`)
       this.destroy()
     }
   }
@@ -145,11 +145,11 @@ async function pump(session) {
       })
 
       if (!upstream.ok) {
-        console.error(`[stream] Upstream ${upstream.status} for "${session.channelName}"`)
+        console.error(`[buffer-stream] Upstream ${upstream.status} for "${session.channelName}"`)
         break
       }
 
-      session.reconnects > 0 && console.log(`[stream] Reconnected to "${session.channelName}" (attempt ${session.reconnects})`)
+      session.reconnects > 0 && console.log(`[buffer-stream] Reconnected to "${session.channelName}" (attempt ${session.reconnects})`)
 
       const reader = upstream.body.getReader()
       let lastDataTime = Date.now()
@@ -158,7 +158,7 @@ async function pump(session) {
       // Active watchdog to catch silent TCP hangs
       const watchdog = setInterval(() => {
         if (Date.now() - lastDataTime > STALL_TIMEOUT && !session.dead) {
-          console.error(`[stream] Watchdog triggered for "${session.channelName}": No data received for ${STALL_TIMEOUT/1000}s. Forcing reconnect...`)
+          console.error(`[buffer-stream] Watchdog triggered for "${session.channelName}": No data received for ${STALL_TIMEOUT/1000}s. Forcing reconnect...`)
           try { session.abortCtrl.abort() } catch(e) {}
         }
       }, 5000)
@@ -195,7 +195,7 @@ async function pump(session) {
 
           // Check if we've reached the 50% threshold
           if (bufferAge >= (targetMs * 0.5)) {
-            console.log(`[stream] Buffer ready (${bufferAge}ms), flushing to clients`)
+            console.log(`[buffer-stream] Buffer ready (${bufferAge}ms), flushing to clients`)
 
             // Simple PES start code detection (0x00 0x00 0x01) which often indicates a new frame/keyframe
             const hasPesStart = (buf, startIdx) => {
@@ -283,18 +283,18 @@ async function pump(session) {
 
       // Stream ended cleanly — reconnect if clients still waiting
       if (session.clients.size === 0) break
-      console.log(`[stream] Stream ended for "${session.channelName}" — reconnecting in ${RECONNECT_DELAY}ms…`)
+      console.log(`[buffer-stream] Stream ended for "${session.channelName}" — reconnecting in ${RECONNECT_DELAY}ms…`)
       } finally {
         clearInterval(watchdog)
       }
     } catch (e) {
       if (e.name === 'AbortError' || session.dead) break
-      console.error(`[stream] Error for "${session.channelName}":`, e.message)
+      console.error(`[buffer-stream] Error for "${session.channelName}":`, e.message)
     }
 
     session.reconnects++
     if (session.reconnects > MAX_RECONNECTS) {
-      console.error(`[stream] Max reconnects reached for "${session.channelName}" — giving up`)
+      console.error(`[buffer-stream] Max reconnects reached for "${session.channelName}" — giving up`)
       break
     }
     if (session.clients.size === 0) break
@@ -317,7 +317,7 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
   // Reuse existing session (no limit check needed - not creating new upstream connection)
   if (sessions.has(channelId)) {
     const session = sessions.get(channelId)
-    console.log(`[stream] ✓ Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
+    console.log(`[buffer-stream] ✓ Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
 
     // Set streaming headers
     res.setHeader('Content-Type', 'video/mp2t')
@@ -358,13 +358,13 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
   // New session - check max_streams limit before creating
   const limitErr = checkMaxStreams(sourceId)
   if (limitErr) {
-    console.log(`[stream] Cannot create new session: ${limitErr}`)
+    console.log(`[buffer-stream] Cannot create new session: ${limitErr}`)
     res.status(503).json({ error: limitErr })
     return
   }
 
   const bufferSecs = getBufferSeconds()
-  console.log(`[stream] Opening "${channelName}" (buffer: ${bufferSecs}s)`)
+  console.log(`[buffer-stream] Starting m3u4prox buffer for "${channelName}" (buffer: ${bufferSecs}s)`)
 
   const session = new Session(channelId, upstreamUrl, channelName, sourceId, username)
   sessions.set(channelId, session)

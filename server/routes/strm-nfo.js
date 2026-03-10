@@ -6,6 +6,7 @@ import db from '../db.js'
 
 const router = express.Router()
 const STRM_ROOT = '/data/vod-strm'
+const FALLBACK_GENRES = ['Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Documentary', 'Drama', 'Family', 'Fantasy', 'History', 'Horror', 'Music', 'Mystery', 'Romance', 'Sci-Fi', 'Science Fiction', 'Thriller', 'War', 'Western']
 
 // Simple XML parser without external dependency
 function parseXmlSimple(xml) {
@@ -142,6 +143,17 @@ function parseXmlSimple(xml) {
   // Get unique languages
   result.languages = [...new Set(result.languages.filter(Boolean))]
 
+  result.genres = []
+  const genreRegex = /<genre>([^<]+)<\/genre>/gi
+  while ((match = genreRegex.exec(xml)) !== null) {
+    const genreValue = match[1]?.trim()
+    if (!genreValue) continue
+    for (const genre of genreValue.split('/').map(v => v.trim()).filter(Boolean)) {
+      result.genres.push(genre)
+    }
+  }
+  result.genres = [...new Set(result.genres)]
+
   return result
 }
 
@@ -176,6 +188,7 @@ async function scanNfoFiles() {
   const nfoFiles = findNfoFiles(STRM_ROOT)
   const results = []
   const languageStats = new Map()
+  const genreStats = new Map()
   const errors = []
 
   for (const nfoPath of nfoFiles) {
@@ -191,6 +204,7 @@ async function scanNfoFiles() {
         type: data.type,
         title: data.title,
         languages: data.languages,
+        genres: data.genres,
         audioStreams: data.audioStreams,
         subtitleStreams: data.subtitleStreams,
         hasLanguages: data.languages.length > 0
@@ -203,6 +217,10 @@ async function scanNfoFiles() {
         const key = lang.toLowerCase()
         languageStats.set(key, (languageStats.get(key) || 0) + 1)
       }
+
+      for (const genre of data.genres) {
+        genreStats.set(genre, (genreStats.get(genre) || 0) + 1)
+      }
     } catch (e) {
       errors.push({ path: nfoPath, error: e.message })
     }
@@ -212,6 +230,9 @@ async function scanNfoFiles() {
   const sortedLanguages = [...languageStats.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([lang, count]) => ({ language: lang, count }))
+  const sortedGenres = [...genreStats.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([genre, count]) => ({ genre, count }))
 
   return {
     totalFiles: nfoFiles.length,
@@ -221,8 +242,10 @@ async function scanNfoFiles() {
     tvShows: results.filter(r => r.type === 'tvshow').length,
     episodes: results.filter(r => r.type === 'episode').length,
     withLanguages: results.filter(r => r.hasLanguages).length,
+    withGenres: results.filter(r => Array.isArray(r.genres) && r.genres.length > 0).length,
     withoutLanguages: results.filter(r => !r.hasLanguages).length,
     languageStats: sortedLanguages,
+    genreStats: sortedGenres,
     files: results,
     errorDetails: errors.slice(0, 10)
   }
@@ -253,7 +276,8 @@ router.get('/strm/nfo-languages/stats', async (req, res) => {
       episodes: full.episodes,
       withLanguages: full.withLanguages,
       withoutLanguages: full.withoutLanguages,
-      languageStats: full.languageStats
+      languageStats: full.languageStats,
+      genreStats: full.genreStats
     })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -311,36 +335,63 @@ router.get('/strm/languages', async (req, res) => {
   }
 })
 
-// Auto-sync detected languages to vod_allowed_languages setting
-export async function autoSyncVodLanguages() {
+// GET /api/strm/genres - Get unique genres from all NFO files (for settings)
+router.get('/strm/genres', async (req, res) => {
+  try {
+    const full = await scanNfoFiles()
+    const genres = [...new Set([...FALLBACK_GENRES, ...full.genreStats.map(gs => gs.genre)])].sort((a, b) => a.localeCompare(b))
+    res.json({
+      genres,
+      totalChannels: full.totalFiles,
+      withGenreData: full.withGenres
+    })
+  } catch (e) {
+    res.json({
+      genres: FALLBACK_GENRES,
+      totalChannels: 0,
+      withGenreData: 0
+    })
+  }
+})
+
+// Auto-sync detected languages/genres without overwriting allowed selections
+export async function autoSyncVodMetadata() {
   try {
     const full = await scanNfoFiles()
     const detectedLanguages = full.languageStats.map(ls => ls.language)
+    const detectedGenres = [...new Set([...FALLBACK_GENRES, ...full.genreStats.map(gs => gs.genre)])].sort((a, b) => a.localeCompare(b))
 
     // Always include 'eng' as fallback
     if (!detectedLanguages.includes('eng')) {
       detectedLanguages.push('eng')
     }
 
-    // Get current allowed languages
-    const currentSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('vod_allowed_languages')
-    const currentLanguages = currentSetting ? JSON.parse(currentSetting.value) : ['eng']
-
-    // Merge: keep existing + add new detected languages (never remove)
-    const mergedLanguages = [...new Set([...currentLanguages, ...detectedLanguages])].sort()
-
-    // Update database
-    db.prepare(`
+    const upsert = db.prepare(`
       INSERT INTO settings (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run('vod_allowed_languages', JSON.stringify(mergedLanguages))
+    `)
 
-    console.log(`[nfo-sync] Auto-synced VOD languages: ${mergedLanguages.join(', ')} (${mergedLanguages.length} total)`)
+    upsert.run('vod_detected_languages', JSON.stringify(detectedLanguages.sort()))
+    upsert.run('vod_detected_genres', JSON.stringify(detectedGenres))
+
+    const currentAllowedLanguages = db.prepare('SELECT value FROM settings WHERE key = ?').get('vod_allowed_languages')
+    if (!currentAllowedLanguages) {
+      upsert.run('vod_allowed_languages', JSON.stringify(['eng']))
+    }
+
+    const currentAllowedGenres = db.prepare('SELECT value FROM settings WHERE key = ?').get('vod_allowed_genres')
+    if (!currentAllowedGenres) {
+      upsert.run('vod_allowed_genres', JSON.stringify([]))
+    }
+
+    console.log(`[nfo-sync] Auto-synced detected VOD languages: ${detectedLanguages.join(', ')}`)
+    console.log(`[nfo-sync] Auto-synced detected VOD genres: ${detectedGenres.join(', ')}`)
 
     return {
       detected: detectedLanguages.length,
-      total: mergedLanguages.length,
-      languages: mergedLanguages
+      languages: detectedLanguages.sort(),
+      detectedGenres: detectedGenres.length,
+      genres: detectedGenres
     }
   } catch (e) {
     console.error('[nfo-sync] Auto-sync failed:', e.message)
@@ -348,26 +399,24 @@ export async function autoSyncVodLanguages() {
   }
 }
 
+export async function autoSyncVodLanguages() {
+  return autoSyncVodMetadata()
+}
+
 // GET /api/strm/nfo-missing-languages - CSV export of NFO files without allowed/missing languages
 router.get('/strm/nfo-missing-languages', async (req, res) => {
   try {
-    // Get current allowed languages
     const allowedSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('vod_allowed_languages')
     const allowedLanguages = allowedSetting ? JSON.parse(allowedSetting.value) : ['eng']
     const allowedSet = new Set(allowedLanguages.map(l => l.toLowerCase()))
 
     const full = await scanNfoFiles()
-
-    // Filter files that:
-    // 1. Have no detected languages at all, OR
-    // 2. Have languages but none are in the allowed list
     const missingFiles = full.files.filter(f => {
       if (!f.languages || f.languages.length === 0) return true
       const hasAllowedLang = f.languages.some(l => allowedSet.has(l.toLowerCase()))
       return !hasAllowedLang
     })
 
-    // Generate CSV
     const csvHeader = 'Title,Type,Path,Languages,Audio Streams,Issue\n'
     const csvRows = missingFiles.map(f => {
       const title = f.title || 'Unknown'
@@ -389,7 +438,6 @@ router.get('/strm/nfo-missing-languages', async (req, res) => {
         issue = `Languages not in allowed list: ${f.languages.join(', ')}`
       }
 
-      // Escape quotes in fields
       const escape = (s) => `"${String(s).replace(/"/g, '""')}"`
       return [escape(title), escape(type), escape(path), escape(languages), escape(audioStreams), escape(issue)].join(',')
     }).join('\n')
@@ -411,19 +459,31 @@ router.get('/strm/nfo-missing-languages', async (req, res) => {
 router.post('/strm/sync-languages', async (req, res) => {
   try {
     console.log('[nfo-sync] Manual language sync triggered via API')
-    const result = await autoSyncVodLanguages()
+    const full = await scanNfoFiles()
+    const detectedLanguages = full.languageStats.map(ls => ls.language)
 
-    if (result) {
-      res.json({
-        success: true,
-        message: `Synced ${result.detected} detected languages. Total allowed: ${result.total}`,
-        detected: result.detected,
-        total: result.total,
-        languages: result.languages
-      })
-    } else {
-      res.status(500).json({ success: false, error: 'Sync failed' })
+    if (!detectedLanguages.includes('eng')) {
+      detectedLanguages.push('eng')
     }
+
+    const upsert = db.prepare(`
+      INSERT INTO settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `)
+
+    upsert.run('vod_detected_languages', JSON.stringify(detectedLanguages.sort()))
+
+    const currentAllowedLanguages = db.prepare('SELECT value FROM settings WHERE key = ?').get('vod_allowed_languages')
+    if (!currentAllowedLanguages) {
+      upsert.run('vod_allowed_languages', JSON.stringify(['eng']))
+    }
+
+    res.json({
+      success: true,
+      message: `Synced ${detectedLanguages.length} detected languages`,
+      detected: detectedLanguages.length,
+      languages: detectedLanguages.sort()
+    })
   } catch (e) {
     console.error('[nfo-sync] Manual sync failed:', e)
     res.status(500).json({ success: false, error: e.message })

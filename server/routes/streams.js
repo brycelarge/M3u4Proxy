@@ -2,7 +2,7 @@ import express from 'express'
 import { join } from 'node:path'
 import db from '../db.js'
 import { connectClient, getActiveSessions, killSession } from '../streamer.js'
-import { connectFfmpegClient, getActiveFfmpegSessions, isFfmpegRemuxEnabled, killFfmpegSession } from '../ffmpeg-streamer.js'
+import { connectFfmpegClient, connectVlcClient, getActiveFfmpegSessions, getStreamBufferMode, killFfmpegSession } from '../ffmpeg-streamer.js'
 import { getActiveVodSessions, killVodSession } from '../vod-streamer.js'
 import { getCompositeSession } from '../composite-streamer.js'
 
@@ -45,8 +45,14 @@ router.get('/stream/:channelId', async (req, res) => {
     }
 
     // Live TV — use shared buffer
-    if (isFfmpegRemuxEnabled()) {
+    const streamBufferMode = getStreamBufferMode()
+    if (streamBufferMode === 'ffmpeg') {
       await connectFfmpegClient(channelId, row.url, row.tvg_name, res, row.source_id || null, username)
+      return
+    }
+
+    if (streamBufferMode === 'vlc') {
+      await connectVlcClient(channelId, row.url, row.tvg_name, res, row.source_id || null, username)
       return
     }
 

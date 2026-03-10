@@ -6,7 +6,7 @@ import { clearCache } from './cache.js'
 import { getVodSettings } from '../routes/settings.js'
 
 // Helper to check if a channel should be filtered by VOD settings
-function shouldFilterVodChannel(channelName, vodSettings) {
+function shouldFilterVodChannel(channelName, genre, vodSettings) {
   if (!channelName) return false
 
   const nameLower = channelName.toLowerCase()
@@ -20,7 +20,60 @@ function shouldFilterVodChannel(channelName, vodSettings) {
     }
   }
 
+  if (
+    genre &&
+    vodSettings.vod_genre_filter_mode &&
+    vodSettings.vod_genre_filter_mode !== 'disabled' &&
+    Array.isArray(vodSettings.vod_allowed_genres) &&
+    vodSettings.vod_allowed_genres.length > 0
+  ) {
+    const allowedGenres = new Set(vodSettings.vod_allowed_genres.map(value => String(value).toLowerCase()))
+    if (!allowedGenres.has(String(genre).toLowerCase())) {
+      return true
+    }
+  }
+
   return false
+}
+
+function extractVodGenre(channel, contentType) {
+  if (contentType !== 'movie' && contentType !== 'series' && contentType !== 'vod') return null
+
+  const meta = channel?.meta && typeof channel.meta === 'object' ? channel.meta : null
+  const metaGenre = meta?.genre || meta?.genres || meta?.category_name || meta?.category
+  const groupTitle = String(channel?.group_title || '')
+
+  if (contentType === 'vod' && !/^Movie:\s*|^Series:\s*/i.test(groupTitle)) {
+    return null
+  }
+
+  const normalizeGenre = (value) => {
+    if (!value) return null
+    const genre = String(value)
+      .replace(/^(Movie|Series):\s*/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return genre || null
+  }
+
+  const parseGenres = (value) => String(value)
+    .split(/[\/,]/)
+    .map(v => normalizeGenre(v))
+    .filter(Boolean)
+
+  if (Array.isArray(metaGenre)) {
+    for (const item of metaGenre) {
+      const parsed = parseGenres(item)
+      if (parsed.length > 0) return parsed[0]
+    }
+  }
+
+  if (typeof metaGenre === 'string') {
+    const firstGenre = parseGenres(metaGenre)[0]
+    if (firstGenre) return firstGenre
+  }
+
+  return parseGenres(groupTitle)[0] || null
 }
 
 export async function refreshSourceCache(sourceId) {
@@ -153,6 +206,9 @@ export async function refreshSourceCache(sourceId) {
     const allMovieUrls = new Set()
     const allSeriesUrls = new Set()
 
+    const vodSettings = getVodSettings()
+    const detectedGenres = new Set(['Action', 'Comedy', 'Drama', 'Documentary', 'Horror', 'Romance', 'Sci-Fi', 'Thriller'])
+
     for (const { contentType, channels: channelList } of channelArrays) {
       // Track seen URLs to deduplicate (only for Live TV)
       const seenUrls = new Map()
@@ -184,6 +240,19 @@ export async function refreshSourceCache(sourceId) {
             console.log(`[source] Skipping "${channelName}" - matched skip rule`)
           }
           continue
+        }
+
+        const genre = extractVodGenre(ch, contentType)
+
+        if (!isLiveTv && shouldFilterVodChannel(channelName, genre, vodSettings)) {
+          if (process.env.DEBUG) {
+            console.log(`[source] Filtering VOD "${channelName}" (${genre || 'no genre'}) by VOD settings`)
+          }
+          continue
+        }
+
+        if (genre) {
+          detectedGenres.add(genre)
         }
 
         // Extract quality and clean the channel name
@@ -249,6 +318,11 @@ export async function refreshSourceCache(sourceId) {
       }
     }
 
+    db.prepare(`
+      INSERT INTO settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run('vod_detected_genres', JSON.stringify(Array.from(detectedGenres).sort((a, b) => a.localeCompare(b))))
+
     // Delete stale channels (channels that no longer exist in the source)
     // Live TV channels
     if (allLiveTvUrls.size > 0) {
@@ -267,16 +341,26 @@ export async function refreshSourceCache(sourceId) {
     }
 
     // Movie channels - only delete if we actually refreshed movies
-    if (refreshedContentTypes.movies && allMovieUrls.size > 0) {
-      const currentUrls = Array.from(allMovieUrls)
-      const placeholders = currentUrls.map(() => '?').join(',')
-      const deleteStale = db.prepare(`
-        DELETE FROM source_channels
-        WHERE source_id = ?
-        AND content_type = 'movie'
-        AND url NOT IN (${placeholders})
-      `)
-      const result = deleteStale.run(sid, ...currentUrls)
+    if (refreshedContentTypes.movies) {
+      let result
+      if (allMovieUrls.size > 0) {
+        const currentUrls = Array.from(allMovieUrls)
+        const placeholders = currentUrls.map(() => '?').join(',')
+        const deleteStale = db.prepare(`
+          DELETE FROM source_channels
+          WHERE source_id = ?
+          AND content_type = 'movie'
+          AND url NOT IN (${placeholders})
+        `)
+        result = deleteStale.run(sid, ...currentUrls)
+      } else {
+        const deleteAll = db.prepare(`
+          DELETE FROM source_channels
+          WHERE source_id = ?
+          AND content_type = 'movie'
+        `)
+        result = deleteAll.run(sid)
+      }
       if (result.changes > 0) {
         console.log(`[source] Deleted ${result.changes} stale movie channels`)
       }
@@ -285,16 +369,26 @@ export async function refreshSourceCache(sourceId) {
     }
 
     // Series channels - only delete if we actually refreshed series
-    if (refreshedContentTypes.series && allSeriesUrls.size > 0) {
-      const currentUrls = Array.from(allSeriesUrls)
-      const placeholders = currentUrls.map(() => '?').join(',')
-      const deleteStale = db.prepare(`
-        DELETE FROM source_channels
-        WHERE source_id = ?
-        AND content_type = 'series'
-        AND url NOT IN (${placeholders})
-      `)
-      const result = deleteStale.run(sid, ...currentUrls)
+    if (refreshedContentTypes.series) {
+      let result
+      if (allSeriesUrls.size > 0) {
+        const currentUrls = Array.from(allSeriesUrls)
+        const placeholders = currentUrls.map(() => '?').join(',')
+        const deleteStale = db.prepare(`
+          DELETE FROM source_channels
+          WHERE source_id = ?
+          AND content_type = 'series'
+          AND url NOT IN (${placeholders})
+        `)
+        result = deleteStale.run(sid, ...currentUrls)
+      } else {
+        const deleteAll = db.prepare(`
+          DELETE FROM source_channels
+          WHERE source_id = ?
+          AND content_type = 'series'
+        `)
+        result = deleteAll.run(sid)
+      }
       if (result.changes > 0) {
         console.log(`[source] Deleted ${result.changes} stale series channels`)
       }
@@ -343,7 +437,8 @@ export async function refreshSourceCache(sourceId) {
         // Filter channels by blocked titles
         let filteredCount = 0
         for (const ch of sourceChannels) {
-          if (shouldFilterVodChannel(ch.tvg_name, vodSettings)) {
+          const genre = extractVodGenre({ group_title: ch.group_title, meta: ch.meta ? JSON.parse(ch.meta) : null }, ch.content_type)
+          if (shouldFilterVodChannel(ch.tvg_name, genre, vodSettings)) {
             filteredCount++
             continue
           }

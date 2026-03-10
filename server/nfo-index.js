@@ -15,7 +15,7 @@ const METADATA_EXT = '.m3u4prox.json'
 let nfoIndexCache = null
 let nfoTitleIndexCache = null // Map<normalizedTitle, nfoData>
 let nfoIndexTimestamp = 0
-const CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
+// No TTL - cache persists in memory until explicit rebuild (startup or STRM export)
 
 // Normalize title for matching
 function normalizeTitle(str) {
@@ -118,15 +118,12 @@ export function buildNfoIndex() {
 
 /**
  * Get NFO data for a channel ID using cached index
- * Rebuilds index if cache is stale
+ * Rebuilds index only if missing (cache persists until explicit rebuild)
  */
 export function getNfoFromIndex(channelId) {
-  const now = Date.now()
-
-  // Rebuild index if cache is stale or missing
-  if (!nfoIndexCache || (now - nfoIndexTimestamp) > CACHE_TTL_MS) {
-    nfoIndexCache = buildNfoIndex()
-    nfoIndexTimestamp = now
+  // Rebuild index only if missing
+  if (!nfoIndexCache) {
+    buildNfoIndex()
   }
 
   return nfoIndexCache.get(String(channelId)) || null
@@ -166,6 +163,6 @@ export function getNfoIndexStats() {
     size: nfoIndexCache?.size || 0,
     titleIndexSize: nfoTitleIndexCache?.size || 0,
     age: nfoIndexCache ? Date.now() - nfoIndexTimestamp : 0,
-    ttl: CACHE_TTL_MS
+    persistent: true // Cache persists until explicit rebuild
   }
 }

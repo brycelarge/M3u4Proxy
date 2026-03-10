@@ -13,16 +13,20 @@
  * backwards compatibility with the Settings page credential display.
  */
 
+import express from 'express'
 import db from './db.js'
-import { existsSync } from 'node:fs'
+import bcrypt from 'bcryptjs'
+import { randomUUID } from 'node:crypto'
+import { writeFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join, basename } from 'node:path'
+import { connectFfmpegClient, connectVlcClient, getActiveFfmpegSessions, getStreamBufferMode } from './ffmpeg-streamer.js'
+import { getActiveVodSessions } from './vod-streamer.js'
 import { networkInterfaces } from 'node:os'
 import { verifyPassword } from './auth.js'
 import { getEnrichmentMaps, parseProgBlock, applyEnrichment } from './epgEnrich.js'
 import { findNfoForChannel } from './nfo-parser.js'
 import { getNfoFromIndex } from './nfo-index.js'
 import { generateXmltv } from './services/xmltv.js'
-import { connectFfmpegClient, getActiveFfmpegSessions, isFfmpegRemuxEnabled } from './ffmpeg-streamer.js'
-import { getActiveVodSessions } from './vod-streamer.js'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getSetting(key, fallback = null) {
@@ -1175,8 +1179,14 @@ export function registerXtreamRoutes(app) {
       return res.status(403).send('Forbidden')
     }
 
-    if (isFfmpegRemuxEnabled()) {
+    const streamBufferMode = getStreamBufferMode()
+    if (streamBufferMode === 'ffmpeg') {
       await connectFfmpegClient(channelId, row.url, row.tvg_name, res, row.source_id || null, user.username)
+      return
+    }
+
+    if (streamBufferMode === 'vlc') {
+      await connectVlcClient(channelId, row.url, row.tvg_name, res, row.source_id || null, user.username)
       return
     }
 

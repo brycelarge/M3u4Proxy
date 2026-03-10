@@ -6,6 +6,67 @@ import { getBufferSeconds } from './streamer.js'
 const MAX_RECONNECTS = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
 
+function getSettingValue(key) {
+  return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? null
+}
+
+export function getDefaultFfmpegStreamOptions() {
+  return '-loglevel error -i {input} -map 0:v:0? -map 0:a? -map 0:s? -c copy -muxdelay 0 -muxpreload 0 -f mpegts {output}'
+}
+
+export function getDefaultVlcStreamOptions() {
+  return '{input} --sout #std{access=file,mux=ts,dst={output}} --intf dummy --quiet'
+}
+
+export function getStreamBufferMode() {
+  const mode = getSettingValue('stream_buffer_mode')
+  if (mode === 'ffmpeg' || mode === 'm3u4prox' || mode === 'vlc') {
+    return mode
+  }
+
+  const remuxSetting = getSettingValue('remux_live_tv')
+  return remuxSetting === 'true' ? 'ffmpeg' : 'm3u4prox'
+}
+
+function getConfiguredFfmpegOptions() {
+  return getSettingValue('ffmpeg_stream_options') || getDefaultFfmpegStreamOptions()
+}
+
+function getConfiguredVlcOptions() {
+  return getSettingValue('vlc_stream_options') || getDefaultVlcStreamOptions()
+}
+
+function parseCliArgs(optionString) {
+  const matches = String(optionString || '').match(/"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s]+/g) || []
+  return matches.map(token => {
+    if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+      return token.slice(1, -1)
+    }
+    return token
+  })
+}
+
+function buildProcessConfig(mode, upstreamUrl) {
+  if (mode === 'vlc') {
+    const args = parseCliArgs(getConfiguredVlcOptions())
+      .map(arg => arg.replaceAll('{input}', upstreamUrl).replaceAll('{output}', '-'))
+    return {
+      command: 'cvlc',
+      args,
+      env: {
+        ...process.env,
+        HOME: process.env.HOME || '/tmp',
+        XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME || '/tmp/.config',
+        XDG_CACHE_HOME: process.env.XDG_CACHE_HOME || '/tmp/.cache',
+      },
+    }
+  }
+
+  const args = parseCliArgs(getConfiguredFfmpegOptions())
+    .map(arg => arg.replaceAll('{input}', upstreamUrl).replaceAll('{output}', 'pipe:1'))
+  return { command: 'ffmpeg', args, env: process.env }
+}
+
 const sessions = new Map()
 
 function getRollingBufferSize() {
@@ -29,15 +90,14 @@ function checkMaxStreams(sourceId) {
 
 export function isFfmpegRemuxEnabled() {
   try {
-    const setting = db.prepare('SELECT value FROM settings WHERE key = ?').get('remux_live_tv')
-    return setting ? setting.value === 'true' : false
+    return getStreamBufferMode() === 'ffmpeg'
   } catch {
     return false
   }
 }
 
 class FfmpegSession extends EventEmitter {
-  constructor(channelId, upstreamUrl, channelName, sourceId, username) {
+  constructor(channelId, upstreamUrl, channelName, sourceId, username, mode = 'ffmpeg') {
     super()
     this.setMaxListeners(200)
     this.channelId = channelId
@@ -45,6 +105,7 @@ class FfmpegSession extends EventEmitter {
     this.channelName = channelName
     this.sourceId = sourceId
     this.username = username || null
+    this.mode = mode
     this.clients = new Set()
     this.startedAt = new Date()
     this.bytesIn = 0
@@ -54,9 +115,7 @@ class FfmpegSession extends EventEmitter {
     this._lastTick = Date.now()
     this.bitrate = 0
     this.dead = false
-    this.upstreamAbortCtrl = null
-    this.ffmpegProcess = null
-    this._ffmpegStarted = false
+    this.process = null
     this._bufferStarted = false
     this._recentChunks = []
     this._currentBufferSize = 0
@@ -79,7 +138,7 @@ class FfmpegSession extends EventEmitter {
   removeClient(res) {
     this.clients.delete(res)
     if (this.clients.size === 0) {
-      console.log(`[ffmpeg-stream] No clients left for "${this.channelName}" — closing upstream`)
+      console.log(`[buffer-stream] No clients left for "${this.channelName}" — closing upstream`)
       this.destroy()
     }
   }
@@ -88,18 +147,14 @@ class FfmpegSession extends EventEmitter {
     if (this.dead) return
     this.dead = true
 
-    try {
-      this.upstreamAbortCtrl?.abort()
-    } catch {}
-
-    if (this.ffmpegProcess) {
+    if (this.process) {
       try {
-        if (!this.ffmpegProcess.stdin.destroyed) this.ffmpegProcess.stdin.end()
+        if (this.process.stdin && !this.process.stdin.destroyed) this.process.stdin.end()
       } catch {}
       try {
-        if (!this.ffmpegProcess.killed) this.ffmpegProcess.kill('SIGKILL')
+        if (!this.process.killed) this.process.kill('SIGKILL')
       } catch {}
-      this.ffmpegProcess = null
+      this.process = null
     }
 
     sessions.delete(this.channelId)
@@ -149,39 +204,29 @@ function attachClient(session, res) {
   })
 }
 
-function startFfmpeg(session) {
-  const ffmpegArgs = [
-    '-loglevel', 'error',
-    '-i', 'pipe:0',
-    '-map', '0:v:0?',
-    '-map', '0:a?',
-    '-map', '0:s?',
-    '-c', 'copy',
-    '-muxdelay', '0',
-    '-muxpreload', '0',
-    '-f', 'mpegts',
-    'pipe:1',
-  ]
-
-  console.log(`[ffmpeg-stream] Starting remux for "${session.channelName}"`)
-  session.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
-
-  session.ffmpegProcess.on('error', (error) => {
-    if (session.dead) return
-    console.error(`[ffmpeg-stream] FFmpeg process error for "${session.channelName}":`, error.message)
+function startProcess(session) {
+  const processConfig = buildProcessConfig(session.mode, session.upstreamUrl)
+  console.log(`[buffer-stream] Starting ${session.mode} remux for "${session.channelName}"`)
+  session.process = spawn(processConfig.command, processConfig.args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: processConfig.env,
   })
 
-  session.ffmpegProcess.stderr.on('data', (data) => {
+  session.process.on('error', (error) => {
+    if (session.dead) return
+    console.error(`[buffer-stream] ${session.mode} process error for "${session.channelName}":`, error.message)
+  })
+
+  session.process.stderr.on('data', (data) => {
     const msg = data.toString().trim()
     if (msg) {
-      console.error(`[ffmpeg-stream] FFmpeg stderr for "${session.channelName}": ${msg}`)
+      console.error(`[buffer-stream] ${session.mode} stderr for "${session.channelName}": ${msg}`)
     }
   })
 
-  session.ffmpegProcess.stdout.on('data', (chunk) => {
+  session.process.stdout.on('data', (chunk) => {
     if (session.dead) return
 
-    session._ffmpegStarted = true
     const now = Date.now()
     const value = Buffer.from(chunk)
 
@@ -201,7 +246,7 @@ function startFfmpeg(session) {
       const targetMs = bufSecs * 1000
 
       if (bufferAge >= (targetMs * 0.5)) {
-        console.log(`[ffmpeg-stream] Buffer ready (${bufferAge}ms), flushing to clients`)
+        console.log(`[buffer-stream] Buffer ready (${bufferAge}ms), flushing to clients`)
         const syncedData = Buffer.concat(session.preBuffer.map(entry => entry.chunk))
         session.emit('chunk', syncedData)
         session.bytesOut += (syncedData.length * session.clients.size)
@@ -223,92 +268,45 @@ function startFfmpeg(session) {
     }
   })
 
-  session.ffmpegProcess.on('exit', (code, signal) => {
+  session.process.on('exit', (code, signal) => {
     if (session.dead) return
-    console.log(`[ffmpeg-stream] FFmpeg exited for "${session.channelName}": code=${code}, signal=${signal}`)
-    try {
-      session.upstreamAbortCtrl?.abort()
-    } catch {}
+    console.log(`[buffer-stream] ${session.mode} exited for "${session.channelName}": code=${code}, signal=${signal}`)
   })
 }
 
 async function pump(session) {
   while (!session.dead) {
-    session.upstreamAbortCtrl = new AbortController()
-
     try {
-      startFfmpeg(session)
+      startProcess(session)
 
-      const upstream = await fetch(session.upstreamUrl, {
-        signal: session.upstreamAbortCtrl.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; M3UManager/1.0)',
-          'Connection': 'keep-alive',
-          'Accept': '*/*',
-        },
+      session.reconnects > 0 && console.log(`[buffer-stream] Reconnected to "${session.channelName}" (attempt ${session.reconnects})`)
+
+      await new Promise(resolve => {
+        const handleExit = () => resolve()
+        session.process.once('exit', handleExit)
+        session.process.once('error', handleExit)
       })
-
-      if (!upstream.ok) {
-        console.error(`[ffmpeg-stream] Upstream ${upstream.status} for "${session.channelName}"`)
-        break
-      }
-
-      session.reconnects > 0 && console.log(`[ffmpeg-stream] Reconnected to "${session.channelName}" (attempt ${session.reconnects})`)
-
-      const reader = upstream.body.getReader()
-      let lastDataTime = Date.now()
-      const STALL_TIMEOUT = 30000
-
-      const watchdog = setInterval(() => {
-        if (Date.now() - lastDataTime > STALL_TIMEOUT && !session.dead) {
-          console.error(`[ffmpeg-stream] Watchdog triggered for "${session.channelName}": No data received for ${STALL_TIMEOUT / 1000}s. Forcing reconnect...`)
-          try { session.upstreamAbortCtrl.abort() } catch {}
-        }
-      }, 5000)
-
-      try {
-        while (true) {
-          const readPromise = reader.read()
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Stream stalled - no data received')), STALL_TIMEOUT)
-          )
-
-          const { done, value } = await Promise.race([readPromise, timeoutPromise])
-          if (done || session.dead) break
-
-          lastDataTime = Date.now()
-          if (session.ffmpegProcess && !session.ffmpegProcess.stdin.destroyed) {
-            session.ffmpegProcess.stdin.write(value)
-          }
-        }
-
-        if (session.ffmpegProcess && !session.ffmpegProcess.stdin.destroyed) {
-          session.ffmpegProcess.stdin.end()
-        }
-      } finally {
-        clearInterval(watchdog)
-      }
 
       if (session.dead) break
       if (session.clients.size === 0) break
-      console.log(`[ffmpeg-stream] Stream ended for "${session.channelName}" — reconnecting in ${RECONNECT_DELAY}ms…`)
+      console.log(`[buffer-stream] ${session.mode} stream ended for "${session.channelName}" — reconnecting in ${RECONNECT_DELAY}ms…`)
     } catch (error) {
-      if (error.name === 'AbortError' || session.dead) break
-      console.error(`[ffmpeg-stream] Error for "${session.channelName}":`, error.message)
+      if (session.dead) break
+      console.error(`[buffer-stream] Error for "${session.channelName}":`, error.message)
     }
 
     session.reconnects++
     if (session.reconnects > MAX_RECONNECTS) {
-      console.error(`[ffmpeg-stream] Max reconnects reached for "${session.channelName}" — giving up`)
+      console.error(`[buffer-stream] Max reconnects reached for "${session.channelName}" — giving up`)
       break
     }
     if (session.clients.size === 0) break
 
-    if (session.ffmpegProcess) {
+    if (session.process) {
       try {
-        if (!session.ffmpegProcess.killed) session.ffmpegProcess.kill('SIGKILL')
+        if (!session.process.killed) session.process.kill('SIGKILL')
       } catch {}
-      session.ffmpegProcess = null
+      session.process = null
     }
 
     await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY))
@@ -320,39 +318,48 @@ async function pump(session) {
   }
 }
 
-export async function connectFfmpegClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null) {
+async function connectProcessClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null, mode = 'ffmpeg') {
   if (res.headersSent) {
     throw new Error('Response headers already sent')
   }
 
   if (sessions.has(channelId)) {
     const session = sessions.get(channelId)
-    console.log(`[ffmpeg-stream] ✓ Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
+    console.log(`[buffer-stream] ✓ Client joining "${session.channelName}" (${session.clients.size + 1} clients)`)
     attachClient(session, res)
     return
   }
 
   const limitErr = checkMaxStreams(sourceId)
   if (limitErr) {
-    console.log(`[ffmpeg-stream] Cannot create new session: ${limitErr}`)
+    console.log(`[buffer-stream] Cannot create new session: ${limitErr}`)
     res.status(503).json({ error: limitErr })
     return
   }
 
   const bufferSecs = getBufferSeconds()
-  console.log(`[ffmpeg-stream] Opening "${channelName}" (buffer: ${bufferSecs}s)`)
+  console.log(`[buffer-stream] Opening "${channelName}" via ${mode} (buffer: ${bufferSecs}s)`)
 
-  const session = new FfmpegSession(channelId, upstreamUrl, channelName, sourceId, username)
+  const session = new FfmpegSession(channelId, upstreamUrl, channelName, sourceId, username, mode)
   sessions.set(channelId, session)
 
   attachClient(session, res)
   pump(session)
 }
 
+export async function connectFfmpegClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null) {
+  await connectProcessClient(channelId, upstreamUrl, channelName, res, sourceId, username, 'ffmpeg')
+}
+
+export async function connectVlcClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null) {
+  await connectProcessClient(channelId, upstreamUrl, channelName, res, sourceId, username, 'vlc')
+}
+
 export function getActiveFfmpegSessions() {
   return [...sessions.values()].map(session => ({
     channelId: session.channelId,
     channelName: session.channelName,
+    mode: session.mode,
     sourceId: session.sourceId,
     username: session.username,
     clients: session.clients.size,

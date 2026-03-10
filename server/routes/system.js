@@ -8,6 +8,28 @@ import { getBufferSeconds } from '../streamer.js'
 
 const router = express.Router()
 
+function getSettingValue(key) {
+  return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? null
+}
+
+function getDefaultFfmpegStreamOptions() {
+  return '-hide_banner -loglevel error -i {input} -map 0:v:0? -map 0:a? -map 0:s? -c copy -muxdelay 0 -muxpreload 0 -f mpegts {output}'
+}
+
+function getDefaultVlcStreamOptions() {
+  return '{input} --sout #std{access=file,mux=ts,dst={output}} --intf dummy --quiet'
+}
+
+function getStreamBufferMode() {
+  const mode = getSettingValue('stream_buffer_mode')
+  if (mode === 'ffmpeg' || mode === 'm3u4prox' || mode === 'vlc') {
+    return mode
+  }
+
+  const remuxSetting = getSettingValue('remux_live_tv')
+  return remuxSetting === 'true' ? 'ffmpeg' : 'm3u4prox'
+}
+
 // ── Logo proxy / cache ────────────────────────────────────────────────────────
 const LOGO_CACHE_DIR = process.env.LOGO_CACHE_DIR || '/data/logos'
 mkdirSync(LOGO_CACHE_DIR, { recursive: true })
@@ -91,17 +113,20 @@ router.get('/hdhr/status', (req, res) => {
 
 // ── Proxy settings ────────────────────────────────────────────────────────────
 router.get('/proxy-settings', (req, res) => {
-  const bufferSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
-  const remuxSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('remux_live_tv')
+  const bufferSetting = getSettingValue('proxy_buffer_seconds')
+  const streamBufferMode = getStreamBufferMode()
+  const remuxSetting = getSettingValue('remux_live_tv')
+  const ffmpegOptions = getSettingValue('ffmpeg_stream_options') || getDefaultFfmpegStreamOptions()
+  const vlcOptions = getSettingValue('vlc_stream_options') || getDefaultVlcStreamOptions()
 
-  const bufferSeconds = bufferSetting ? parseFloat(bufferSetting.value) : getBufferSeconds()
-  const remuxLiveTv = remuxSetting ? remuxSetting.value === 'true' : false
+  const bufferSeconds = bufferSetting !== null ? parseFloat(bufferSetting) : getBufferSeconds()
+  const remuxLiveTv = remuxSetting !== null ? remuxSetting === 'true' : streamBufferMode === 'ffmpeg'
 
-  res.json({ bufferSeconds, remuxLiveTv })
+  res.json({ bufferSeconds, remuxLiveTv, streamBufferMode, ffmpegOptions, vlcOptions })
 })
 
 router.put('/proxy-settings', (req, res) => {
-  const { bufferSeconds, remuxLiveTv } = req.body
+  const { bufferSeconds, remuxLiveTv, streamBufferMode, ffmpegOptions, vlcOptions } = req.body
 
   try {
     if (bufferSeconds !== undefined) {
@@ -116,13 +141,35 @@ router.put('/proxy-settings', (req, res) => {
       db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('remux_live_tv', String(remuxLiveTv))
     }
 
-    const bufferSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('proxy_buffer_seconds')
-    const remuxSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('remux_live_tv')
+    if (streamBufferMode !== undefined) {
+      if (!['ffmpeg', 'm3u4prox', 'vlc'].includes(streamBufferMode)) {
+        return res.status(400).json({ error: 'streamBufferMode must be ffmpeg, m3u4prox, or vlc' })
+      }
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('stream_buffer_mode', streamBufferMode)
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('remux_live_tv', String(streamBufferMode === 'ffmpeg'))
+    }
+
+    if (ffmpegOptions !== undefined) {
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('ffmpeg_stream_options', String(ffmpegOptions || '').trim() || getDefaultFfmpegStreamOptions())
+    }
+
+    if (vlcOptions !== undefined) {
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('vlc_stream_options', String(vlcOptions || '').trim() || getDefaultVlcStreamOptions())
+    }
+
+    const updatedBufferSetting = getSettingValue('proxy_buffer_seconds')
+    const updatedRemuxSetting = getSettingValue('remux_live_tv')
+    const updatedStreamBufferMode = getStreamBufferMode()
+    const updatedFfmpegOptions = getSettingValue('ffmpeg_stream_options') || getDefaultFfmpegStreamOptions()
+    const updatedVlcOptions = getSettingValue('vlc_stream_options') || getDefaultVlcStreamOptions()
 
     res.json({
       ok: true,
-      bufferSeconds: bufferSetting ? parseFloat(bufferSetting.value) : getBufferSeconds(),
-      remuxLiveTv: remuxSetting ? remuxSetting.value === 'true' : false
+      bufferSeconds: updatedBufferSetting !== null ? parseFloat(updatedBufferSetting) : getBufferSeconds(),
+      remuxLiveTv: updatedRemuxSetting !== null ? updatedRemuxSetting === 'true' : updatedStreamBufferMode === 'ffmpeg',
+      streamBufferMode: updatedStreamBufferMode,
+      ffmpegOptions: updatedFfmpegOptions,
+      vlcOptions: updatedVlcOptions
     })
   } catch (e) {
     res.status(500).json({ error: e.message })

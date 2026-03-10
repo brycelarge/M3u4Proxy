@@ -5,8 +5,8 @@
  * for enriching Xtream API responses and M3U playlists
  */
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, existsSync, readdirSync, mkdirSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import Database from 'better-sqlite3'
 
 const STRM_BASE_DIR = process.env.STRM_EXPORT_DIR || '/data/vod-strm'
@@ -100,7 +100,9 @@ export function findNfoForChannel(channelId) {
   console.log(`[nfo] Searching for channel ${channelId} in ${STRM_BASE_DIR}`)
 
   // Get channel info from database to match by name if metadata files don't exist
-  const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
+  const dbPath = process.env.DB_PATH || join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'db', 'm3u-manager.db')
+  mkdirSync(dirname(dbPath), { recursive: true })
+  const db = new Database(dbPath)
   const channel = db.prepare('SELECT tvg_name, group_title FROM playlist_channels WHERE id = ?').get(channelId)
   db.close()
 

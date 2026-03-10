@@ -3,6 +3,7 @@ import db from '../db.js'
 import { startContentUpdateScheduler, startEpgGrabCron, startEnrichCron } from '../services/scheduler.js'
 
 const router = express.Router()
+const FALLBACK_GENRES = ['Action', 'Comedy', 'Drama', 'Documentary', 'Horror', 'Romance', 'Sci-Fi', 'Thriller']
 
 // ── VOD Settings Helpers ───────────────────────────────────────────────────────
 export function getVodSettings() {
@@ -17,8 +18,12 @@ export function getVodSettings() {
   }
   // Ensure defaults
   return {
+    vod_detected_languages: result.vod_detected_languages || ['eng'],
     vod_allowed_languages: result.vod_allowed_languages || ['eng'],
     vod_language_filter_mode: result.vod_language_filter_mode || 'disabled',
+    vod_detected_genres: result.vod_detected_genres || FALLBACK_GENRES,
+    vod_allowed_genres: result.vod_allowed_genres || [],
+    vod_genre_filter_mode: result.vod_genre_filter_mode || 'disabled',
     vod_blocked_titles: result.vod_blocked_titles || []
   }
 }
@@ -83,6 +88,105 @@ router.get('/vod/languages', async (req, res) => {
       withLanguageData: 0,
       currentSettings: getVodSettings()
     })
+  }
+})
+
+// GET /api/vod/genres - Get genres for VOD settings UI (NFO + generic fallback)
+router.get('/vod/genres', async (req, res) => {
+  const vodSettings = getVodSettings()
+  res.json({
+    genres: vodSettings.vod_detected_genres || FALLBACK_GENRES,
+    totalChannels: 0,
+    withGenreData: 0,
+    currentSettings: vodSettings
+  })
+})
+
+// POST /api/vod/genres/refresh - rebuild detected genres from current VOD source data
+router.post('/vod/genres/refresh', (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT group_title, meta, content_type
+      FROM source_channels
+      WHERE content_type IN ('movie', 'series')
+    `).all()
+
+    const normalizeGenre = (value) => {
+      if (!value) return null
+      const genre = String(value)
+        .replace(/^(Movie|Series):\s*/i, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+      return genre || null
+    }
+
+    const parseGenres = (value) => String(value)
+      .split(/[\/,]/)
+      .map(v => normalizeGenre(v))
+      .filter(Boolean)
+
+    const extractGenre = (row) => {
+      const groupTitle = String(row.group_title || '')
+      if (!/^Movie:\s*|^Series:\s*/i.test(groupTitle)) {
+        return []
+      }
+
+      let meta = null
+      if (row.meta) {
+        try {
+          meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta
+        } catch {
+          meta = null
+        }
+      }
+
+      const metaGenre = meta?.genre || meta?.genres || meta?.category_name || meta?.category
+
+      if (Array.isArray(metaGenre)) {
+        for (const item of metaGenre) {
+          const parsed = parseGenres(item)
+          if (parsed.length > 0) return parsed
+        }
+      }
+
+      if (typeof metaGenre === 'string') {
+        const parsed = parseGenres(metaGenre)
+        if (parsed.length > 0) return parsed
+      }
+
+      return parseGenres(groupTitle)
+    }
+
+    const detectedGenres = new Map(FALLBACK_GENRES.map(genre => [genre.toLowerCase(), genre]))
+    let withGenreData = 0
+    let processedRows = 0
+
+    for (const row of rows) {
+      const genres = extractGenre(row)
+      if (!Array.isArray(genres) || genres.length === 0) continue
+      processedRows++
+      for (const genre of genres) {
+        detectedGenres.set(genre.toLowerCase(), genre)
+      }
+      withGenreData++
+    }
+
+    const genres = Array.from(detectedGenres.values()).sort((a, b) => a.localeCompare(b))
+
+    db.prepare(`
+      INSERT INTO settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run('vod_detected_genres', JSON.stringify(genres))
+
+    res.json({
+      success: true,
+      message: `Refreshed ${genres.length} detected genres from ${processedRows} VOD rows`,
+      genres,
+      totalChannels: processedRows,
+      withGenreData
+    })
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message })
   }
 })
 

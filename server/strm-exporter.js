@@ -45,6 +45,115 @@ function safeDeleteManagedDir(dirPath, deletedDirs) {
   return false
 }
 
+function persistBlockedTitles(db, titles) {
+  const normalizedTitles = [...new Set(
+    titles
+      .map(title => String(title || '').trim())
+      .filter(Boolean)
+  )]
+
+  if (normalizedTitles.length === 0) {
+    return 0
+  }
+
+  const existingRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('vod_blocked_titles')
+  let existingTitles = []
+
+  if (existingRow?.value) {
+    try {
+      const parsed = JSON.parse(existingRow.value)
+      existingTitles = Array.isArray(parsed) ? parsed : []
+    } catch {
+      existingTitles = []
+    }
+  }
+
+  const blockedByLower = new Map(existingTitles.map(title => [String(title).trim().toLowerCase(), String(title).trim()]))
+  let addedCount = 0
+
+  for (const title of normalizedTitles) {
+    const key = title.toLowerCase()
+    if (!blockedByLower.has(key)) {
+      blockedByLower.set(key, title)
+      addedCount++
+    }
+  }
+
+  if (addedCount === 0) {
+    return 0
+  }
+
+  const mergedTitles = Array.from(blockedByLower.values()).sort((a, b) => a.localeCompare(b))
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('vod_blocked_titles', JSON.stringify(mergedTitles))
+
+  return addedCount
+}
+
+function normalizeLanguageValue(value) {
+  const normalized = String(value || '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  const languageAliases = new Map([
+    ['en', 'eng'],
+    ['eng', 'eng'],
+    ['english', 'eng'],
+    ['us english', 'eng'],
+    ['uk english', 'eng'],
+    ['es', 'spa'],
+    ['spa', 'spa'],
+    ['spanish', 'spa'],
+    ['español', 'spa'],
+    ['fr', 'fre'],
+    ['fre', 'fre'],
+    ['fra', 'fre'],
+    ['french', 'fre'],
+    ['de', 'ger'],
+    ['ger', 'ger'],
+    ['deu', 'ger'],
+    ['german', 'ger'],
+    ['it', 'ita'],
+    ['ita', 'ita'],
+    ['italian', 'ita'],
+    ['pt', 'por'],
+    ['por', 'por'],
+    ['portuguese', 'por'],
+    ['pt br', 'por'],
+    ['pt-br', 'por'],
+    ['brazilian portuguese', 'por'],
+    ['ru', 'rus'],
+    ['rus', 'rus'],
+    ['russian', 'rus'],
+    ['nl', 'dut'],
+    ['dut', 'dut'],
+    ['nld', 'dut'],
+    ['dutch', 'dut'],
+    ['tr', 'tur'],
+    ['tur', 'tur'],
+    ['turkish', 'tur'],
+    ['ar', 'ara'],
+    ['ara', 'ara'],
+    ['arabic', 'ara'],
+    ['hi', 'hin'],
+    ['hin', 'hin'],
+    ['hindi', 'hin'],
+    ['ja', 'jpn'],
+    ['jpn', 'jpn'],
+    ['japanese', 'jpn'],
+    ['ko', 'kor'],
+    ['kor', 'kor'],
+    ['korean', 'kor'],
+    ['zh', 'chi'],
+    ['chi', 'chi'],
+    ['zho', 'chi'],
+    ['chinese', 'chi']
+  ])
+
+  return languageAliases.get(normalized) || normalized
+}
+
 // Parse NFO file to extract language information
 function parseNfoLanguages(nfoPath) {
   try {
@@ -63,7 +172,7 @@ function parseNfoLanguages(nfoPath) {
         for (const stream of audioStreams) {
           const lang = stream.language?._text || stream.language
           if (lang) {
-            languages.push(String(lang).toLowerCase())
+            languages.push(normalizeLanguageValue(lang))
           }
         }
       }
@@ -72,7 +181,7 @@ function parseNfoLanguages(nfoPath) {
     // Also check for language field directly
     const langField = result.movie?.language?._text || result.tvshow?.language?._text
     if (langField) {
-      languages.push(String(langField).toLowerCase())
+      languages.push(normalizeLanguageValue(langField))
     }
 
     return [...new Set(languages)]
@@ -81,18 +190,43 @@ function parseNfoLanguages(nfoPath) {
   }
 }
 
-// Check if series/movie has allowed language based on NFO
-function checkNfoLanguage(folderPath, vodSettings) {
+function parseNfoGenres(nfoPath) {
   try {
-    if (!vodSettings.vod_allowed_languages || vodSettings.vod_allowed_languages.length === 0) {
-      return { allowed: true, reason: 'No language filter set' }
+    const content = readFileSync(nfoPath, 'utf-8')
+    const jsonStr = xml2json(content, { compact: true, spaces: 2 })
+    const result = JSON.parse(jsonStr)
+
+    const rawGenres = result.movie?.genre || result.tvshow?.genre || result.episodedetails?.genre
+    if (!rawGenres) return []
+
+    const values = Array.isArray(rawGenres) ? rawGenres : [rawGenres]
+    const genres = new Map()
+    const normalizeGenre = (value) => String(value)
+      .replace(/\s+/g, ' ')
+      .trim()
+    for (const value of values) {
+      const text = value?._text || value
+      if (!text) continue
+      for (const genre of String(text).split(/[\/,]/).map(v => normalizeGenre(v)).filter(Boolean)) {
+        genres.set(genre.toLowerCase(), genre)
+      }
     }
 
-    if (vodSettings.vod_language_filter_mode === 'disabled') {
-      return { allowed: true, reason: 'Language filter disabled' }
-    }
+    return Array.from(genres.values())
+  } catch (e) {
+    return []
+  }
+}
 
-    const allowedSet = new Set(vodSettings.vod_allowed_languages.map(l => l.toLowerCase()))
+// Check if series/movie passes configured NFO-based language/genre filters
+function checkNfoFilters(folderPath, vodSettings) {
+  try {
+    const languageFilterEnabled = vodSettings.vod_language_filter_mode && vodSettings.vod_language_filter_mode !== 'disabled' && Array.isArray(vodSettings.vod_allowed_languages) && vodSettings.vod_allowed_languages.length > 0
+    const genreFilterEnabled = vodSettings.vod_genre_filter_mode && vodSettings.vod_genre_filter_mode !== 'disabled' && Array.isArray(vodSettings.vod_allowed_genres) && vodSettings.vod_allowed_genres.length > 0
+
+    if (!languageFilterEnabled && !genreFilterEnabled) {
+      return { allowed: true, reason: 'All VOD filters disabled' }
+    }
 
     // Check for tvshow.nfo (series) or movie.nfo (movie)
     const tvshowNfo = join(folderPath, 'tvshow.nfo')
@@ -110,24 +244,33 @@ function checkNfoLanguage(folderPath, vodSettings) {
     }
 
     if (!nfoPath) {
-      // No NFO found - check if we should include content without language data
-      // Default: include (conservative approach)
-      return { allowed: true, reason: 'No NFO file found', contentType: 'unknown' }
+      return { allowed: true, reason: 'No NFO file found', contentType: 'unknown', languages: [], genres: [] }
     }
 
     const languages = parseNfoLanguages(nfoPath)
+    const genres = parseNfoGenres(nfoPath)
 
-    if (languages.length === 0) {
-      return { allowed: true, reason: 'No language data in NFO', contentType }
+    if (languageFilterEnabled) {
+      if (languages.length > 0) {
+        const allowedLanguageSet = new Set(vodSettings.vod_allowed_languages.map(l => normalizeLanguageValue(l)))
+        const hasAllowedLang = languages.some(lang => allowedLanguageSet.has(lang))
+        if (!hasAllowedLang) {
+          return { allowed: false, reason: `Languages not in allowed list: ${languages.join(', ')}`, contentType, languages, genres }
+        }
+      }
     }
 
-    const hasAllowedLang = languages.some(lang => allowedSet.has(lang))
-
-    if (hasAllowedLang) {
-      return { allowed: true, reason: `Has allowed language: ${languages.filter(l => allowedSet.has(l)).join(', ')}`, contentType, languages }
-    } else {
-      return { allowed: false, reason: `Languages not in allowed list: ${languages.join(', ')}`, contentType, languages }
+    if (genreFilterEnabled) {
+      if (genres.length > 0) {
+        const allowedGenreSet = new Set(vodSettings.vod_allowed_genres.map(g => g.toLowerCase()))
+        const hasAllowedGenre = genres.some(genre => allowedGenreSet.has(genre.toLowerCase()))
+        if (!hasAllowedGenre) {
+          return { allowed: false, reason: `Genres not in allowed list: ${genres.join(', ')}`, contentType, languages, genres }
+        }
+      }
     }
+
+    return { allowed: true, reason: 'Passed VOD filters', contentType, languages, genres }
   } catch (e) {
     return { allowed: true, reason: 'Error checking NFO', error: e.message }
   }
@@ -140,7 +283,6 @@ function getPlaylistStrmDir(playlistName) {
     .replace(/^-|-$/g, '')
   return join(STRM_BASE_DIR, sanitized)
 }
-
 
 function sanitizeFilename(name) {
   return name
@@ -335,18 +477,9 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   const { deleteOrphans = true } = options
   console.log(`[strm] Starting export for playlist ${playlistId} (deleteOrphans: ${deleteOrphans})`)
 
-  // Auto-sync VOD languages from NFO files before export
-  try {
-    const { autoSyncVodLanguages } = await import('./routes/strm-nfo.js')
-    const syncResult = await autoSyncVodLanguages()
-    if (syncResult) {
-      console.log(`[strm] Auto-synced ${syncResult.detected} detected languages → ${syncResult.total} total allowed`)
-    }
-  } catch (e) {
-    console.warn('[strm] Auto-sync of VOD languages failed:', e.message)
-  }
-
-  const db = new Database(process.env.DB_PATH || '/data/db/m3u-manager.db')
+  const dbPath = process.env.DB_PATH || join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'db', 'm3u-manager.db')
+  mkdirSync(dirname(dbPath), { recursive: true })
+  const db = new Database(dbPath)
 
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId)
   if (!playlist) {
@@ -454,6 +587,9 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
   let stats = { created: 0, updated: 0, deleted: 0, errors: 0, skipped: 0, filtered: 0, directory: strmDir }
   const errorList = []
   const skippedList = []
+  const titlesToBlock = new Set()
+  const blockedSeriesKeys = new Set()
+  const blockedMovieKeys = new Set()
 
   // Load VOD settings for filtering
   const vodSettings = getVodSettings()
@@ -518,6 +654,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
           reason: 'Series blocked by title filter'
         })
         stats.filtered += seriesData.episodes.length
+        blockedSeriesKeys.add(seriesKey)
         seriesGroups.delete(seriesKey)
       }
     }
@@ -535,6 +672,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
           reason: 'Movie blocked by title filter'
         })
         stats.filtered++
+        blockedMovieKeys.add(movieKey)
         movieItems.delete(movieKey)
       }
     }
@@ -567,9 +705,10 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     seriesData.folderPath = seriesRootDir
 
     // Check NFO language at series level (before processing any episodes)
-    const langCheck = checkNfoLanguage(seriesRootDir, vodSettings)
+    const langCheck = checkNfoFilters(seriesRootDir, vodSettings)
 
     if (!langCheck.allowed) {
+      titlesToBlock.add(seriesData.seriesName)
       skippedList.push({
         name: seriesData.seriesName,
         group: 'Series',
@@ -580,7 +719,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
       // If deleteOrphans is enabled, mark this series for deletion
       if (deleteOrphans && existsSync(seriesRootDir)) {
-        console.log(`[strm] Series "${seriesData.seriesName}" will be removed due to language filter`)
+        console.log(`[strm] Series "${seriesData.seriesName}" will be removed due to VOD filters`)
         seriesToSkip.set(seriesKey, { ...seriesData, delete: true })
       }
       continue
@@ -604,9 +743,10 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     const movieDir = join(strmDir, movieFolder)
 
     // Check NFO language at movie level
-    const langCheck = checkNfoLanguage(movieDir, vodSettings)
+    const langCheck = checkNfoFilters(movieDir, vodSettings)
 
     if (!langCheck.allowed) {
+      titlesToBlock.add(channel.tvg_name)
       skippedList.push({
         name: channel.tvg_name,
         group: channel.group_title,
@@ -616,13 +756,91 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
 
       // If deleteOrphans is enabled, mark for deletion
       if (deleteOrphans && existsSync(movieDir)) {
-        console.log(`[strm] Movie "${channel.tvg_name}" will be removed due to language filter`)
+        console.log(`[strm] Movie "${channel.tvg_name}" will be removed due to VOD filters`)
         moviesToProcess.set(movieKey, { channel, movieDir, delete: true })
       }
       continue
     }
 
     moviesToProcess.set(movieKey, { channel, movieDir })
+  }
+
+  if (deleteOrphans) {
+    for (const blockedSeriesKey of blockedSeriesKeys) {
+      const existingSeries = Array.from(existing.values()).filter(entry => entry.isSeries && entry.normalizedName === blockedSeriesKey)
+      let seriesRootDir = null
+      let seriesName = blockedSeriesKey
+
+      if (existingSeries.length > 0) {
+        seriesRootDir = dirname(dirname(existingSeries[0].fullStrmPath))
+        seriesName = existingSeries[0].seriesName || blockedSeriesKey
+      } else {
+        const blockedSeries = channels.find(channel => {
+          const isSeriesGroup = (channel.group_title || '').startsWith('Series:')
+          const seriesInfo = parseSeriesInfo(channel.tvg_name || '')
+          return isSeriesGroup && seriesInfo.isSeries && seriesInfo.seriesName.toLowerCase().trim() === blockedSeriesKey
+        })
+
+        if (!blockedSeries) continue
+
+        const meta = blockedSeries.meta ? (typeof blockedSeries.meta === 'string' ? JSON.parse(blockedSeries.meta) : blockedSeries.meta) : null
+        const year = meta ? (meta.releaseDate || meta.release_date || meta.year || '') : ''
+        const folderWithoutYear = sanitizeFilename(parseSeriesInfo(blockedSeries.tvg_name || '').seriesName)
+        const folderWithYear = year ? sanitizeFilename(`${parseSeriesInfo(blockedSeries.tvg_name || '').seriesName} (${year})`) : null
+        seriesRootDir = folderWithYear && existsSync(join(strmDir, folderWithYear))
+          ? join(strmDir, folderWithYear)
+          : join(strmDir, folderWithoutYear)
+        seriesName = parseSeriesInfo(blockedSeries.tvg_name || '').seriesName
+      }
+
+      if (!seriesRootDir || !existsSync(seriesRootDir)) continue
+
+      console.log(`[strm] Series "${seriesName}" will be removed due to blocked title filter`)
+      seriesToSkip.set(blockedSeriesKey, {
+        seriesName,
+        episodes: [],
+        folderPath: seriesRootDir,
+        delete: true
+      })
+    }
+
+    for (const blockedMovieKey of blockedMovieKeys) {
+      const existingMovie = existing.get(blockedMovieKey)
+      let movieDir = null
+      let movieTitle = blockedMovieKey
+
+      if (existingMovie) {
+        movieDir = dirname(existingMovie.fullStrmPath)
+        movieTitle = existingMovie.title || blockedMovieKey
+      } else {
+        const blockedMovie = channels.find(channel => {
+          const matchKey = channel.normalized_name || String(channel.id) || channel.url
+          return matchKey === blockedMovieKey
+        })
+
+        if (!blockedMovie) continue
+
+        const meta = blockedMovie.meta ? (typeof blockedMovie.meta === 'string' ? JSON.parse(blockedMovie.meta) : blockedMovie.meta) : null
+        let year = extractYear(blockedMovie.tvg_name || '')
+        if (!year && meta) {
+          year = meta.releaseDate || meta.release_date || meta.year || null
+        }
+
+        const baseName = (blockedMovie.tvg_name || 'Unknown').replace(/\(\d{4}\)/, '').trim()
+        const movieFolder = year ? sanitizeFilename(`${baseName} (${year})`) : sanitizeFilename(baseName)
+        movieDir = join(strmDir, movieFolder)
+        movieTitle = blockedMovie.tvg_name || blockedMovieKey
+      }
+
+      if (!movieDir || !existsSync(movieDir)) continue
+
+      console.log(`[strm] Movie "${movieTitle}" will be removed due to blocked title filter`)
+      moviesToProcess.set(blockedMovieKey, {
+        channel: { tvg_name: movieTitle },
+        movieDir,
+        delete: true
+      })
+    }
   }
 
   console.log(`[strm] Processing ${seriesToProcess.size} series (${seriesToSkip.size} filtered), ${moviesToProcess.size} movies (${stats.skipped} duplicates, ${movieItems.size - moviesToProcess.size} filtered)`)
@@ -786,11 +1004,12 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     // Delete if marked for removal
     if (shouldDelete && existsSync(movieDir)) {
       console.log(`[strm] Deleting filtered movie: ${channel.tvg_name}`)
+      const wasManagedFolder = isManagedFolder(movieDir)
       const files = readdirSync(movieDir)
       for (const file of files) {
         unlinkSync(join(movieDir, file))
       }
-      if (isManagedFolder(movieDir)) {
+      if (wasManagedFolder) {
         rmdirSync(movieDir)
         console.log(`[strm] Deleted movie directory: ${movieDir}`)
         stats.deleted++
@@ -904,6 +1123,11 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     }
   } catch (e) {
     console.error(`[strm] Error cleaning folders:`, e.message)
+  }
+
+  const blockedTitlesAdded = persistBlockedTitles(db, Array.from(titlesToBlock))
+  if (blockedTitlesAdded > 0) {
+    console.log(`[strm] Added ${blockedTitlesAdded} title(s) to VOD blocked titles`)
   }
 
   db.close()

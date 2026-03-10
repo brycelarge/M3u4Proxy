@@ -223,9 +223,9 @@ function copyUrl(url, key) {
   if (key) { copied.value = key; setTimeout(() => { copied.value = null }, 2000) }
 }
 
-const TABS = [
-  { id: 'hdhr',         label: 'HDHomeRun',   icon: '📡' },
-  { id: 'streaming',    label: 'Streaming',   icon: '🎬' },
+const tabs = [
+  { id: 'hdhr',         label: 'HDHomeRun',  icon: '📡' },
+  { id: 'streaming',    label: 'Streaming',  icon: '📺' },
   { id: 'scheduler',    label: 'Scheduler',   icon: '⏰' },
   { id: 'vod',          label: 'VOD',         icon: '🎬' },
   { id: 'backup',       label: 'Backup',      icon: '💾' },
@@ -234,12 +234,15 @@ const TABS = [
 ]
 
 // ── Proxy settings ───────────────────────────────────────────────────────────
-const proxySettings     = ref({ bufferSeconds: 0, remuxLiveTv: false })
+const proxySettings     = ref({ bufferSeconds: 0, remuxLiveTv: false, streamBufferMode: 'm3u4prox', ffmpegOptions: '', vlcOptions: '' })
 const proxySaving       = ref(false)
 const proxySaved        = ref(false)
 const proxyError        = ref('')
 const proxyBufferInput  = ref(0)
 const proxyRemuxInput   = ref(false)
+const proxyModeInput    = ref('m3u4prox')
+const proxyFfmpegOptionsInput = ref('')
+const proxyVlcOptionsInput = ref('')
 
 async function loadProxySettings() {
   try {
@@ -247,6 +250,9 @@ async function loadProxySettings() {
     proxySettings.value    = d
     proxyBufferInput.value = d.bufferSeconds
     proxyRemuxInput.value  = d.remuxLiveTv
+    proxyModeInput.value = d.streamBufferMode || (d.remuxLiveTv ? 'ffmpeg' : 'm3u4prox')
+    proxyFfmpegOptionsInput.value = d.ffmpegOptions || ''
+    proxyVlcOptionsInput.value = d.vlcOptions || ''
   } catch {}
 }
 
@@ -260,12 +266,19 @@ async function saveProxySettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         bufferSeconds: proxyBufferInput.value,
-        remuxLiveTv: proxyRemuxInput.value
+        remuxLiveTv: proxyModeInput.value === 'ffmpeg',
+        streamBufferMode: proxyModeInput.value,
+        ffmpegOptions: proxyFfmpegOptionsInput.value,
+        vlcOptions: proxyVlcOptionsInput.value
       }),
     })
     const d = await r.json()
     if (!r.ok) throw new Error(d.error)
     proxySettings.value = d
+    proxyRemuxInput.value = d.remuxLiveTv
+    proxyModeInput.value = d.streamBufferMode || 'm3u4prox'
+    proxyFfmpegOptionsInput.value = d.ffmpegOptions || ''
+    proxyVlcOptionsInput.value = d.vlcOptions || ''
     proxySaved.value = true
     setTimeout(() => { proxySaved.value = false }, 2500)
   } catch (e) {
@@ -287,10 +300,42 @@ const diagError     = ref({ ip: null, vpn: null, speed: null })
 const vpnConfigs       = ref([])
 const currentVpnConfig = ref('')  // Currently active config
 const selectedVpnConfig = ref('')  // Selected in dropdown for switching
+const selectedVpnCountry = ref('')
+const getVpnCountryCode = (configPath = '') => {
+  const fileName = String(configPath).split('/').pop() || ''
+  const match = fileName.match(/^([a-z]{2,3})\d+/i)
+  return match ? match[1].toUpperCase() : 'OTHER'
+}
+const getVpnCountryLabel = (countryCode = '') => {
+  if (!countryCode || countryCode === 'OTHER') return 'Other'
+  try {
+    const label = new Intl.DisplayNames(['en'], { type: 'region' }).of(countryCode)
+    return label || countryCode
+  } catch (e) {
+    return countryCode
+  }
+}
+const vpnCountries = computed(() => {
+  let configs = vpnConfigs.value
+  if (vpnProtocolFilter.value !== 'all') {
+    configs = configs.filter(c => c.protocol === vpnProtocolFilter.value)
+  }
+  const countries = new Map()
+  for (const config of configs) {
+    const code = getVpnCountryCode(config.path)
+    countries.set(code, getVpnCountryLabel(code))
+  }
+  return Array.from(countries.entries())
+    .map(([code, label]) => ({ code, label }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
 const filteredVpnConfigs = computed(() => {
   let filtered = vpnConfigs.value
   if (vpnProtocolFilter.value !== 'all') {
     filtered = filtered.filter(c => c.protocol === vpnProtocolFilter.value)
+  }
+  if (selectedVpnCountry.value) {
+    filtered = filtered.filter(c => getVpnCountryCode(c.path) === selectedVpnCountry.value)
   }
   // Exclude currently active config from options
   if (currentVpnConfig.value) {
@@ -298,6 +343,7 @@ const filteredVpnConfigs = computed(() => {
   }
   return filtered
 })
+const currentVpnCountry = computed(() => currentVpnConfig.value ? getVpnCountryCode(currentVpnConfig.value) : '')
 const vpnProvider      = ref('')
 const vpnProtocolFilter = ref('udp')
 const vpnChanging      = ref(false)
@@ -310,6 +356,7 @@ async function loadVpnConfigs() {
     vpnConfigs.value = data.configs || []
     currentVpnConfig.value = data.current || ''
     vpnProvider.value = data.provider || 'NORDVPN'
+    selectedVpnCountry.value = currentVpnConfig.value ? getVpnCountryCode(currentVpnConfig.value) : (vpnCountries.value[0]?.code || '')
   } catch (e) {
     console.error('Failed to load VPN configs:', e)
   }
@@ -334,6 +381,7 @@ async function changeVpnConfig() {
     }
     // Update current config to the newly selected one
     currentVpnConfig.value = selectedVpnConfig.value
+    selectedVpnCountry.value = getVpnCountryCode(selectedVpnConfig.value)
     // Clear selection
     selectedVpnConfig.value = ''
     setTimeout(() => { vpnChangeSuccess.value = '' }, 8000)
@@ -396,8 +444,11 @@ async function clearDeadChannels() {
 const vodLanguages = ref(['eng'])
 const vodAllowedLanguages = ref(['eng'])
 const vodFilterMode = ref('disabled')
+const vodGenres = ref([])
+const vodAllowedGenres = ref([])
+const vodGenreFilterMode = ref('disabled')
 const vodBlockedTitles = ref('')
-const vodStats = ref({ totalChannels: 0, withLanguageData: 0 })
+const vodStats = ref({ totalChannels: 0, withLanguageData: 0, withGenreData: 0 })
 const vodLoading = ref(false)
 const vodSaving = ref(false)
 const vodSaved = ref(false)
@@ -405,22 +456,33 @@ const vodError = ref('')
 const vodCsvLoading = ref(false)
 const vodSyncLoading = ref(false)
 const vodSyncResult = ref('')
+const vodGenreSyncLoading = ref(false)
+const vodGenreSyncResult = ref('')
 
 async function loadVodSettings() {
   vodLoading.value = true
   try {
-    const data = await fetch('/api/vod/languages').then(r => r.json())
-    vodLanguages.value = data.languages || ['eng']
+    const [languageData, genreData] = await Promise.all([
+      fetch('/api/vod/languages').then(r => r.json()),
+      fetch('/api/vod/genres').then(r => r.json())
+    ])
+
+    vodLanguages.value = languageData.languages || languageData.currentSettings?.vod_detected_languages || ['eng']
+    vodGenres.value = genreData.currentSettings?.vod_detected_genres || genreData.genres || []
     vodStats.value = {
-      totalChannels: data.totalChannels || 0,
-      withLanguageData: data.withLanguageData || 0
+      totalChannels: Math.max(languageData.totalChannels || 0, genreData.totalChannels || 0),
+      withLanguageData: languageData.withLanguageData || 0,
+      withGenreData: genreData.withGenreData || 0
     }
 
     // Load current settings
-    if (data.currentSettings) {
-      vodAllowedLanguages.value = data.currentSettings.vod_allowed_languages || ['eng']
-      vodFilterMode.value = data.currentSettings.vod_language_filter_mode || 'disabled'
-      vodBlockedTitles.value = (data.currentSettings.vod_blocked_titles || []).join('\n')
+    const currentSettings = languageData.currentSettings || genreData.currentSettings
+    if (currentSettings) {
+      vodAllowedLanguages.value = currentSettings.vod_allowed_languages || ['eng']
+      vodFilterMode.value = currentSettings.vod_language_filter_mode || 'disabled'
+      vodAllowedGenres.value = currentSettings.vod_allowed_genres || []
+      vodGenreFilterMode.value = currentSettings.vod_genre_filter_mode || 'disabled'
+      vodBlockedTitles.value = (currentSettings.vod_blocked_titles || []).join('\n')
     }
   } catch (e) {
     vodError.value = 'Failed to load VOD settings'
@@ -430,12 +492,53 @@ async function loadVodSettings() {
 }
 
 function toggleLanguage(lang) {
+  if (vodFilterMode.value === 'disabled') {
+    vodFilterMode.value = 'whitelist'
+    vodAllowedLanguages.value = [...vodLanguages.value]
+  }
+
   const idx = vodAllowedLanguages.value.indexOf(lang)
   if (idx > -1) {
     vodAllowedLanguages.value.splice(idx, 1)
   } else {
     vodAllowedLanguages.value.push(lang)
   }
+}
+
+function setLanguageFilterMode(mode) {
+  vodFilterMode.value = mode
+  if (mode === 'disabled') {
+    vodAllowedLanguages.value = [...vodLanguages.value]
+  }
+}
+
+function isLanguageSelected(lang) {
+  return vodFilterMode.value === 'disabled' || vodAllowedLanguages.value.includes(lang)
+}
+
+function toggleGenre(genre) {
+  if (vodGenreFilterMode.value === 'disabled') {
+    vodGenreFilterMode.value = 'whitelist'
+    vodAllowedGenres.value = [...vodGenres.value]
+  }
+
+  const idx = vodAllowedGenres.value.indexOf(genre)
+  if (idx > -1) {
+    vodAllowedGenres.value.splice(idx, 1)
+  } else {
+    vodAllowedGenres.value.push(genre)
+  }
+}
+
+function setGenreFilterMode(mode) {
+  vodGenreFilterMode.value = mode
+  if (mode === 'disabled') {
+    vodAllowedGenres.value = [...vodGenres.value]
+  }
+}
+
+function isGenreSelected(genre) {
+  return vodGenreFilterMode.value === 'disabled' || vodAllowedGenres.value.includes(genre)
 }
 
 async function saveVodSettings() {
@@ -454,6 +557,8 @@ async function saveVodSettings() {
       body: JSON.stringify({
         vod_allowed_languages: JSON.stringify(vodAllowedLanguages.value),
         vod_language_filter_mode: vodFilterMode.value,
+        vod_allowed_genres: JSON.stringify(vodAllowedGenres.value),
+        vod_genre_filter_mode: vodGenreFilterMode.value,
         vod_blocked_titles: JSON.stringify(blockedTitles)
       })
     })
@@ -511,6 +616,28 @@ async function syncNfoLanguages() {
   }
 }
 
+async function refreshDetectedGenres() {
+  vodGenreSyncLoading.value = true
+  vodGenreSyncResult.value = ''
+  vodError.value = ''
+  try {
+    const response = await fetch('/api/vod/genres/refresh', { method: 'POST' })
+    const data = await response.json()
+
+    if (data.success) {
+      vodGenreSyncResult.value = data.message
+      await loadVodSettings()
+      setTimeout(() => { vodGenreSyncResult.value = '' }, 5000)
+    } else {
+      throw new Error(data.error || 'Genre refresh failed')
+    }
+  } catch (e) {
+    vodError.value = e.message
+  } finally {
+    vodGenreSyncLoading.value = false
+  }
+}
+
 onMounted(async () => {
   await load()
   await loadProxySettings()
@@ -534,7 +661,7 @@ onMounted(async () => {
       </div>
       <div class="overflow-x-auto w-full md:w-auto pb-2 md:pb-0">
         <div class="flex bg-[#13151f] border border-[#2e3250] rounded-lg p-0.5 shrink-0 min-w-max">
-          <button v-for="t in TABS" :key="t.id" @click="tab = t.id"
+          <button v-for="t in tabs" :key="t.id" @click="tab = t.id"
             :class="['px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap',
               tab === t.id ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'text-slate-400 hover:text-slate-200']">
             {{ t.icon }} {{ t.label }}
@@ -674,11 +801,27 @@ onMounted(async () => {
         <div class="w-9 h-9 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center text-lg shrink-0">⏱️</div>
         <div>
           <h2 class="text-sm font-bold text-slate-100">Stream Buffer</h2>
-          <p class="text-xs text-slate-500">Buffer seconds before streaming to clients (helps with network jitter)</p>
+          <p class="text-xs text-slate-500">Choose how live streams are buffered and re-streamed to clients</p>
         </div>
       </div>
 
       <div class="space-y-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-2">Buffer Engine</label>
+          <select v-model="proxyModeInput"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-sm text-slate-100 focus:outline-none focus:border-indigo-500/50">
+            <option value="m3u4prox">m3u4prox</option>
+            <option value="ffmpeg">ffmpeg</option>
+            <option value="vlc">vlc</option>
+          </select>
+          <div class="mt-2 rounded-xl border border-[#2e3250] bg-[#13151f] p-3 space-y-2 text-[11px] text-slate-500">
+            <p><span class="text-slate-300 font-medium">m3u4prox</span> keeps everything in-app. It opens one shared upstream connection and buffers raw stream data for all viewers. This is the lightest option and usually the best default when your source already streams in a client-friendly format.</p>
+            <p><span class="text-slate-300 font-medium">ffmpeg</span> launches ffmpeg against the upstream URL and remuxes the stream to MPEG-TS on stdout. Use this when you need broader format compatibility, cleaner remuxing, or source handling that the in-app buffer does not like. It uses more CPU than m3u4prox but usually less than full transcoding because the default is stream copy.</p>
+            <p><span class="text-slate-300 font-medium">vlc</span> launches <code class="text-slate-400">cvlc</code> as an alternative remux engine. It can behave better on some awkward streams where ffmpeg or the in-app path is fussy, but it is generally more opinionated and noisier in logs. Keep it as a fallback option, not the first pick.</p>
+            <p class="text-slate-600">Rule of thumb: start with <code class="text-slate-400">m3u4prox</code>, move to <code class="text-slate-400">ffmpeg</code> if playback compatibility is bad, and try <code class="text-slate-400">vlc</code> if a source still behaves badly.</p>
+          </div>
+        </div>
+
         <div>
           <label class="block text-xs text-slate-400 mb-2">Buffer Duration (seconds)</label>
           <input v-model.number="proxyBufferInput" type="number" min="0" max="30" step="0.5"
@@ -687,14 +830,25 @@ onMounted(async () => {
         </div>
 
         <div>
-          <label class="flex items-center gap-3 cursor-pointer">
-            <input v-model="proxyRemuxInput" type="checkbox"
-              class="w-4 h-4 rounded border-[#2e3250] bg-[#22263a] text-indigo-500 focus:ring-indigo-500/50">
-            <div>
-              <span class="text-xs text-slate-300 font-medium">FFmpeg Remux Live TV</span>
-              <p class="text-[10px] text-slate-600 mt-0.5">Remux all live TV streams through FFmpeg for better compatibility (may increase CPU usage)</p>
-            </div>
-          </label>
+          <label class="block text-xs text-slate-400 mb-2">ffmpeg Options</label>
+          <textarea v-model="proxyFfmpegOptionsInput" rows="3"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500/50 resize-y"></textarea>
+          <div class="text-[10px] text-slate-600 mt-1.5 space-y-1">
+            <p>Use <code class="text-slate-400">{'{input}'}</code> for the upstream URL and <code class="text-slate-400">{'{output}'}</code> for stdout.</p>
+            <p>The default ffmpeg command hides banner noise, opens the upstream URL directly, maps the first video plus optional audio and subtitle streams, copies codecs without transcoding, minimizes mux latency, and writes MPEG-TS to stdout.</p>
+            <p>In plain English: the default is a low-CPU remux, not a transcode.</p>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs text-slate-400 mb-2">vlc Options</label>
+          <textarea v-model="proxyVlcOptionsInput" rows="3"
+            class="w-full px-4 py-2.5 bg-[#22263a] border border-[#2e3250] rounded-xl text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500/50 resize-y"></textarea>
+          <div class="text-[10px] text-slate-600 mt-1.5 space-y-1">
+            <p>Use <code class="text-slate-400">{'{input}'}</code> for the upstream URL and <code class="text-slate-400">{'{output}'}</code> for stdout. VLC mode needs <code class="text-slate-400">cvlc</code> in the container.</p>
+            <p>The default VLC command opens the upstream URL directly and uses <code class="text-slate-400">--sout</code> to remux the stream to transport stream output on stdout with the dummy interface and quiet logging.</p>
+            <p>In plain English: VLC is being used as a headless remuxer, not a desktop player.</p>
+          </div>
         </div>
 
         <div class="flex items-center gap-3">
@@ -923,7 +1077,8 @@ onMounted(async () => {
             <label class="flex items-center gap-2 cursor-pointer">
               <input
                 type="radio"
-                v-model="vodFilterMode"
+                :checked="vodFilterMode === 'disabled'"
+                @change="setLanguageFilterMode('disabled')"
                 value="disabled"
                 class="w-4 h-4 border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
               />
@@ -932,7 +1087,8 @@ onMounted(async () => {
             <label class="flex items-center gap-2 cursor-pointer">
               <input
                 type="radio"
-                v-model="vodFilterMode"
+                :checked="vodFilterMode === 'whitelist'"
+                @change="setLanguageFilterMode('whitelist')"
                 value="whitelist"
                 class="w-4 h-4 border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
               />
@@ -941,7 +1097,7 @@ onMounted(async () => {
           </div>
 
           <!-- Language Checkboxes -->
-          <div v-if="vodFilterMode === 'whitelist'" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+          <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
             <label
               v-for="lang in vodLanguages"
               :key="lang"
@@ -949,12 +1105,64 @@ onMounted(async () => {
             >
               <input
                 type="checkbox"
-                :checked="vodAllowedLanguages.includes(lang)"
+                :checked="isLanguageSelected(lang)"
                 @change="toggleLanguage(lang)"
                 class="w-4 h-4 rounded border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
               />
               <span class="text-xs text-slate-300 uppercase font-mono">{{ lang }}</span>
               <span v-if="lang === 'eng'" class="text-[10px] text-slate-500">(always)</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <span class="text-sm font-semibold text-slate-100">🎭 Genre Filtering</span>
+            <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
+              Based on movie.nfo / tvshow.nfo genres
+            </span>
+          </div>
+
+          <p class="text-xs text-slate-500 mb-3">
+            Found {{ vodStats.totalChannels.toLocaleString() }} channels with {{ vodStats.withGenreData.toLocaleString() }} having genre data
+          </p>
+
+          <div class="flex items-center gap-3 mb-4">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                :checked="vodGenreFilterMode === 'disabled'"
+                @change="setGenreFilterMode('disabled')"
+                value="disabled"
+                class="w-4 h-4 border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
+              />
+              <span class="text-xs text-slate-300">Include all genres</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                :checked="vodGenreFilterMode === 'whitelist'"
+                @change="setGenreFilterMode('whitelist')"
+                value="whitelist"
+                class="w-4 h-4 border-[#2e3250] bg-[#22263a] text-rose-500 focus:ring-rose-500"
+              />
+              <span class="text-xs text-slate-300">Only include selected genres</span>
+            </label>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-64 overflow-y-auto">
+            <label
+              v-for="genre in vodGenres"
+              :key="genre"
+              class="flex items-center gap-2 p-2 bg-[#22263a] border border-[#2e3250] rounded-lg cursor-pointer hover:border-indigo-500/50 transition-colors"
+            >
+              <input
+                type="checkbox"
+                :checked="isGenreSelected(genre)"
+                @change="toggleGenre(genre)"
+                class="w-4 h-4 rounded border-[#2e3250] bg-[#22263a] text-indigo-500 focus:ring-indigo-500"
+              />
+              <span class="text-xs text-slate-300">{{ genre }}</span>
             </label>
           </div>
         </div>
@@ -966,6 +1174,11 @@ onMounted(async () => {
             <span class="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/20">
               Case-insensitive substring match
             </span>
+          </div>
+
+          <div class="mb-3 space-y-1 text-xs text-slate-500">
+            <p>This list is also updated automatically when STRM export removes titles that are blocked by your current genre or language filters.</p>
+            <p>If you later enable that genre again and want those titles imported back, you must clear them from this blocked list first.</p>
           </div>
 
           <textarea
@@ -1015,8 +1228,8 @@ onMounted(async () => {
         <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold text-slate-100">🔄 Update Languages</p>
-              <p class="text-xs text-slate-500 mt-0.5">Scan all movie.nfo and tvshow.nfo files and update allowed languages in settings</p>
+              <p class="text-sm font-semibold text-slate-100">🔄 Update Detected Metadata</p>
+              <p class="text-xs text-slate-500 mt-0.5">Scan all movie.nfo and tvshow.nfo files and refresh detected languages and genres without changing your selections</p>
             </div>
             <button
               @click="syncNfoLanguages"
@@ -1024,16 +1237,35 @@ onMounted(async () => {
               class="px-4 py-2 text-xs bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-white font-semibold rounded-lg transition-colors flex items-center gap-2 shrink-0"
             >
               <span v-if="vodSyncLoading" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-              <span>🔄 Sync Languages</span>
+              <span>🔄 Sync Metadata</span>
             </button>
           </div>
           <p v-if="vodSyncResult" class="mt-2 text-xs text-emerald-400">✓ {{ vodSyncResult }}</p>
+        </div>
+
+        <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-100">🎭 Refresh Detected Genres</p>
+              <p class="text-xs text-slate-500 mt-0.5">Rebuild detected genres from current VOD source data already stored in the database</p>
+            </div>
+            <button
+              @click="refreshDetectedGenres"
+              :disabled="vodGenreSyncLoading"
+              class="px-4 py-2 text-xs bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold rounded-lg transition-colors flex items-center gap-2 shrink-0"
+            >
+              <span v-if="vodGenreSyncLoading" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+              <span>🎭 Refresh Genres</span>
+            </button>
+          </div>
+          <p v-if="vodGenreSyncResult" class="mt-2 text-xs text-indigo-300">✓ {{ vodGenreSyncResult }}</p>
         </div>
 
         <!-- Info Box -->
         <div class="bg-[#13151f] border border-[#2e3250] rounded-xl p-4 space-y-2 text-xs text-slate-500">
           <p class="font-semibold text-slate-400">How it works</p>
           <p>• Language filtering requires NFO files with audio stream information in your STRM folders.</p>
+          <p>• Genre filtering reads genres from `movie.nfo` and `tvshow.nfo` and only keeps titles matching at least one selected genre.</p>
           <p>• "English (eng)" is always available as a fallback even if no NFO files exist.</p>
           <p>• Blocked title patterns apply during source refresh and STRM export.</p>
           <p>• Changes take effect on the next source refresh or STRM export.</p>
@@ -1231,10 +1463,20 @@ onMounted(async () => {
               </select>
               <span class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] pointer-events-none">▾</span>
             </div>
+            <div class="shrink-0 min-w-40 relative">
+              <select v-model="selectedVpnCountry"
+                class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-cyan-500 appearance-none">
+                <option value="">— Select country —</option>
+                <option v-for="country in vpnCountries" :key="country.code" :value="country.code">
+                  {{ country.label }}
+                </option>
+              </select>
+              <span class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 text-[10px] pointer-events-none">▾</span>
+            </div>
             <div class="flex-1 min-w-48 relative">
               <select v-model="selectedVpnConfig"
                 class="w-full bg-[#22263a] border border-[#2e3250] rounded-lg px-3 py-2 text-xs text-slate-200 outline-none focus:border-cyan-500 appearance-none">
-                <option value="">— Select VPN server —</option>
+                <option value="">— Select VPN file —</option>
                 <option v-for="cfg in filteredVpnConfigs" :key="cfg.path" :value="cfg.path">
                   {{ cfg.name }} ({{ cfg.protocol.toUpperCase() }})
                 </option>
@@ -1250,7 +1492,12 @@ onMounted(async () => {
 
           <p class="text-[10px] text-slate-500 mt-2">
             Protocol: {{ vpnProtocolFilter.toUpperCase() }} ·
+            Country: {{ selectedVpnCountry ? getVpnCountryLabel(selectedVpnCountry) : 'All' }} ·
             Showing {{ filteredVpnConfigs.length }} of {{ vpnConfigs.length }} configs
+          </p>
+
+          <p v-if="currentVpnCountry" class="text-[10px] text-slate-600 mt-1">
+            Current country: {{ getVpnCountryLabel(currentVpnCountry) }}
           </p>
 
           <div v-if="vpnChangeSuccess" class="mt-3 p-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
