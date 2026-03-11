@@ -328,7 +328,7 @@ export async function refreshSourceCache(sourceId) {
       { contentType: 'series', channels: channels.series || [] }
     ]
   } else {
-    channelArrays = [{ contentType: 'vod', channels: channels }]
+    channelArrays = [{ contentType: 'live', channels: channels }]
   }
 
   const vodSettings = getVodSettings()
@@ -686,7 +686,7 @@ export async function refreshSourceCache(sourceId) {
   clearCache()
   invalidateAllPlaylistXmltvCache()
 
-  return rows.length
+  return totalCount
 }
 
 /**
