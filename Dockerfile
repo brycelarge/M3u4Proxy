@@ -37,7 +37,8 @@ RUN apk add --no-cache \
         npm \
         openvpn \
         privoxy \
-        tzdata && \
+        tzdata \
+        vlc && \
     git clone --depth 1 --branch "${OPENVPN_TOOLS_REF}" \
         https://github.com/brycelarge/openvpn-buildtools.git /tmp/openvpn-buildtools && \
     cp -r /tmp/openvpn-buildtools/root/. / && \
