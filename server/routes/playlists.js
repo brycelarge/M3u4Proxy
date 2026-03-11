@@ -565,11 +565,12 @@ router.get('/playlists/:id/m3u', async (req, res) => {
 
 // Per-playlist XMLTV — generates clean feed from playlist channels and their EPG mappings
 router.get('/playlists/:id/xmltv', async (req, res) => {
+  const t0 = Date.now()
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
   if (playlist.playlist_type === 'composite') return res.status(400).json({ error: 'XMLTV not available for composite playlists' })
 
-  // Get all channels with their normalized names and deduplicate
+  // Get all channels — no OR-join on epg_mappings (slow). Apply EPG mapping in JS.
   const allChannels = db.prepare(`
     SELECT pc.*,
            sc.normalized_name,
@@ -580,16 +581,10 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
              WHEN 'HD' THEN 3
              WHEN 'SD' THEN 4
              ELSE 5
-           END as quality_order,
-           CASE
-             WHEN pc.custom_tvg_id != '' THEN pc.custom_tvg_id
-             WHEN em.target_tvg_id IS NOT NULL THEN em.target_tvg_id
-             ELSE pc.tvg_id
-           END as epg_id
+           END as quality_order
     FROM playlist_channels pc
     LEFT JOIN source_channels sc ON sc.url = pc.url
     LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
-    LEFT JOIN epg_mappings em ON (em.source_tvg_id = pc.tvg_id OR em.source_tvg_id = pc.custom_tvg_id)
     WHERE pc.playlist_id = ?
     ORDER BY
       sc.normalized_name,
@@ -598,24 +593,37 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
       pc.sort_order, pc.id
   `).all(playlist.id)
 
-  // For XMLTV, deduplicate by normalized_name only
-  // Keep the first variant (highest priority source, best quality) per normalized name
+  // Load EPG mappings once (small table) and apply in JS — avoids OR-join
+  const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings').all()
+  const epgMap = new Map(epgMappings.map(m => [m.source_tvg_id, m.target_tvg_id]))
+
+  for (const ch of allChannels) {
+    if (ch.custom_tvg_id && ch.custom_tvg_id !== '') {
+      ch.epg_id = ch.custom_tvg_id
+    } else if (ch.tvg_id && epgMap.has(ch.tvg_id)) {
+      ch.epg_id = epgMap.get(ch.tvg_id)
+    } else {
+      ch.epg_id = ch.tvg_id || ''
+    }
+  }
+
+  const t1 = Date.now()
+  console.log(`[xmltv] channels query+epg_map: ${t1 - t0}ms (${allChannels.length} channels)`)
+
+  // Deduplicate by normalized_name
   const seen = new Set()
   const channels = allChannels.filter(ch => {
-    if (!ch.normalized_name) return true // Keep channels without normalized_name
-    const key = ch.normalized_name
-    if (seen.has(key)) return false // Skip duplicates
-    seen.add(key)
+    if (!ch.normalized_name) return true
+    if (seen.has(ch.normalized_name)) return false
+    seen.add(ch.normalized_name)
     return true
   })
 
-  // Re-sort by sort_order after deduplication
   channels.sort((a, b) => {
     if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
     return a.id - b.id
   })
 
-  // Only include channels that have EPG mappings
   const mappedChannels = channels.filter(ch => ch.epg_id && ch.epg_id.trim())
   const compress = req.query.compress === 'true'
 
@@ -628,28 +636,14 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
     return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u4prox"></tv>`)
   }
 
-  const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings ORDER BY source_tvg_id').all()
-  const generateXmltvArgs = { mappedChannels, baseUrl }
-
-  // Fast path: get programmes matching exactly the EPG mapped IDs
-  const wantedIds = new Set(mappedChannels.flatMap(ch => [ch.epg_id, ch.tvg_id, ch.custom_tvg_id]).filter(Boolean))
-  // Target IDs are mapped into wantedIds by the logic in xmltv.js
-
-  // But we can just pass the relevantSourceIds and let xmltv.js do its logic against epg_programmes
-  // Wait, xmltv.js currently does the mapping logic. Let's just fetch the sources so xmltv can query it.
-
   const relevantSourceIds = getRelevantEpgSources(mappedChannels, epgMappings)
-  let programmesCount = 0
-  if (relevantSourceIds.length) {
-    programmesCount = db.prepare(`SELECT COUNT(*) as count FROM epg_programmes WHERE source_id IN (${relevantSourceIds.join(',')})`).get()?.count || 0
-  }
-
-  // We don't fetch cacheRows anymore since we're using the epg_programmes table.
   const cacheRows = relevantSourceIds.length ? relevantSourceIds.map(id => ({ source_id: id, channel_count: 0 })) : []
 
-  const proto = req.headers['x-forwarded-proto'] || req.protocol
-  const host = req.headers['x-forwarded-host'] || req.headers.host
-  const baseUrl = `${proto}://${host}`
+  const proto  = req.headers['x-forwarded-proto'] || req.protocol
+  const host   = req.headers['x-forwarded-host']  || req.headers.host
+  const port   = host?.split(':')[1] || (proto === 'https' ? '443' : '3005')
+  const hostIp = process.env.HOST_IP
+  const baseUrl = hostIp ? `${proto}://${hostIp}:${port}` : `${proto}://${host}`
   const cacheKey = buildPlaylistXmltvSignature(playlist.id, mappedChannels, epgMappings, cacheRows)
   const cached = getPlaylistXmltvCache(playlist.id, cacheKey, compress)
 
@@ -661,8 +655,11 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
     return res.send(cached)
   }
 
+  const t2 = Date.now()
   const { generateXmltv } = await import('../services/xmltv.js')
   const out = generateXmltv(db, mappedChannels, relevantSourceIds, baseUrl)
+  const t3 = Date.now()
+  console.log(`[xmltv] generateXmltv: ${t3 - t2}ms, total: ${t3 - t0}ms`)
   let compressed = null
 
   if (compress) {

@@ -17,7 +17,7 @@
 
 import db from './db.js'
 import { execSync } from 'child_process'
-import { getNfoByTitle } from './nfo-index.js'
+import { getNfoByTitle, getNfoTitleIndex } from './nfo-index.js'
 
 const TMDB_BASE = 'https://api.themoviedb.org/3'
 const TMDB_IMG  = 'https://image.tmdb.org/t/p/w300'
@@ -30,6 +30,13 @@ export const enrichState = {
   enriched:   0,
   skipped:    0,
   log:        [],
+}
+
+// In-memory cache for enrichment maps — invalidated when enrichment completes
+let _enrichmentMapsCache = null
+
+export function invalidateEnrichmentMapsCache() {
+  _enrichmentMapsCache = null
 }
 
 function addLog(msg) {
@@ -381,20 +388,48 @@ export async function enrichGuide(_unused, { onProgress } = {}) {
     throw e
   } finally {
     enrichState.inProgress = false
+    invalidateEnrichmentMapsCache()
   }
 }
 
 // ── XMLTV helpers ─────────────────────────────────────────────────────────────
 export function getEnrichmentMaps() {
-  const showMap = new Map(
-    db.prepare('SELECT title, poster, description FROM tmdb_enrichment WHERE poster IS NOT NULL OR description IS NOT NULL').all()
-      .map(r => [r.title, { poster: r.poster, desc: r.description }])
-  )
-  const epMap = new Map(
-    db.prepare('SELECT show_title, season, episode, poster, description FROM tmdb_episodes').all()
-      .map(r => [`${r.show_title}\\0${r.season}\\0${r.episode}`, { poster: r.poster, desc: r.description }])
-  )
-  return { showMap, epMap }
+  if (_enrichmentMapsCache) return _enrichmentMapsCache
+
+  const showMap = new Map()
+
+  // Primary source: NFO title index built at startup — already in memory, no DB scan needed
+  const nfoTitleIndex = getNfoTitleIndex()
+  if (nfoTitleIndex) {
+    for (const [, nfoData] of nfoTitleIndex) {
+      if (nfoData.title) {
+        showMap.set(nfoData.title, {
+          poster: nfoData.thumb || nfoData.poster || null,
+          desc:   nfoData.plot  || nfoData.desc   || null,
+        })
+      }
+    }
+  }
+
+  // Overlay TMDB enrichment (more curated data) — only scan if table has rows
+  const tmdbCount = db.prepare('SELECT COUNT(*) as c FROM tmdb_enrichment').get().c
+  if (tmdbCount > 0) {
+    for (const r of db.prepare('SELECT title, poster, description FROM tmdb_enrichment WHERE poster IS NOT NULL OR description IS NOT NULL').all()) {
+      showMap.set(r.title, { poster: r.poster, desc: r.description })
+    }
+  }
+
+  // Episode map from TMDB episodes table — only scan if populated
+  const epMap = new Map()
+  const epCount = db.prepare('SELECT COUNT(*) as c FROM tmdb_episodes').get().c
+  if (epCount > 0) {
+    for (const r of db.prepare('SELECT show_title, season, episode, poster, description FROM tmdb_episodes').all()) {
+      epMap.set(`${r.show_title}\\0${r.season}\\0${r.episode}`, { poster: r.poster, desc: r.description })
+    }
+  }
+
+  _enrichmentMapsCache = { showMap, epMap }
+  return _enrichmentMapsCache
 }
 
 export function applyEnrichment(prog, showMap, epMap) {

@@ -155,6 +155,14 @@ export function getNfoByTitle(title) {
 }
 
 /**
+ * Get the full in-memory title index (Map<normalizedTitle, nfoData>)
+ * Returns null if index hasn't been built yet
+ */
+export function getNfoTitleIndex() {
+  return nfoTitleIndexCache
+}
+
+/**
  * Get current index stats
  */
 export function getNfoIndexStats() {
