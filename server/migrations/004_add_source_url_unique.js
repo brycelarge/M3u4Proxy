@@ -21,9 +21,11 @@ export function up(db) {
   `)
 
   // Copy data, keeping only first occurrence of each (source_id, url) pair
+  // Explicitly list columns that definitely exist to avoid "12 columns but 10 values supplied" error
   db.exec(`
-    INSERT INTO source_channels_new
-    SELECT * FROM source_channels
+    INSERT INTO source_channels_new (id, source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name)
+    SELECT id, source_id, tvg_id, tvg_name, tvg_logo, group_title, url, raw_extinf, quality, normalized_name
+    FROM source_channels
     WHERE id IN (
       SELECT MIN(id) FROM source_channels
       GROUP BY source_id, url
