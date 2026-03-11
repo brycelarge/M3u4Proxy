@@ -680,11 +680,11 @@ export function useBrowser() {
 
   // Returns flat array of all selected channel objects across all groups
   async function getAllSelectedChannels() {
-    // If we have cached playlist channels from the selection endpoint, use them directly
-    if (playlistChannelsCache.value.length > 0) {
-      const result = []
-      const seenNormalized = new Map()
+    const result = []
+    const seenNormalized = new Map()
 
+    // 1. First process cached channels (already saved to playlist)
+    if (playlistChannelsCache.value.length > 0) {
       for (const ch of playlistChannelsCache.value) {
         const normalized = ch.normalized_name
         if (normalized) {
@@ -692,7 +692,8 @@ export function useBrowser() {
             seenNormalized.set(normalized, {
               ...ch,
               variantIds: [ch.id],
-              variantCount: 1
+              variantCount: 1,
+              _isCached: true // mark as cached so we know it's already included
             })
           } else {
             const existing = seenNormalized.get(normalized)
@@ -700,18 +701,20 @@ export function useBrowser() {
             existing.variantCount++
           }
         } else {
-          result.push({ ...ch, variantIds: [ch.id], variantCount: 1 })
+          result.push({ ...ch, variantIds: [ch.id], variantCount: 1, _isCached: true })
         }
       }
-
-      result.push(...seenNormalized.values())
-      return result
     }
 
-    // Fallback: fetch channels from backend (for backward compatibility)
-    const result = []
-    const seenNormalized = new Map()
+    // 2. Build a set of ALL IDs we consider "selected" based on selectionMap
+    const selectedIds = new Set()
+    for (const [gName, sel] of Object.entries(selectionMap.value)) {
+      if (sel instanceof Set) {
+        sel.forEach(id => selectedIds.add(id))
+      }
+    }
 
+    // 3. Process live groups to capture newly selected channels not in cache
     for (const g of groups.value) {
       const sel = selectionMap.value[g.name]
       if (!sel || (sel instanceof Set && sel.size === 0)) continue
@@ -728,8 +731,17 @@ export function useBrowser() {
       }
 
       const ids = sel === '__all__' ? new Set(groupChannels.map(c => c.id)) : sel
+
       for (const ch of groupChannels) {
+        // Skip if not selected or if already processed from cache
         if (!ids.has(ch.id)) continue
+        
+        // Check if we already handled this channel from cache (by ID)
+        let alreadyInCache = false
+        if (playlistChannelsCache.value.length > 0) {
+          alreadyInCache = playlistChannelsCache.value.some(cachedCh => cachedCh.id === ch.id)
+        }
+        if (alreadyInCache) continue
 
         const normalized = ch.normalized_name
         if (normalized) {
@@ -742,8 +754,11 @@ export function useBrowser() {
             })
           } else {
             const existing = seenNormalized.get(normalized)
-            existing.variantIds.push(ch.id)
-            existing.variantCount++
+            // If the existing entry was from cache, we might still want to add this ID as a variant
+            if (!existing.variantIds.includes(ch.id)) {
+              existing.variantIds.push(ch.id)
+              existing.variantCount++
+            }
           }
         } else {
           result.push({ ...ch, originalGroup: g.name, variantIds: [ch.id], variantCount: 1 })
