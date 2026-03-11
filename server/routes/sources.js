@@ -2,6 +2,7 @@ import express from 'express'
 import db from '../db.js'
 import { refreshSourceCache } from '../services/sourceManager.js'
 import { getCached, setCache } from '../services/cache.js'
+import { invalidateAllPlaylistXmltvCache, invalidatePlaylistsForSource } from '../services/xmltvCache.js'
 
 const router = express.Router()
 
@@ -39,6 +40,7 @@ router.post('/sources', (req, res) => {
   const result = db.prepare(
     'INSERT INTO sources (name, type, url, username, password, refresh_cron, category, max_streams, force_ts_extension) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, force_ts_extension ? 1 : 0)
+  invalidateAllPlaylistXmltvCache()
   res.json(db.prepare('SELECT * FROM sources WHERE id = ?').get(result.lastInsertRowid))
 })
 
@@ -51,11 +53,13 @@ router.put('/sources/:id', (req, res) => {
   db.prepare(
     'UPDATE sources SET name=?, type=?, url=?, username=?, password=?, refresh_cron=?, category=?, max_streams=?, priority=?, cleanup_rules=?, skip_rules=?, force_ts_extension=? WHERE id=?'
   ).run(name, typ, url, username || null, password || null, refresh_cron || '0 */6 * * *', cat, Number(max_streams) || 0, Number(priority) || 999, cleanupRulesJson, skipRulesJson, force_ts_extension ? 1 : 0, req.params.id)
+  invalidatePlaylistsForSource(req.params.id)
   res.json(db.prepare('SELECT * FROM sources WHERE id = ?').get(req.params.id))
 })
 
 router.delete('/sources/:id', (req, res) => {
   db.prepare('DELETE FROM sources WHERE id = ?').run(req.params.id)
+  invalidatePlaylistsForSource(req.params.id)
   res.json({ ok: true })
 })
 

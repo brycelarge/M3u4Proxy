@@ -31,7 +31,10 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
   // Build channel XML from playlist
   const channels_xml = mappedChannels.map(ch => {
     const displayName = ch.tvg_name || ch.name || 'Unknown'
-    const logo = ch.tvg_logo || ch.custom_logo || ''
+    const channelNumber = Number.isFinite(Number(ch.sort_order)) && Number(ch.sort_order) > 0
+      ? String(ch.sort_order)
+      : ''
+    const logo = ch.custom_logo || ch.tvg_logo || ''
     const groupTitle = ch.group_title || ''
 
     // Use epg_id which is already calculated in the SQL query
@@ -40,6 +43,10 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
 
     let xml = `  <channel id="${escapeXml(channelId)}">`
     xml += `\n    <display-name>${escapeXml(displayName)}</display-name>`
+    if (channelNumber) {
+      xml += `\n    <display-name>${escapeXml(`${channelNumber} ${displayName}`)}</display-name>`
+      xml += `\n    <channel-number>${escapeXml(channelNumber)}</channel-number>`
+    }
     if (logo) {
       // Proxy the logo URL through our server for Plex compatibility
       const proxyLogoUrl = `${hostUrl}/api/logo?url=${encodeURIComponent(logo)}`
@@ -64,8 +71,11 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
   // Load EPG mappings to map source_tvg_id -> target_tvg_id
   const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings').all()
   const sourceToTargetMap = {}
+  const targetToSourceMap = new Map()
   epgMappings.forEach(m => {
     sourceToTargetMap[m.source_tvg_id] = m.target_tvg_id
+    if (!targetToSourceMap.has(m.target_tvg_id)) targetToSourceMap.set(m.target_tvg_id, [])
+    targetToSourceMap.get(m.target_tvg_id).push(m.source_tvg_id)
   })
 
   // Build set of wanted channel IDs - include source_tvg_id, target_tvg_id, and custom_tvg_id
@@ -103,13 +113,12 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
       idToEpgId[ch.tvg_id] = finalEpgId
     }
 
-    // Also check if any source_tvg_id maps to this channel's final epg_id
-    Object.entries(sourceToTargetMap).forEach(([sourceId, targetId]) => {
-      if (targetId === finalEpgId || targetId === ch.tvg_id || targetId === ch.custom_tvg_id) {
+    for (const targetId of [finalEpgId, ch.tvg_id, ch.custom_tvg_id].filter(Boolean)) {
+      for (const sourceId of targetToSourceMap.get(targetId) || []) {
         wantedIds.add(sourceId)
         idToEpgId[sourceId] = finalEpgId
       }
-    })
+    }
   })
 
   // Get TMDB enrichment data

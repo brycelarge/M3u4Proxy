@@ -265,7 +265,22 @@ function bestSuggestion(m) {
   return m.suggestions[0] || null
 }
 function epgLogo(m) {
-  return m.exact_match?.icon || m.suggestions[0]?.icon || null
+  let logo = m.exact_match?.icon || m.exact_match?.logo || m.mapped_channel?.icon || m.mapped_channel?.logo || m.suggestions[0]?.icon || m.suggestions[0]?.logo || null
+  if (!logo) return null
+
+  // If logo is already a proxied URL (http://localhost:3005/api/logo?url=...), extract the original URL
+  if (logo.includes('/api/logo?url=')) {
+    const match = logo.match(/[?&]url=([^&]+)/)
+    if (match) {
+      try {
+        logo = decodeURIComponent(match[1])
+      } catch (e) {
+        // If decode fails, use as-is
+      }
+    }
+  }
+
+  return logo
 }
 
 async function setLogo(m, logo) {
@@ -790,7 +805,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
                       @click="setLogo(m, epgLogo(m))"
                       :class="['w-7 h-7 flex items-center justify-center rounded border transition-all',
                         m.custom_logo === epgLogo(m) ? 'border-emerald-500 ring-1 ring-emerald-500/50' : 'border-transparent opacity-40 hover:opacity-80']">
-                      <img :src="epgLogo(m)"
+                      <img :src="`/api/logo?url=${encodeURIComponent(epgLogo(m))}`"
                         class="max-w-6 max-h-6 object-contain rounded"
                         @error="e => e.target.style.display='none'" />
                     </button>
@@ -1115,7 +1130,7 @@ onUnmounted(() => { if (enrichPoller) clearInterval(enrichPoller) })
               <button v-for="ch in editResults" :key="ch.id"
                 @click="pickEpgChannel(ch)"
                 class="w-full flex items-center gap-3 px-5 py-3 hover:bg-[#22263a] transition-colors text-left">
-                <img v-if="ch.icon" :src="ch.icon" class="w-7 h-7 object-contain rounded shrink-0" @error="e => e.target.style.display='none'" />
+                <img v-if="ch.logo" :src="ch.logo" class="w-7 h-7 object-contain rounded shrink-0" @error="e => e.target.style.display='none'" />
                 <div v-else class="w-7 h-7 rounded bg-[#22263a] shrink-0"></div>
                 <div class="flex-1 min-w-0">
                   <p class="text-sm text-slate-200 truncate">{{ ch.name }}</p>

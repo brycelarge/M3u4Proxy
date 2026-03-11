@@ -4,6 +4,7 @@ import { GUIDE_XML } from '../epgGrab.js'
 import { fetchAndParseM3U, fetchXtreamChannels, shouldSkipByRules } from '../m3uBuilder.js'
 import { clearCache } from './cache.js'
 import { getVodSettings } from '../routes/settings.js'
+import { invalidateAllPlaylistXmltvCache, invalidatePlaylistsForSource } from './xmltvCache.js'
 
 const DEFAULT_DETECTED_GENRES = ['Action', 'Comedy', 'Drama', 'Documentary', 'Horror', 'Romance', 'Sci-Fi', 'Thriller']
 const EVENT_LOOP_YIELD_INTERVAL = 250
@@ -221,6 +222,7 @@ export async function refreshSourceCache(sourceId) {
     `).run(source.id, content, channelCount)
     db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(source.id)
     console.log(`[source] Refreshed EPG "${source.name}" — ${channelCount} channels`)
+    invalidatePlaylistsForSource(source.id)
 
     // Clear channel cache to prevent stale group/channel data
     clearCache()
@@ -639,8 +641,9 @@ export async function refreshSourceCache(sourceId) {
 
   // Clear channel cache to prevent stale group/channel data
   clearCache()
+  invalidateAllPlaylistXmltvCache()
 
-  return totalCount
+  return rows.length
 }
 
 /**

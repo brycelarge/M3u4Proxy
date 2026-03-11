@@ -15,7 +15,6 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from '
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SITES_DIR } from './epgSync.js'
-import { enrichGuide } from './epgEnrich.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -89,9 +88,34 @@ function buildSiteChannelsXml(channels) {
     const attrs = [`site_id="${ch.site_id}"`]
     if (ch.xmltv_id) attrs.push(`xmltv_id="${ch.xmltv_id}"`)
     if (ch.lang) attrs.push(`lang="${ch.lang}"`)
+    if (ch.logo) attrs.push(`logo="${String(ch.logo).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`)
     return `  <channel ${attrs.join(' ')}>${ch.name}</channel>`
   })
   return `<?xml version="1.0" encoding="UTF-8"?>\n<channels site="${site}">\n${lines.join('\n')}\n</channels>\n`
+}
+
+function escapeXml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function injectChannelIcons(xml, channelLogoMap) {
+  return xml.replace(/<channel\b([^>]*)>([\s\S]*?)<\/channel>/g, (full, attrs, body) => {
+    const idMatch = attrs.match(/\bid="([^"]*)"/)
+    const channelId = idMatch?.[1] || ''
+    const logoUrl = channelLogoMap.get(channelId)
+
+    if (!channelId || !logoUrl || /<icon\b/i.test(body)) {
+      return full
+    }
+
+    const iconXml = `\n    <icon src="${escapeXml(logoUrl)}" />`
+    return `<channel${attrs}>${body}${iconXml}\n  </channel>`
+  })
 }
 
 // ── Spawn epg-grabber CLI for one site ────────────────────────────────────────
@@ -138,7 +162,7 @@ function spawnGrabber(configPath, channelsFile, outputFile, onLine) {
 }
 
 // ── Merge XMLTV files ─────────────────────────────────────────────────────────
-function mergeXmltvFiles(files, preserveExisting = false) {
+function mergeXmltvFiles(files, channelLogoMap, preserveExisting = false) {
   const seenChannels = new Set()
   const channelBlocks = []
   const programmeBlocks = []
@@ -162,7 +186,7 @@ function mergeXmltvFiles(files, preserveExisting = false) {
         const id = idMatch?.[1]
         if (id && !seenChannels.has(id)) {
           seenChannels.add(id)
-          channelBlocks.push(m[0])
+          channelBlocks.push(injectChannelIcons(m[0], channelLogoMap))
         }
       }
 
@@ -198,7 +222,7 @@ function mergeXmltvFiles(files, preserveExisting = false) {
       const id = idMatch?.[1]
       if (id && !seenChannels.has(id)) {
         seenChannels.add(id)
-        channelBlocks.push(m[0])
+        channelBlocks.push(injectChannelIcons(m[0], channelLogoMap))
       }
     }
 
@@ -260,12 +284,20 @@ export async function runGrab({ onProgress } = {}) {
     mkdirSync(tmpDir, { recursive: true })
 
     const outputFiles = []
+    const channelLogoMap = new Map()
+
+    for (const ch of allChannels) {
+      const channelId = ch.xmltv_id || ch.site_id
+      if (channelId && ch.logo && !channelLogoMap.has(channelId)) {
+        channelLogoMap.set(channelId, ch.logo)
+      }
+    }
 
     // Write a partial guide.xml from whatever output files exist so far
     const flushGuide = () => {
       if (!outputFiles.length) return
       try {
-        const merged = mergeXmltvFiles(outputFiles, true) // Preserve existing data
+        const merged = mergeXmltvFiles(outputFiles, channelLogoMap, true) // Preserve existing data
         writeFileSync(GUIDE_XML, merged, 'utf8')
         grabState.guideExists = true
         grabState.guideUrl    = '/guide.xml'
@@ -321,7 +353,7 @@ export async function runGrab({ onProgress } = {}) {
 
     // Final merge (deduplicates across all sites and preserves existing data)
     log(`Finalising guide.xml from ${outputFiles.length} sites…`)
-    const merged = mergeXmltvFiles(outputFiles, true) // Preserve existing data
+    const merged = mergeXmltvFiles(outputFiles, channelLogoMap, true) // Preserve existing data
     writeFileSync(GUIDE_XML, merged, 'utf8')
 
     // Clean up tmp files
@@ -333,10 +365,6 @@ export async function runGrab({ onProgress } = {}) {
     const chanCount = (merged.match(/<channel\b/g) || []).length
     const progCount = (merged.match(/<programme\b/g) || []).length
     log(`guide.xml: ${chanCount} channels, ${progCount} programmes.`)
-
-    // TMDB enrichment disabled - only runs via cron schedule or manual trigger
-    // log(`Running TMDB enrichment…`)
-    // await enrichGuide(GUIDE_XML, log)
 
     grabState.lastFinished = new Date().toISOString()
     return { ok: true, channels: chanCount, programmes: progCount }

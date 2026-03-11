@@ -54,6 +54,7 @@ function parseChannelsXml(xml, site, filename) {
       site_id:  get('site_id'),
       xmltv_id: get('xmltv_id'),
       lang:     get('lang') || 'en',
+      logo:     get('logo') || '',
       file:     filename,
     })
   }
@@ -194,14 +195,14 @@ export async function syncEpgSites(db, { onProgress } = {}) {
   // Bulk insert into DB in a transaction
   const deleteAll = db.prepare('DELETE FROM epg_site_channels')
   const insert    = db.prepare(
-    'INSERT INTO epg_site_channels (site, name, site_id, xmltv_id, lang, file) VALUES (?, ?, ?, ?, ?, ?)'
+    'INSERT INTO epg_site_channels (site, name, site_id, xmltv_id, lang, logo, file) VALUES (?, ?, ?, ?, ?, ?, ?)'
   )
   const upsertMeta = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('epg_sites_last_synced', ?)")
 
   const bulkInsert = db.transaction((rows) => {
     deleteAll.run()
     for (const ch of rows) {
-      insert.run(ch.site, ch.name, ch.site_id, ch.xmltv_id, ch.lang, ch.file)
+      insert.run(ch.site, ch.name, ch.site_id, ch.xmltv_id, ch.lang, ch.logo || '', ch.file)
     }
     upsertMeta.run(new Date().toISOString())
   })

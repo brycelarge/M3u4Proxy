@@ -5,6 +5,10 @@ import db from '../db.js'
 import { GUIDE_XML, EPG_DIR, runGrab, grabState } from '../epgGrab.js'
 import { syncEpgSites, getLastSynced, getSiteList } from '../epgSync.js'
 import { enrichGuide, enrichState } from '../epgEnrich.js'
+import {
+  invalidatePlaylistXmltvCache,
+  invalidateAllPlaylistXmltvCache,
+} from '../services/xmltvCache.js'
 
 const CHANNELS_XML = path.join(EPG_DIR, 'channels.xml')
 
@@ -21,11 +25,13 @@ router.post('/epg-mappings', (req, res) => {
   const result = db.prepare(
     'INSERT OR REPLACE INTO epg_mappings (source_tvg_id, target_tvg_id, note) VALUES (?, ?, ?)'
   ).run(source_tvg_id, target_tvg_id, note || null)
+  invalidateAllPlaylistXmltvCache()
   res.json(db.prepare('SELECT * FROM epg_mappings WHERE id = ?').get(result.lastInsertRowid))
 })
 
 router.delete('/epg-mappings/:id', (req, res) => {
   db.prepare('DELETE FROM epg_mappings WHERE id = ?').run(req.params.id)
+  invalidateAllPlaylistXmltvCache()
   res.json({ ok: true })
 })
 
@@ -43,6 +49,7 @@ router.delete('/epg-mappings/by-playlist/:playlist_id', (req, res) => {
     db.prepare('UPDATE playlist_channels SET custom_tvg_id = NULL WHERE playlist_id = ?').run(req.params.playlist_id)
   })
   del()
+  invalidatePlaylistXmltvCache(req.params.playlist_id)
   res.json({ ok: true, cleared: tvgIds.length })
 })
 
@@ -304,6 +311,12 @@ router.get('/epg-mappings/auto-match', (req, res) => {
       // Get variants from pre-fetched map
       const variants = variantsMap.get(ch.id) || []
 
+      // For mapped channels, fetch the full EPG channel object (with logo)
+      let mappedChannel = null
+      if (alreadyMapped) {
+        mappedChannel = epgById.get(alreadyMapped) || null
+      }
+
       matches.push({
         channel_id:    ch.id,
         tvg_id:        effectiveId,
@@ -312,6 +325,7 @@ router.get('/epg-mappings/auto-match', (req, res) => {
         custom_logo:   ch.custom_logo || null,
         sort_order:    ch.sort_order || null,
         mapped_to:     alreadyMapped || null,
+        mapped_channel: mappedChannel,
         exact_match:   exactMatch || null,
         suggestions:   scored,
         epg_source_id: ch.epg_source_id || null,
@@ -340,6 +354,7 @@ router.post('/epg-mappings/bulk', (req, res) => {
   const valid = mappings.filter(r => r.source_tvg_id && r.source_tvg_id.trim())
   const insertAll = db.transaction((rows) => { for (const r of rows) insert.run(r.source_tvg_id, r.target_tvg_id, r.note || 'auto-matched') })
   insertAll(valid)
+  invalidateAllPlaylistXmltvCache()
   res.json({ ok: true, count: valid.length })
 })
 
@@ -459,6 +474,72 @@ router.get('/epg/selected', (req, res) => {
   res.json(rows)
 })
 
+// Update logo for a specific EPG site channel
+router.patch('/sites/:site/channels/:site_id/logo', (req, res) => {
+  const { site, site_id } = req.params
+  const { logo } = req.body
+
+  if (typeof logo !== 'string') {
+    return res.status(400).json({ error: 'logo must be a string (URL or empty string)' })
+  }
+
+  const result = db.prepare(`
+    UPDATE epg_site_channels
+    SET logo = ?
+    WHERE site = ? AND site_id = ?
+  `).run(logo, site, site_id)
+
+  if (result.changes === 0) {
+    return res.status(404).json({ error: 'Channel not found' })
+  }
+
+  // Also update in selected channels if present
+  db.prepare(`
+    UPDATE epg_selected_channels
+    SET logo = ?
+    WHERE site = ? AND site_id = ?
+  `).run(logo, site, site_id)
+
+  res.json({ ok: true, updated: result.changes })
+})
+
+// Bulk update logos for multiple channels
+router.post('/logos/bulk', (req, res) => {
+  const { updates } = req.body // [{ site, site_id, logo }, ...]
+
+  if (!Array.isArray(updates)) {
+    return res.status(400).json({ error: 'updates must be an array' })
+  }
+
+  const updateSite = db.prepare(`
+    UPDATE epg_site_channels
+    SET logo = ?
+    WHERE site = ? AND site_id = ?
+  `)
+
+  const updateSelected = db.prepare(`
+    UPDATE epg_selected_channels
+    SET logo = ?
+    WHERE site = ? AND site_id = ?
+  `)
+
+  const transaction = db.transaction(() => {
+    let count = 0
+    for (const { site, site_id, logo } of updates) {
+      if (!site || !site_id || typeof logo !== 'string') continue
+      const result = updateSite.run(logo, site, site_id)
+      if (result.changes > 0) {
+        count++
+        updateSelected.run(logo, site, site_id)
+      }
+    }
+    return count
+  })
+
+  const updated = transaction()
+  res.json({ ok: true, updated })
+})
+
 // Trigger EPG grab
 router.post('/epg/grab', async (req, res) => {
   if (grabState.running) return res.json({ ok: true, already: true, message: 'Grab already in progress' })
@@ -520,10 +601,32 @@ router.put('/epg/channels-xml', (req, res) => {
       const ins = db.prepare(
         'INSERT INTO epg_selected_channels (site, site_id, name, xmltv_id, lang, logo, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime(\'now\'))'
       )
+      const getLogo = db.prepare('SELECT logo FROM epg_site_channels WHERE site = ? AND site_id = ?')
+
       const save = db.transaction(() => {
         del.run()
         for (const ch of channels) {
-          ins.run(ch.site, ch.site_id, ch.name, ch.xmltv_id, ch.lang || 'en', ch.logo || '')
+          let site = ch.site || ''
+          let logo = ch.logo || ''
+
+          // If site is empty, try to infer it from site_id pattern (e.g., "zaf#210" -> "dstv.com")
+          if (!site && ch.site_id) {
+            const siteChannel = db.prepare('SELECT site, logo FROM epg_site_channels WHERE site_id = ? LIMIT 1').get(ch.site_id)
+            if (siteChannel) {
+              site = siteChannel.site
+              if (!logo && siteChannel.logo) {
+                logo = siteChannel.logo
+              }
+            }
+          } else if (!logo && site && ch.site_id) {
+            // If we have site but no logo, fetch logo
+            const siteChannel = getLogo.get(site, ch.site_id)
+            if (siteChannel?.logo) {
+              logo = siteChannel.logo
+            }
+          }
+
+          ins.run(site, ch.site_id, ch.name, ch.xmltv_id, ch.lang || 'en', logo)
         }
       })
       save()

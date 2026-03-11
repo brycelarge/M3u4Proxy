@@ -1,11 +1,91 @@
 import express from 'express'
 import cron from 'node-cron'
 import { existsSync, readFileSync } from 'node:fs'
+import crypto from 'node:crypto'
 import db from '../db.js'
 import { buildM3U, writeM3U } from '../m3uBuilder.js'
 import { GUIDE_XML } from '../epgGrab.js'
+import {
+  getPlaylistXmltvCache,
+  setPlaylistXmltvCache,
+  getPlaylistXmltvCacheMeta,
+  invalidatePlaylistXmltvCache,
+} from '../services/xmltvCache.js'
 
 const router = express.Router()
+
+function buildPlaylistXmltvSignature(playlistId, channels, epgMappings, cacheRows) {
+  const payload = {
+    playlistId: Number(playlistId),
+    channels: channels.map(ch => ({
+      id: ch.id,
+      tvg_id: ch.tvg_id || '',
+      custom_tvg_id: ch.custom_tvg_id || '',
+      tvg_name: ch.tvg_name || '',
+      tvg_logo: ch.tvg_logo || '',
+      custom_logo: ch.custom_logo || '',
+      group_title: ch.group_title || '',
+      sort_order: ch.sort_order ?? null,
+      epg_source_id: ch.epg_source_id ?? null,
+      source_id: ch.source_id ?? null,
+      url: ch.url || '',
+      epg_id: ch.epg_id || '',
+    })),
+    mappings: epgMappings.map(row => `${row.source_tvg_id}->${row.target_tvg_id}`),
+    cacheRows: cacheRows.map(row => ({
+      source_id: row.source_id,
+      last_fetched: row.last_fetched || '',
+      channel_count: row.channel_count || 0,
+      content_len: row.content_len || 0,
+    })),
+  }
+
+  return crypto.createHash('sha1').update(JSON.stringify(payload)).digest('hex')
+}
+
+function getRelevantEpgSources(channels, epgMappings) {
+  const explicitSourceIds = new Set(
+    channels
+      .map(ch => ch.epg_source_id ? Number(ch.epg_source_id) : null)
+      .filter(Number.isFinite)
+  )
+
+  if (explicitSourceIds.size) return [...explicitSourceIds]
+
+  const localGuideSource = db.prepare(`
+    SELECT id
+    FROM sources
+    WHERE category = 'epg'
+      AND (
+        name = 'EPG Grabber (guide.xml)'
+        OR url LIKE '%/guide.xml'
+      )
+    ORDER BY id DESC
+    LIMIT 1
+  `).get()
+
+  if (localGuideSource) {
+    return [localGuideSource.id]
+  }
+
+  const allCachedSourceIds = db.prepare(`
+    SELECT source_id
+    FROM epg_cache
+    WHERE content IS NOT NULL
+    ORDER BY last_fetched DESC
+  `).all().map(r => r.source_id)
+
+  if (allCachedSourceIds.length === 1) return allCachedSourceIds
+
+  const mappedSourceIds = new Set(
+    epgMappings
+      .filter(row => channels.some(ch => ch.tvg_id === row.source_tvg_id || ch.custom_tvg_id === row.source_tvg_id))
+      .map(() => localGuideSource?.id)
+      .filter(Number.isFinite)
+  )
+
+  return mappedSourceIds.size ? [...mappedSourceIds] : allCachedSourceIds
+}
 
 // ── Playlists ─────────────────────────────────────────────────────────────────
 router.get('/playlists', (req, res) => {
@@ -64,11 +144,13 @@ router.put('/playlists/:id', (req, res) => {
   db.prepare(
     'UPDATE playlists SET name=?, source_id=?, output_path=?, schedule=?, playlist_type=? WHERE id=?'
   ).run(name, source_id || null, output_path || null, schedule || '0 */6 * * *', playlist_type || 'live', req.params.id)
+  invalidatePlaylistXmltvCache(req.params.id)
   res.json(db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id))
 })
 
 router.delete('/playlists/:id', (req, res) => {
   db.prepare('DELETE FROM playlists WHERE id = ?').run(req.params.id)
+  invalidatePlaylistXmltvCache(req.params.id)
   res.json({ ok: true })
 })
 
@@ -236,6 +318,7 @@ router.put('/playlists/:id/channels', (req, res) => {
     })
   })
   replaceAll(req.params.id, channels)
+  invalidatePlaylistXmltvCache(req.params.id)
   res.json({ ok: true, count: channels.length })
 })
 
@@ -302,6 +385,7 @@ router.put('/playlists/:id/channels-by-groups', (req, res) => {
   })
 
   const count = replaceAll(req.params.id)
+  invalidatePlaylistXmltvCache(req.params.id)
   res.json({ ok: true, count })
 })
 
@@ -321,6 +405,7 @@ router.put('/playlists/:id/group-order', (req, res) => {
   const { order } = req.body
   if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be array' })
   db.prepare('UPDATE playlists SET group_order = ? WHERE id = ?').run(JSON.stringify(order), req.params.id)
+  invalidatePlaylistXmltvCache(req.params.id)
   res.json({ ok: true })
 })
 
@@ -532,37 +617,58 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
 
   // Only include channels that have EPG mappings
   const mappedChannels = channels.filter(ch => ch.epg_id && ch.epg_id.trim())
-
-  if (!mappedChannels.length) {
-    res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-    return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u-manager"></tv>`)
-  }
-
-  // Get EPG data for mapped channels
-  const cacheRows = db.prepare(`
-    SELECT content FROM epg_cache WHERE content IS NOT NULL
-  `).all()
-
-  const proto   = req.headers['x-forwarded-proto'] || req.protocol
-  const host    = req.headers['x-forwarded-host']  || req.headers.host
-  const baseUrl = `${proto}://${host}`
-
-  const { generateXmltv } = await import('../services/xmltv.js')
-  const out = generateXmltv(db, mappedChannels, cacheRows, baseUrl)
-
-  // Support gzip compression via query param ?compress=true
-  // Use Content-Encoding for transparent compression (client auto-decompresses)
   const compress = req.query.compress === 'true'
 
   res.setHeader('Content-Type', 'application/xml; charset=utf-8')
   res.setHeader('Cache-Control', 'public, max-age=3600')
 
+  if (!mappedChannels.length) {
+    res.setHeader('X-XMLTV-Cache', 'MISS')
+    res.setHeader('X-XMLTV-Sources', '0')
+    return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u-manager"></tv>`)
+  }
+
+  const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings ORDER BY source_tvg_id').all()
+  const relevantSourceIds = getRelevantEpgSources(mappedChannels, epgMappings)
+  const cacheRows = relevantSourceIds.length
+    ? db.prepare(`
+        SELECT source_id, content, channel_count, last_fetched, length(content) AS content_len
+        FROM epg_cache
+        WHERE content IS NOT NULL AND source_id IN (${relevantSourceIds.map(() => '?').join(',')})
+        ORDER BY last_fetched DESC
+      `).all(...relevantSourceIds)
+    : []
+
+  const proto   = req.headers['x-forwarded-proto'] || req.protocol
+  const host    = req.headers['x-forwarded-host']  || req.headers.host
+  const baseUrl = `${proto}://${host}`
+  const cacheKey = buildPlaylistXmltvSignature(playlist.id, mappedChannels, epgMappings, cacheRows)
+  const cached = getPlaylistXmltvCache(playlist.id, cacheKey, compress)
+
+  if (cached) {
+    const meta = getPlaylistXmltvCacheMeta(playlist.id)
+    res.setHeader('X-XMLTV-Cache', 'HIT')
+    res.setHeader('X-XMLTV-Sources', String(meta?.sourceIds?.length || 0))
+    if (compress) res.setHeader('Content-Encoding', 'gzip')
+    return res.send(cached)
+  }
+
+  const { generateXmltv } = await import('../services/xmltv.js')
+  const out = generateXmltv(db, mappedChannels, cacheRows, baseUrl)
+  let compressed = null
+
   if (compress) {
     const { gzipSync } = await import('node:zlib')
-    const compressed = gzipSync(Buffer.from(out))
+    compressed = gzipSync(Buffer.from(out))
     res.setHeader('Content-Encoding', 'gzip')
+    setPlaylistXmltvCache(playlist.id, cacheKey, out, compressed, cacheRows.map(r => r.source_id))
+    res.setHeader('X-XMLTV-Cache', 'MISS')
+    res.setHeader('X-XMLTV-Sources', String(cacheRows.length))
     res.send(compressed)
   } else {
+    setPlaylistXmltvCache(playlist.id, cacheKey, out, compressed, cacheRows.map(r => r.source_id))
+    res.setHeader('X-XMLTV-Cache', 'MISS')
+    res.setHeader('X-XMLTV-Sources', String(cacheRows.length))
     res.send(out)
   }
 })

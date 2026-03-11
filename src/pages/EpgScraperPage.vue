@@ -248,7 +248,7 @@ async function saveAsEpgSource() {
 async function loadSavedSelections() {
   loadingSelections.value = true
   try {
-    const saved = await api.get('/api/epg/selected-channels')
+    const saved = await api.get('/epg/selected-channels')
     if (Array.isArray(saved) && saved.length > 0) {
       selectedChannels.value = saved
     }
@@ -311,6 +311,12 @@ function buildXml() {
       const xmltv_id = autoXmltvId(ch)
       const attrs = [`site_id="${ch.site_id}"`, `xmltv_id="${xmltv_id}"`]
       if (ch.lang) attrs.push(`lang="${ch.lang}"`)
+      if (ch.logo) {
+        console.log('Channel has logo:', ch.name, ch.logo.substring(0, 50))
+        attrs.push(`logo="${ch.logo.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`)
+      } else {
+        console.log('Channel missing logo:', ch.name, ch)
+      }
       lines.push(`  <channel ${attrs.join(' ')}>${ch.name}</channel>`)
     }
     lines.push('</channels>')
