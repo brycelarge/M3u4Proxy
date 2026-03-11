@@ -19,12 +19,12 @@ import { SITES_DIR } from './epgSync.js'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const DATA_DIR = process.env.DATA_DIR || '/data'
-export const EPG_DIR   = path.join(DATA_DIR, 'epg')
+export const EPG_DIR = path.join(DATA_DIR, 'epg')
 export const GUIDE_XML = path.join(EPG_DIR, 'guide.xml')
-const CHANNELS_XML     = path.join(EPG_DIR, 'channels.xml')
-const GRAB_DAYS        = parseInt(process.env.EPG_GRAB_DAYS        || '3')
-const GRAB_DELAY       = parseInt(process.env.EPG_GRAB_DELAY       || '500')
-const GRAB_TIMEOUT     = parseInt(process.env.EPG_GRAB_TIMEOUT     || '15000')
+const CHANNELS_XML = path.join(EPG_DIR, 'channels.xml')
+const GRAB_DAYS = parseInt(process.env.EPG_GRAB_DAYS || '3')
+const GRAB_DELAY = parseInt(process.env.EPG_GRAB_DELAY || '500')
+const GRAB_TIMEOUT = parseInt(process.env.EPG_GRAB_TIMEOUT || '15000')
 const GRAB_CONNECTIONS = parseInt(process.env.EPG_GRAB_CONNECTIONS || '4')
 
 // Path to the epg-grabber CLI binary
@@ -32,14 +32,14 @@ const EPG_GRABBER_BIN = path.join(__dirname, '..', 'node_modules', '.bin', 'epg-
 
 // ── State ─────────────────────────────────────────────────────────────────────
 export const grabState = {
-  inProgress:   false,
-  lastStarted:  null,
+  inProgress: false,
+  lastStarted: null,
   lastFinished: null,
-  lastError:    null,
-  guideExists:  false,
-  guideUrl:     null,
-  progress:     { done: 0, total: 0, site: '' },
-  log:          [],
+  lastError: null,
+  guideExists: false,
+  guideUrl: null,
+  progress: { done: 0, total: 0, site: '' },
+  log: [],
 }
 
 function addLog(msg) {
@@ -60,8 +60,8 @@ function parseChannelsXml(xml) {
   let m
   while ((m = channelRe.exec(xml)) !== null) {
     const attrs = m[1]
-    const name  = m[2].trim()
-    const get   = (a) => { const r = new RegExp(`${a}="([^"]*)"`) ; return (attrs.match(r) || [])[1] || '' }
+    const name = m[2].trim()
+    const get = (a) => { const r = new RegExp(`${a}="([^"]*)"`); return (attrs.match(r) || [])[1] || '' }
 
     const site_id = get('site_id')
     if (site_id && name) {
@@ -122,12 +122,12 @@ function injectChannelIcons(xml, channelLogoMap) {
 function spawnGrabber(configPath, channelsFile, outputFile, onLine) {
   return new Promise((resolve) => {
     const args = [
-      '--config',          configPath,
-      '--channels',        channelsFile,
-      '--output',          outputFile,
-      '--days',            String(GRAB_DAYS),
-      '--delay',           String(GRAB_DELAY),
-      '--timeout',         String(GRAB_TIMEOUT),
+      '--config', configPath,
+      '--channels', channelsFile,
+      '--output', outputFile,
+      '--days', String(GRAB_DAYS),
+      '--delay', String(GRAB_DELAY),
+      '--timeout', String(GRAB_TIMEOUT),
       '--max-connections', String(GRAB_CONNECTIONS),
     ]
 
@@ -156,7 +156,7 @@ function spawnGrabber(configPath, channelsFile, outputFile, onLine) {
     proc.on('error', (err) => { onLine(err.message); resolve({ code: -1 }) })
 
     // Safety timeout — 30 min per site (large sites can have hundreds of channels × days)
-    const killer = setTimeout(() => { try { proc.kill('SIGTERM') } catch {} }, 30 * 60 * 1000)
+    const killer = setTimeout(() => { try { proc.kill('SIGTERM') } catch { } }, 30 * 60 * 1000)
     proc.on('close', () => clearTimeout(killer))
   })
 }
@@ -197,7 +197,7 @@ function mergeXmltvFiles(files, channelLogoMap, preserveExisting = false) {
         if (stopMatch) {
           const stopTime = stopMatch[1].replace(/\s.*/, '')
           const stopDate = new Date(
-            `${stopTime.slice(0,4)}-${stopTime.slice(4,6)}-${stopTime.slice(6,8)}T${stopTime.slice(8,10)}:${stopTime.slice(10,12)}:${stopTime.slice(12,14)}Z`
+            `${stopTime.slice(0, 4)}-${stopTime.slice(4, 6)}-${stopTime.slice(6, 8)}T${stopTime.slice(8, 10)}:${stopTime.slice(10, 12)}:${stopTime.slice(12, 14)}Z`
           )
           // Keep programmes that ended after 11pm yesterday
           if (stopDate >= yesterday) {
@@ -236,7 +236,7 @@ function mergeXmltvFiles(files, channelLogoMap, preserveExisting = false) {
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<!DOCTYPE tv SYSTEM "xmltv.dtd">\n` +
-    `<tv generator-info-name="m3u-manager">\n` +
+    `<tv generator-info-name="m3u4prox">\n` +
     channelBlocks.join('\n') + '\n' +
     programmeBlocks.join('\n') + '\n' +
     `</tv>\n`
@@ -247,11 +247,11 @@ function mergeXmltvFiles(files, channelLogoMap, preserveExisting = false) {
 export async function runGrab({ onProgress } = {}) {
   if (grabState.inProgress) return { already: true }
 
-  grabState.inProgress  = true
+  grabState.inProgress = true
   grabState.lastStarted = new Date().toISOString()
-  grabState.lastError   = null
-  grabState.log         = []
-  grabState.progress    = { done: 0, total: 0, site: '' }
+  grabState.lastError = null
+  grabState.log = []
+  grabState.progress = { done: 0, total: 0, site: '' }
 
   const log = (msg) => { addLog(msg); onProgress?.(msg) }
 
@@ -300,12 +300,12 @@ export async function runGrab({ onProgress } = {}) {
         const merged = mergeXmltvFiles(outputFiles, channelLogoMap, true) // Preserve existing data
         writeFileSync(GUIDE_XML, merged, 'utf8')
         grabState.guideExists = true
-        grabState.guideUrl    = '/guide.xml'
+        grabState.guideUrl = '/guide.xml'
         const ch = (merged.match(/<channel\b/g) || []).length
         const pr = (merged.match(/<programme\b/g) || []).length
-        grabState.progress.partialChannels  = ch
+        grabState.progress.partialChannels = ch
         grabState.progress.partialProgrammes = pr
-      } catch {}
+      } catch { }
     }
 
     for (const [site, channels] of bySite.entries()) {
@@ -320,7 +320,7 @@ export async function runGrab({ onProgress } = {}) {
       }
 
       const siteChannelsFile = path.join(tmpDir, `${site}.channels.xml`)
-      const siteOutputFile   = path.join(tmpDir, `${site}.guide.xml`)
+      const siteOutputFile = path.join(tmpDir, `${site}.guide.xml`)
 
       writeFileSync(siteChannelsFile, buildSiteChannelsXml(channels), 'utf8')
 
@@ -328,7 +328,7 @@ export async function runGrab({ onProgress } = {}) {
         (line) => {
           const m = line.match(/\[(\d+)\/(\d+)\]/)
           if (m) {
-            grabState.progress.channelDone  = parseInt(m[1])
+            grabState.progress.channelDone = parseInt(m[1])
             grabState.progress.channelTotal = parseInt(m[2])
           }
           log(`  [${site}] ${line}`)
@@ -357,10 +357,10 @@ export async function runGrab({ onProgress } = {}) {
     writeFileSync(GUIDE_XML, merged, 'utf8')
 
     // Clean up tmp files
-    for (const f of outputFiles) { try { unlinkSync(f) } catch {} }
+    for (const f of outputFiles) { try { unlinkSync(f) } catch { } }
 
-    grabState.guideExists  = true
-    grabState.guideUrl     = `/guide.xml`
+    grabState.guideExists = true
+    grabState.guideUrl = `/guide.xml`
 
     const chanCount = (merged.match(/<channel\b/g) || []).length
     const progCount = (merged.match(/<programme\b/g) || []).length

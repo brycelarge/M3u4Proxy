@@ -11,7 +11,7 @@ const DB_DIR = path.join(DATA_DIR, 'db')
 mkdirSync(DB_DIR, { recursive: true })
 
 // Define database path
-const DISK_DB_PATH = path.join(DB_DIR, 'm3u-manager.db')
+const DISK_DB_PATH = path.join(DB_DIR, 'm3u4prox.db')
 
 // Ensure database directory has proper permissions
 try {

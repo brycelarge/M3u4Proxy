@@ -27,7 +27,7 @@ function getSetting(key, fallback = null) {
 
 function getBaseUrl(req) {
   const proto = req.headers['x-forwarded-proto'] || req.protocol
-  const host  = req.headers['x-forwarded-host']  || req.headers.host
+  const host = req.headers['x-forwarded-host'] || req.headers.host
   return `${proto}://${host}`
 }
 
@@ -89,16 +89,16 @@ function getTunerCount() {
 function buildDiscover(base, playlist, tunerCount) {
   const deviceId = deviceIdForPlaylist(playlist.id)
   return {
-    FriendlyName:    `M3u4Proxy — ${playlist.name}`,
-    Manufacturer:    'Silicondust',
-    ModelNumber:     'HDTC-2US',
-    FirmwareName:    'hdhomerun4_atsc',
+    FriendlyName: `M3u4Proxy — ${playlist.name}`,
+    Manufacturer: 'Silicondust',
+    ModelNumber: 'HDTC-2US',
+    FirmwareName: 'hdhomerun4_atsc',
     FirmwareVersion: '20200101',
-    DeviceID:        deviceId,
-    DeviceAuth:      '',
-    BaseURL:         `${base}/hdhr/${playlist.id}`,
-    LineupURL:       `${base}/hdhr/${playlist.id}/lineup.json`,
-    TunerCount:      tunerCount,
+    DeviceID: deviceId,
+    DeviceAuth: '',
+    BaseURL: `${base}/hdhr/${playlist.id}`,
+    LineupURL: `${base}/hdhr/${playlist.id}/lineup.json`,
+    TunerCount: tunerCount,
   }
 }
 
@@ -112,7 +112,7 @@ function buildDeviceXml(base, playlist) {
     <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>
     <friendlyName>M3u4Proxy — ${playlist.name}</friendlyName>
     <manufacturer>Silicondust</manufacturer>
-    <manufacturerURL>https://github.com/brycelarge/m3u-manager</manufacturerURL>
+    <manufacturerURL>https://github.com/brycelarge/m3u4prox</manufacturerURL>
     <modelDescription>M3u4Proxy IPTV Tuner</modelDescription>
     <modelName>HDTC-2US</modelName>
     <modelNumber>HDTC-2US</modelNumber>
@@ -125,17 +125,17 @@ function buildDeviceXml(base, playlist) {
 
 function buildLineupJson(base, playlistId) {
   const channels = getPlaylistChannels(playlistId)
-  const epgRows  = db.prepare('SELECT * FROM epg_mappings').all()
-  const epgMap   = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
+  const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
+  const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
   return channels.map((ch, idx) => {
-    const tvgId    = ch.custom_tvg_id || ch.tvg_id || ''
-    const epgId    = epgMap.get(tvgId) || tvgId
+    const tvgId = ch.custom_tvg_id || ch.tvg_id || ''
+    const epgId = epgMap.get(tvgId) || tvgId
     const entry = {
-      GuideNumber:  ch.sort_order > 0 ? String(ch.sort_order) : String(idx + 1),
-      GuideName:    ch.tvg_name,
-      URL:          `${base}/stream/${ch.id}`,
-      HD:           1,
-      Favorite:     0,
+      GuideNumber: ch.sort_order > 0 ? String(ch.sort_order) : String(idx + 1),
+      GuideName: ch.tvg_name,
+      URL: `${base}/stream/${ch.id}`,
+      HD: 1,
+      Favorite: 0,
     }
     if (epgId) entry.EpgChannelId = epgId
     return entry
@@ -144,13 +144,13 @@ function buildLineupJson(base, playlistId) {
 
 function buildLineupM3u(base, playlistId) {
   const channels = getPlaylistChannels(playlistId)
-  const epgRows  = db.prepare('SELECT * FROM epg_mappings').all()
-  const epgMap   = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
-  const lines    = [`#EXTM3U url-tvg="${base}/guide.xml"`]
+  const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
+  const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
+  const lines = [`#EXTM3U url-tvg="${base}/guide.xml"`]
   channels.forEach((ch, idx) => {
     const tvgId = epgMap.get(ch.tvg_id) || ch.custom_tvg_id || ch.tvg_id || ''
-    const chno  = ch.sort_order > 0 ? ch.sort_order : idx + 1
-    const logo  = ch.tvg_logo ? ` tvg-logo="${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}"` : ''
+    const chno = ch.sort_order > 0 ? ch.sort_order : idx + 1
+    const logo = ch.tvg_logo ? ` tvg-logo="${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}"` : ''
     const group = ch.group_title ? ` group-title="${ch.group_title}"` : ''
     lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${ch.tvg_name}" tvg-chno="${chno}"${logo}${group},${ch.tvg_name}`)
     lines.push(`${base}/stream/${ch.id}`)
@@ -209,7 +209,7 @@ function buildDeviceApp(device) {
   })
 
   sub.post('/lineup.post', (req, res) => res.json({}))
-  sub.get('/lineup.post',  (req, res) => res.json({}))
+  sub.get('/lineup.post', (req, res) => res.json({}))
 
   return sub
 }
@@ -253,7 +253,7 @@ export async function restartDeviceServer(deviceId) {
 export async function startAllDeviceServers() {
   const devices = db.prepare('SELECT * FROM hdhr_devices WHERE active = 1').all()
   for (const d of devices) {
-    try { await startDeviceServer(d.id) } catch {}
+    try { await startDeviceServer(d.id) } catch { }
   }
 }
 
@@ -289,7 +289,7 @@ export function registerHdhrRoutes(app) {
   })
 
   app.post('/hdhr/:pid/lineup.post', (req, res) => res.json({}))
-  app.get('/hdhr/:pid/lineup.post',  (req, res) => res.json({}))
+  app.get('/hdhr/:pid/lineup.post', (req, res) => res.json({}))
 
   // ── Root endpoints — point to primary (first) playlist ───────────────────
   function getPrimaryPlaylistId() {
@@ -300,7 +300,7 @@ export function registerHdhrRoutes(app) {
   }
 
   app.get('/discover.json', (req, res) => {
-    const base       = getBaseUrl(req)
+    const base = getBaseUrl(req)
     const playlistId = getPrimaryPlaylistId()
     if (!playlistId) {
       return res.json({
@@ -324,7 +324,7 @@ export function registerHdhrRoutes(app) {
 
   app.get('/lineup_status.json', (req, res) => {
     const playlistId = getPrimaryPlaylistId()
-    const channels   = playlistId ? getPlaylistChannels(playlistId) : []
+    const channels = playlistId ? getPlaylistChannels(playlistId) : []
     res.json({ ScanInProgress: 0, ScanPossible: 0, Source: 'Cable', SourceList: ['Cable'], ChannelScanSize: channels.length })
   })
 
@@ -342,20 +342,20 @@ export function registerHdhrRoutes(app) {
   })
 
   app.post('/lineup.post', (req, res) => res.json({}))
-  app.get('/lineup.post',  (req, res) => res.json({}))
+  app.get('/lineup.post', (req, res) => res.json({}))
 
   // ── API: list all virtual devices ────────────────────────────────────────
   app.get('/api/hdhr/devices', (req, res) => {
-    const base      = getBaseUrl(req)
+    const base = getBaseUrl(req)
     const playlists = db.prepare("SELECT id, name, channel_count FROM playlists WHERE playlist_type != 'composite' OR playlist_type IS NULL ORDER BY id").all()
     res.json(playlists.map(p => ({
-      playlist_id:   p.id,
+      playlist_id: p.id,
       playlist_name: p.name,
       channel_count: p.channel_count || 0,
-      device_id:     deviceIdForPlaylist(p.id),
-      discover_url:  `${base}/hdhr/${p.id}/discover.json`,
-      lineup_url:    `${base}/hdhr/${p.id}/lineup.json`,
-      m3u_url:       `${base}/hdhr/${p.id}/lineup.m3u`,
+      device_id: deviceIdForPlaylist(p.id),
+      discover_url: `${base}/hdhr/${p.id}/discover.json`,
+      lineup_url: `${base}/hdhr/${p.id}/lineup.json`,
+      m3u_url: `${base}/hdhr/${p.id}/lineup.m3u`,
     })))
   })
 }

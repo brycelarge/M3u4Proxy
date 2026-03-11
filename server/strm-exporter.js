@@ -490,7 +490,7 @@ export async function exportVodToStrm(playlistId, baseUrl, username, password, o
     }
   }
 
-  const dbPath = process.env.DB_PATH || join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'db', 'm3u-manager.db')
+  const dbPath = process.env.DB_PATH || join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'db', 'm3u4prox.db')
   mkdirSync(dirname(dbPath), { recursive: true })
   const db = new Database(dbPath)
 

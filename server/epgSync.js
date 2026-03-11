@@ -35,10 +35,10 @@ export const SITES_DIR = path.join(DATA_DIR, 'epg-sites')
 //   extra      extra len bytes
 //   data       comp size bytes
 
-const LOCAL_SIG  = 0x04034b50
-const DD_SIG     = 0x08074b50  // data descriptor
-const CD_SIG     = 0x02014b50  // central directory
-const EOCD_SIG   = 0x06054b50  // end of central directory
+const LOCAL_SIG = 0x04034b50
+const DD_SIG = 0x08074b50  // data descriptor
+const CD_SIG = 0x02014b50  // central directory
+const EOCD_SIG = 0x06054b50  // end of central directory
 
 function parseChannelsXml(xml, site, filename) {
   const channels = []
@@ -46,16 +46,16 @@ function parseChannelsXml(xml, site, filename) {
   let m
   while ((m = re.exec(xml)) !== null) {
     const attrs = m[1]
-    const name  = m[2].trim()
-    const get   = (a) => { const r = new RegExp(`${a}="([^"]*)"`) ; return (attrs.match(r) || [])[1] || '' }
+    const name = m[2].trim()
+    const get = (a) => { const r = new RegExp(`${a}="([^"]*)"`); return (attrs.match(r) || [])[1] || '' }
     channels.push({
       site,
       name,
-      site_id:  get('site_id'),
+      site_id: get('site_id'),
       xmltv_id: get('xmltv_id'),
-      lang:     get('lang') || 'en',
-      logo:     get('logo') || '',
-      file:     filename,
+      lang: get('lang') || 'en',
+      logo: get('logo') || '',
+      file: filename,
     })
   }
   return channels
@@ -75,13 +75,13 @@ async function* streamZipEntries(readable, filterFn) {
     const sig = buf.readUInt32LE(pos)
 
     if (sig === LOCAL_SIG) {
-      const flags      = buf.readUInt16LE(pos + 6)
-      const compress   = buf.readUInt16LE(pos + 8)
-      const compSize   = buf.readUInt32LE(pos + 18)
-      const fnameLen   = buf.readUInt16LE(pos + 26)
-      const extraLen   = buf.readUInt16LE(pos + 28)
-      const fname      = buf.toString('utf8', pos + 30, pos + 30 + fnameLen)
-      const dataStart  = pos + 30 + fnameLen + extraLen
+      const flags = buf.readUInt16LE(pos + 6)
+      const compress = buf.readUInt16LE(pos + 8)
+      const compSize = buf.readUInt32LE(pos + 18)
+      const fnameLen = buf.readUInt16LE(pos + 26)
+      const extraLen = buf.readUInt16LE(pos + 28)
+      const fname = buf.toString('utf8', pos + 30, pos + 30 + fnameLen)
+      const dataStart = pos + 30 + fnameLen + extraLen
 
       // Skip directories
       if (fname.endsWith('/')) {
@@ -129,7 +129,7 @@ export async function syncEpgSites(db, { onProgress } = {}) {
 
   log('Downloading iptv-org/epg zip…')
   const res = await fetch(ZIP_URL, {
-    headers: { 'User-Agent': 'm3u-manager' },
+    headers: { 'User-Agent': 'm3u4prox' },
     signal: AbortSignal.timeout(120_000),
   })
   if (!res.ok) throw new Error(`Failed to download zip: ${res.status}`)
@@ -155,7 +155,7 @@ export async function syncEpgSites(db, { onProgress } = {}) {
 
     try {
       // Path: epg-master/sites/dstv.com/dstv.com_za.channels.xml
-      const parts    = fname.split('/')
+      const parts = fname.split('/')
       const siteName = parts[parts.length - 2]
       const filename = parts[parts.length - 1]
 
@@ -194,7 +194,7 @@ export async function syncEpgSites(db, { onProgress } = {}) {
 
   // Bulk insert into DB in a transaction
   const deleteAll = db.prepare('DELETE FROM epg_site_channels')
-  const insert    = db.prepare(
+  const insert = db.prepare(
     'INSERT INTO epg_site_channels (site, name, site_id, xmltv_id, lang, logo, file) VALUES (?, ?, ?, ?, ?, ?, ?)'
   )
   const upsertMeta = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('epg_sites_last_synced', ?)")

@@ -123,9 +123,9 @@ router.get('/playlists', (req, res) => {
   for (const p of playlists) {
     const c = countMap.get(p.id) || { channel_count: 0, group_count: 0, source_count: 0 }
     p.channel_count = c.channel_count
-    p.group_count   = c.group_count
-    p.source_count  = c.source_count
-    p.groups        = groupMap[p.id] || []
+    p.group_count = c.group_count
+    p.source_count = c.source_count
+    p.groups = groupMap[p.id] || []
   }
   res.json(playlists)
 })
@@ -394,7 +394,7 @@ router.get('/playlists/:id/group-order', (req, res) => {
   const playlist = db.prepare('SELECT group_order FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Not found' })
   const groups = db.prepare("SELECT DISTINCT group_title FROM playlist_channels WHERE playlist_id = ? AND group_title != '' ORDER BY group_title").all(req.params.id).map(r => r.group_title)
-  const saved  = playlist.group_order ? JSON.parse(playlist.group_order) : []
+  const saved = playlist.group_order ? JSON.parse(playlist.group_order) : []
   // Merge: saved order first, then any new groups not yet in saved order
   const ordered = [...saved.filter(g => groups.includes(g)), ...groups.filter(g => !saved.includes(g))]
   res.json({ order: ordered })
@@ -525,8 +525,8 @@ router.get('/playlists/:id/m3u', async (req, res) => {
     return true
   })
 
-  const epgRows   = db.prepare('SELECT * FROM epg_mappings').all()
-  const epgMap    = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
+  const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
+  const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
 
   // Load VOD metadata if this is a VOD playlist
   let vodMetadata = null
@@ -548,12 +548,12 @@ router.get('/playlists/:id/m3u', async (req, res) => {
     channels = [...channels].sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
   }
 
-  const proto   = req.headers['x-forwarded-proto'] || req.protocol
-  const host    = req.headers['x-forwarded-host']  || req.headers.host
+  const proto = req.headers['x-forwarded-proto'] || req.protocol
+  const host = req.headers['x-forwarded-host'] || req.headers.host
   const baseUrl = `${proto}://${host}`
-  const epgUrl  = existsSync(GUIDE_XML) ? `${baseUrl}/guide.xml` : ''
+  const epgUrl = existsSync(GUIDE_XML) ? `${baseUrl}/guide.xml` : ''
 
-  const catchupSrc  = process.env.CATCHUP_SOURCE  || ''
+  const catchupSrc = process.env.CATCHUP_SOURCE || ''
   const catchupDays = parseInt(process.env.CATCHUP_DAYS || '7')
 
   const content = buildM3U(channels, epgMap, { baseUrl, epgUrl, catchupSrc: catchupSrc || undefined, catchupDays, vodMetadata })
@@ -625,22 +625,30 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
   if (!mappedChannels.length) {
     res.setHeader('X-XMLTV-Cache', 'MISS')
     res.setHeader('X-XMLTV-Sources', '0')
-    return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u-manager"></tv>`)
+    return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u4prox"></tv>`)
   }
 
   const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings ORDER BY source_tvg_id').all()
-  const relevantSourceIds = getRelevantEpgSources(mappedChannels, epgMappings)
-  const cacheRows = relevantSourceIds.length
-    ? db.prepare(`
-        SELECT source_id, content, channel_count, last_fetched, length(content) AS content_len
-        FROM epg_cache
-        WHERE content IS NOT NULL AND source_id IN (${relevantSourceIds.map(() => '?').join(',')})
-        ORDER BY last_fetched DESC
-      `).all(...relevantSourceIds)
-    : []
+  const generateXmltvArgs = { mappedChannels, baseUrl }
 
-  const proto   = req.headers['x-forwarded-proto'] || req.protocol
-  const host    = req.headers['x-forwarded-host']  || req.headers.host
+  // Fast path: get programmes matching exactly the EPG mapped IDs
+  const wantedIds = new Set(mappedChannels.flatMap(ch => [ch.epg_id, ch.tvg_id, ch.custom_tvg_id]).filter(Boolean))
+  // Target IDs are mapped into wantedIds by the logic in xmltv.js
+
+  // But we can just pass the relevantSourceIds and let xmltv.js do its logic against epg_programmes
+  // Wait, xmltv.js currently does the mapping logic. Let's just fetch the sources so xmltv can query it.
+
+  const relevantSourceIds = getRelevantEpgSources(mappedChannels, epgMappings)
+  let programmesCount = 0
+  if (relevantSourceIds.length) {
+    programmesCount = db.prepare(`SELECT COUNT(*) as count FROM epg_programmes WHERE source_id IN (${relevantSourceIds.join(',')})`).get()?.count || 0
+  }
+
+  // We don't fetch cacheRows anymore since we're using the epg_programmes table.
+  const cacheRows = relevantSourceIds.length ? relevantSourceIds.map(id => ({ source_id: id, channel_count: 0 })) : []
+
+  const proto = req.headers['x-forwarded-proto'] || req.protocol
+  const host = req.headers['x-forwarded-host'] || req.headers.host
   const baseUrl = `${proto}://${host}`
   const cacheKey = buildPlaylistXmltvSignature(playlist.id, mappedChannels, epgMappings, cacheRows)
   const cached = getPlaylistXmltvCache(playlist.id, cacheKey, compress)
@@ -654,7 +662,7 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
   }
 
   const { generateXmltv } = await import('../services/xmltv.js')
-  const out = generateXmltv(db, mappedChannels, cacheRows, baseUrl)
+  const out = generateXmltv(db, mappedChannels, relevantSourceIds, baseUrl)
   let compressed = null
 
   if (compress) {

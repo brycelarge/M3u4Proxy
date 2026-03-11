@@ -60,7 +60,7 @@ app.get('/api/logo', async (req, res) => {
   // Derive a stable filename from the URL
   const { createHash } = await import('node:crypto')
   const hash = createHash('md5').update(url).digest('hex')
-  const ext  = url.split('?')[0].match(/\.(png|jpg|jpeg|gif|webp|svg|ico)$/i)?.[1]?.toLowerCase() || 'png'
+  const ext = url.split('?')[0].match(/\.(png|jpg|jpeg|gif|webp|svg|ico)$/i)?.[1]?.toLowerCase() || 'png'
   const file = path.join(LOGO_CACHE_DIR, `${hash}.${ext}`)
 
   // Serve from cache if exists
@@ -175,7 +175,7 @@ async function refreshSourceCache(sourceId) {
     // If the URL points to ourselves, read from disk directly to avoid circular HTTP
     const selfHosts = ['localhost', '127.0.0.1', '0.0.0.0']
     let isLocal = false
-    try { isLocal = selfHosts.some(h => new URL(source.url).hostname === h) } catch {}
+    try { isLocal = selfHosts.some(h => new URL(source.url).hostname === h) } catch { }
 
     if (isLocal) {
       if (!existsSync(GUIDE_XML)) {
@@ -714,11 +714,11 @@ app.get('/api/sources/all/groups', (req, res) => {
   `).all()
 
   const groups = rows.map(r => ({
-    name:        `${r.source_name} › ${r.group_title}`,
-    display:     r.group_title,
-    source_id:   r.source_id,
+    name: `${r.source_name} › ${r.group_title}`,
+    display: r.group_title,
+    source_id: r.source_id,
     source_name: r.source_name,
-    count:       r.count,
+    count: r.count,
   }))
 
   const total = groups.reduce((s, g) => s + g.count, 0)
@@ -740,11 +740,11 @@ app.get('/api/sources/:id/groups', (req, res) => {
   `).all(sourceId)
 
   const groups = rows.map(r => ({
-    name:        `${source.name} › ${r.group_title}`,
-    display:     r.group_title,
-    source_id:   sourceId,
+    name: `${source.name} › ${r.group_title}`,
+    display: r.group_title,
+    source_id: sourceId,
     source_name: source.name,
-    count:       r.count,
+    count: r.count,
   }))
 
   const total = groups.reduce((s, g) => s + g.count, 0)
@@ -755,8 +755,8 @@ app.get('/api/sources/:id/groups', (req, res) => {
 app.get('/api/sources/all/channels', (req, res) => {
   const groupKey = req.query.group  // e.g. "ky-tv › Sports"
   const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null
-  const limit    = Math.min(parseInt(req.query.limit  || '2000'), 5000)
-  const offset   = parseInt(req.query.offset || '0')
+  const limit = Math.min(parseInt(req.query.limit || '2000'), 5000)
+  const offset = parseInt(req.query.offset || '0')
 
   const cacheKey = `all-v3:${sourceId || ''}:${groupKey || 'all'}:${limit}:${offset}`
   const cached = getCached(cacheKey)
@@ -773,15 +773,15 @@ app.get('/api/sources/all/channels', (req, res) => {
     const result = {
       total, offset, limit,
       channels: rows.map(r => ({
-        id:          String(r.id),
-        name:        r.tvg_name,
-        logo:        r.tvg_logo,
-        group:       `${r.source_name} › ${r.group_title}`,
+        id: String(r.id),
+        name: r.tvg_name,
+        logo: r.tvg_logo,
+        group: `${r.source_name} › ${r.group_title}`,
         group_title: r.group_title,
-        source_id:   r.source_id,
+        source_id: r.source_id,
         source_name: r.source_name,
-        url:         r.url,
-        tvg_id:      r.tvg_id,
+        url: r.url,
+        tvg_id: r.tvg_id,
       }))
     }
     setCache(cacheKey, result)
@@ -808,17 +808,17 @@ app.get('/api/sources/all/channels', (req, res) => {
   const result = {
     total, offset, limit,
     channels: rows.map(r => ({
-      id:              String(r.id),
-      name:            r.tvg_name,
-      logo:            r.tvg_logo,
-      group:           groupKey,
-      group_title:     r.group_title,
-      source_id:       r.source_id,
-      source_name:     r.source_name,
-      url:             r.url,
-      tvg_id:          r.tvg_id,
+      id: String(r.id),
+      name: r.tvg_name,
+      logo: r.tvg_logo,
+      group: groupKey,
+      group_title: r.group_title,
+      source_id: r.source_id,
+      source_name: r.source_name,
+      url: r.url,
+      tvg_id: r.tvg_id,
       normalized_name: r.normalized_name,
-      quality:         r.quality,
+      quality: r.quality,
     }))
   }
   setCache(cacheKey, result)
@@ -971,9 +971,9 @@ app.get('/api/playlists', (req, res) => {
   for (const p of playlists) {
     const c = countMap.get(p.id)
     p.channel_count = c?.channel_count ?? 0
-    p.group_count   = c?.group_count   ?? 0
-    p.source_count  = c?.source_count  ?? 0
-    p.group_names   = groupMap[p.id]   ?? []
+    p.group_count = c?.group_count ?? 0
+    p.source_count = c?.source_count ?? 0
+    p.group_names = groupMap[p.id] ?? []
   }
   res.json(playlists)
 })
@@ -1009,7 +1009,7 @@ app.get('/api/sources/:id/vod-groups', (req, res) => {
 app.get('/api/sources/:id/vod-channels', (req, res) => {
   const groups = req.query.groups ? req.query.groups.split(',') : []
   const search = req.query.search || ''
-  const limit  = Math.min(parseInt(req.query.limit || '200'), 1000)
+  const limit = Math.min(parseInt(req.query.limit || '200'), 1000)
   const offset = parseInt(req.query.offset || '0')
   let rows
   if (groups.length) {
@@ -1363,7 +1363,7 @@ app.get('/api/playlists/:id/group-order', (req, res) => {
   const playlist = db.prepare('SELECT group_order FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Not found' })
   const groups = db.prepare("SELECT DISTINCT group_title FROM playlist_channels WHERE playlist_id = ? AND group_title != '' ORDER BY group_title").all(req.params.id).map(r => r.group_title)
-  const saved  = playlist.group_order ? JSON.parse(playlist.group_order) : []
+  const saved = playlist.group_order ? JSON.parse(playlist.group_order) : []
   // Merge: saved order first, then any new groups not yet in saved order
   const ordered = [...saved.filter(g => groups.includes(g)), ...groups.filter(g => !saved.includes(g))]
   res.json({ order: ordered })
@@ -1493,8 +1493,8 @@ app.get('/api/playlists/:id/m3u', async (req, res) => {
     return true
   })
 
-  const epgRows   = db.prepare('SELECT * FROM epg_mappings').all()
-  const epgMap    = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
+  const epgRows = db.prepare('SELECT * FROM epg_mappings').all()
+  const epgMap = new Map(epgRows.map(r => [r.source_tvg_id, r.target_tvg_id]))
 
   // Load VOD metadata if this is a VOD playlist
   let vodMetadata = null
@@ -1516,12 +1516,12 @@ app.get('/api/playlists/:id/m3u', async (req, res) => {
     channels = [...channels].sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
   }
 
-  const proto   = req.headers['x-forwarded-proto'] || req.protocol
-  const host    = req.headers['x-forwarded-host']  || req.headers.host
+  const proto = req.headers['x-forwarded-proto'] || req.protocol
+  const host = req.headers['x-forwarded-host'] || req.headers.host
   const baseUrl = `${proto}://${host}`
-  const epgUrl  = existsSync(GUIDE_XML) ? `${baseUrl}/guide.xml` : ''
+  const epgUrl = existsSync(GUIDE_XML) ? `${baseUrl}/guide.xml` : ''
 
-  const catchupSrc  = process.env.CATCHUP_SOURCE  || ''
+  const catchupSrc = process.env.CATCHUP_SOURCE || ''
   const catchupDays = parseInt(process.env.CATCHUP_DAYS || '7')
 
   const content = buildM3U(channels, epgMap, { baseUrl, epgUrl, catchupSrc: catchupSrc || undefined, catchupDays, vodMetadata })
@@ -1588,7 +1588,7 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
 
   if (!mappedChannels.length) {
     res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-    return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u-manager"></tv>`)
+    return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u4prox"></tv>`)
   }
 
   // Get EPG data for mapped channels
@@ -1735,7 +1735,7 @@ app.get('/api/playlists/:id/xmltv', (req, res) => {
 
   const out = [
     `<?xml version="1.0" encoding="UTF-8"?>`,
-    `<tv generator-info-name="m3u-manager">`,
+    `<tv generator-info-name="m3u4prox">`,
     ...channels_xml,
     ...programmes_xml,
     `</tv>`,
@@ -2035,16 +2035,16 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
 
     const matches = []
     for (const ch of playlistChannels) {
-      const effectiveId    = ch.custom_tvg_id || ch.tvg_id || ''
-      const alreadyMapped  = existingMappings.get(effectiveId)
+      const effectiveId = ch.custom_tvg_id || ch.tvg_id || ''
+      const alreadyMapped = existingMappings.get(effectiveId)
       const preferredSourceId = ch.epg_source_id ? Number(ch.epg_source_id) : null
-      const candidateList  = preferredSourceId ? (epgBySource.get(preferredSourceId) ?? []) : epgList
+      const candidateList = preferredSourceId ? (epgBySource.get(preferredSourceId) ?? []) : epgList
 
       // O(1) exact ID lookup
       const exactMatch = effectiveId
         ? (preferredSourceId
-            ? (epgBySource.get(preferredSourceId) ?? []).find(e => e.id === effectiveId) ?? null
-            : epgById.get(effectiveId) ?? null)
+          ? (epgBySource.get(preferredSourceId) ?? []).find(e => e.id === effectiveId) ?? null
+          : epgById.get(effectiveId) ?? null)
         : null
 
       // Only run Dice if no exact match and not already mapped
@@ -2062,17 +2062,17 @@ app.get('/api/epg-mappings/auto-match', (req, res) => {
       const variants = variantsMap.get(ch.id) || []
 
       matches.push({
-        channel_id:    ch.id,
-        tvg_id:        effectiveId,
-        tvg_name:      ch.tvg_name,
-        tvg_logo:      ch.tvg_logo || null,
-        custom_logo:   ch.custom_logo || null,
-        sort_order:    ch.sort_order || null,
-        mapped_to:     alreadyMapped || null,
-        exact_match:   exactMatch || null,
-        suggestions:   scored,
+        channel_id: ch.id,
+        tvg_id: effectiveId,
+        tvg_name: ch.tvg_name,
+        tvg_logo: ch.tvg_logo || null,
+        custom_logo: ch.custom_logo || null,
+        sort_order: ch.sort_order || null,
+        mapped_to: alreadyMapped || null,
+        exact_match: exactMatch || null,
+        suggestions: scored,
         epg_source_id: ch.epg_source_id || null,
-        variants:      variants || [],
+        variants: variants || [],
       })
     }
 
@@ -2126,9 +2126,9 @@ app.post('/api/epg-mappings/bulk', (req, res) => {
 
 // ── EPG Scraper ───────────────────────────────────────────────────────────────
 // Use EPG_DIR from epgGrab.js (imported as GRAB_EPG_DIR)
-const EPG_DIR        = GRAB_EPG_DIR
-const CHANNELS_XML   = path.join(EPG_DIR, 'channels.xml')
-const GUIDE_XML_URL  = process.env.GUIDE_XML_URL  || `http://127.0.0.1:${process.env.PORT || 3005}/guide.xml`
+const EPG_DIR = GRAB_EPG_DIR
+const CHANNELS_XML = path.join(EPG_DIR, 'channels.xml')
+const GUIDE_XML_URL = process.env.GUIDE_XML_URL || `http://127.0.0.1:${process.env.PORT || 3005}/guide.xml`
 
 // Track in-progress sync so we don't double-run
 let syncInProgress = false
@@ -2152,11 +2152,11 @@ async function runSync() {
 // Sync status
 app.get('/api/epg/sites/sync/status', (req, res) => {
   res.json({
-    inProgress:  syncInProgress,
-    lastSynced:  getLastSynced(db),
-    totalSites:  db.prepare('SELECT COUNT(DISTINCT site) as c FROM epg_site_channels').get().c,
+    inProgress: syncInProgress,
+    lastSynced: getLastSynced(db),
+    totalSites: db.prepare('SELECT COUNT(DISTINCT site) as c FROM epg_site_channels').get().c,
     totalChannels: db.prepare('SELECT COUNT(*) as c FROM epg_site_channels').get().c,
-    log:         syncLog.slice(-20),
+    log: syncLog.slice(-20),
   })
 })
 
@@ -2232,7 +2232,7 @@ app.get('/api/epg/grab/status', (req, res) => {
   res.json({
     ...grabState,
     guideExists: existsSync(GUIDE_XML),
-    guideUrl:    `${req.protocol}://${req.headers.host}/guide.xml`,
+    guideUrl: `${req.protocol}://${req.headers.host}/guide.xml`,
   })
 })
 
@@ -2244,7 +2244,7 @@ app.post('/api/epg/grab', async (req, res) => {
     const lastStartTime = new Date(grabState.lastStarted).getTime()
     const timeSinceStart = Date.now() - lastStartTime
     if (timeSinceStart > MAX_GRAB_TIME) {
-      console.log(`[epg-grab] Resetting stuck grab status (${Math.round(timeSinceStart/60000)} minutes since start)`)
+      console.log(`[epg-grab] Resetting stuck grab status (${Math.round(timeSinceStart / 60000)} minutes since start)`)
       grabState.inProgress = false
     }
   }
@@ -2260,7 +2260,7 @@ app.post('/api/epg/grab', async (req, res) => {
     }
   }, MAX_GRAB_TIME)
 
-  runGrab({ onProgress: (msg) => {} })
+  runGrab({ onProgress: (msg) => { } })
     .finally(() => clearTimeout(safetyTimeout))
     .then(async () => {
       // Ensure guide.xml is registered as an EPG source
@@ -2297,7 +2297,7 @@ app.get('/api/epg/enrich/status', (req, res) => {
   const hasCacheData = !!db.prepare('SELECT 1 FROM epg_cache WHERE content IS NOT NULL LIMIT 1').get()
   res.json({
     ...enrichState,
-    tmdbKeySet:  !!process.env.TMDB_API_KEY,
+    tmdbKeySet: !!process.env.TMDB_API_KEY,
     guideExists: hasCacheData,
   })
 })
@@ -2311,7 +2311,7 @@ app.post('/api/epg/enrich', async (req, res) => {
     const lastRunTime = new Date(enrichState.lastRun).getTime()
     const timeSinceLastRun = Date.now() - lastRunTime
     if (timeSinceLastRun > MAX_ENRICH_TIME) {
-      console.log(`[epg-enrich] Resetting stuck enrichment status (${Math.round(timeSinceLastRun/60000)} minutes since last run)`)
+      console.log(`[epg-enrich] Resetting stuck enrichment status (${Math.round(timeSinceLastRun / 60000)} minutes since last run)`)
       enrichState.inProgress = false
     }
   }
@@ -2635,8 +2635,8 @@ app.delete('/api/tmdb/matches/:title', (req, res) => {
 // Register our own guide.xml as an EPG source
 app.post('/api/epg/sources/from-scraper', (req, res) => {
   const proto = req.protocol || 'http'
-  const host  = req.headers['x-forwarded-host']  || req.headers.host
-  const url   = `${proto}://${host}/guide.xml`
+  const host = req.headers['x-forwarded-host'] || req.headers.host
+  const url = `${proto}://${host}/guide.xml`
 
   // Check for any existing guide.xml source regardless of hostname to prevent duplicates
   const existing = db.prepare('SELECT id FROM sources WHERE url LIKE ? AND category = ?').get('%/guide.xml', 'epg')
@@ -2702,24 +2702,24 @@ app.get('/api/epg/selected-channels', (req, res) => {
 function parseXmltvDate(s) {
   if (!s) return null
   const clean = s.replace(/\s.*/, '')
-  try { return new Date(`${clean.slice(0,4)}-${clean.slice(4,6)}-${clean.slice(6,8)}T${clean.slice(8,10)}:${clean.slice(10,12)}:${clean.slice(12,14)}Z`).toISOString() } catch { return null }
+  try { return new Date(`${clean.slice(0, 4)}-${clean.slice(4, 6)}-${clean.slice(6, 8)}T${clean.slice(8, 10)}:${clean.slice(10, 12)}:${clean.slice(12, 14)}Z`).toISOString() } catch { return null }
 }
 
 export function parseProgBlock(fullMatch) {
   const attrsMatch = fullMatch.match(/^<programme\b([^>]*)>/)
   const attrs = attrsMatch?.[1] ?? ''
-  const body  = fullMatch.slice(attrsMatch?.[0].length ?? 0, -'</programme>'.length)
-  const get     = (tag) => { const r = body.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)); return r ? r[1].replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').trim() : null }
+  const body = fullMatch.slice(attrsMatch?.[0].length ?? 0, -'</programme>'.length)
+  const get = (tag) => { const r = body.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)); return r ? r[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').trim() : null }
   const getAttr = (tag, attr) => { const r = body.match(new RegExp(`<${tag}[^>]*\\s${attr}="([^"]*)"`)); return r ? r[1] : null }
   return {
-    channel:  attrs.match(/\bchannel="([^"]*)"/)?.[1] ?? null,
-    start:    parseXmltvDate(attrs.match(/\bstart="([^"]*)"/)?.[1]),
-    stop:     parseXmltvDate(attrs.match(/\bstop="([^"]*)"/)?.[1]),
-    title:    get('title'),
-    desc:     get('desc'),
-    icon:     getAttr('icon', 'src'),
+    channel: attrs.match(/\bchannel="([^"]*)"/)?.[1] ?? null,
+    start: parseXmltvDate(attrs.match(/\bstart="([^"]*)"/)?.[1]),
+    stop: parseXmltvDate(attrs.match(/\bstop="([^"]*)"/)?.[1]),
+    title: get('title'),
+    desc: get('desc'),
+    icon: getAttr('icon', 'src'),
     category: get('category'),
-    episode:  get('episode-num'),
+    episode: get('episode-num'),
   }
 }
 
@@ -2745,14 +2745,14 @@ export function getEnrichmentMaps() {
 
 export function applyEnrichment(prog, showMap, epMap) {
   if (!prog.title) return prog
-  const ep    = prog.episode ? parseEpisodeNum(`<episode-num system="xmltv_ns">${prog.episode}</episode-num>`) : null
+  const ep = prog.episode ? parseEpisodeNum(`<episode-num system="xmltv_ns">${prog.episode}</episode-num>`) : null
   const epKey = ep ? `${prog.title}\0${ep.season}\0${ep.episode}` : null
-  const data  = (epKey && epMap.get(epKey)) || showMap.get(prog.title)
+  const data = (epKey && epMap.get(epKey)) || showMap.get(prog.title)
   if (!data) return prog
   return {
     ...prog,
     icon: prog.icon || data.poster || null,
-    desc: prog.desc || data.desc   || null,
+    desc: prog.desc || data.desc || null,
   }
 }
 
@@ -2788,11 +2788,11 @@ app.get('/api/epg/programmes', (req, res) => {
 // Guide grid for active playlist - shows playlist channels with their EPG programmes
 app.get('/api/epg/guide-grid', async (req, res) => {
   const windowHours = Math.min(parseInt(req.query.hours ?? '6', 10), 24)
-  const fromParam   = req.query.from ? new Date(req.query.from) : new Date()
+  const fromParam = req.query.from ? new Date(req.query.from) : new Date()
   // Snap to nearest 30min
   fromParam.setMinutes(fromParam.getMinutes() < 30 ? 0 : 30, 0, 0)
   const from = fromParam
-  const to   = new Date(from.getTime() + windowHours * 60 * 60 * 1000)
+  const to = new Date(from.getTime() + windowHours * 60 * 60 * 1000)
 
   // Get active playlist from localStorage default or first playlist
   const activePlaylistId = req.query.playlist_id ? parseInt(req.query.playlist_id) : null
@@ -3002,8 +3002,8 @@ app.get('/api/epg/cached-channels', (req, res) => {
       const iconMatch = m[2].match(/<icon src="([^"]*)"/)
       channels.push({
         id,
-        name:        nameMatch?.[1] || id,
-        icon:        iconMatch?.[1] || '',
+        name: nameMatch?.[1] || id,
+        icon: iconMatch?.[1] || '',
         source_name: row.source_name,
       })
     }
@@ -3549,15 +3549,15 @@ app.get('/api/hdhr/virtual-devices', (req, res) => {
   const hostname = (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0]
   res.json(rows.map(d => {
     const deviceBase = `${proto}://${hostname}:${d.port}`
-    const appBase    = `${proto}://${hostname}`
-    const xmltvUrl   = d.playlist_id ? `${appBase}:${process.env.PORT || 3005}/api/playlists/${d.playlist_id}/xmltv` : null
+    const appBase = `${proto}://${hostname}`
+    const xmltvUrl = d.playlist_id ? `${appBase}:${process.env.PORT || 3005}/api/playlists/${d.playlist_id}/xmltv` : null
     return {
       ...d,
-      plex_url:      deviceBase,
-      discover_url:  `${deviceBase}/discover.json`,
-      lineup_url:    `${deviceBase}/lineup.json`,
-      m3u_url:       `${deviceBase}/lineup.m3u`,
-      xmltv_url:     xmltvUrl,
+      plex_url: deviceBase,
+      discover_url: `${deviceBase}/discover.json`,
+      lineup_url: `${deviceBase}/lineup.json`,
+      m3u_url: `${deviceBase}/lineup.m3u`,
+      xmltv_url: xmltvUrl,
     }
   }))
 })
@@ -3611,13 +3611,13 @@ app.delete('/api/hdhr/virtual-devices/:id', async (req, res) => {
 // HDHomeRun status for the frontend settings page
 app.get('/api/hdhr/status', (req, res) => {
   const proto = req.headers['x-forwarded-proto'] || req.protocol
-  const host  = req.headers['x-forwarded-host']  || req.headers.host
-  const base  = `${proto}://${host}`
-  const row   = db.prepare("SELECT value FROM settings WHERE key = 'hdhr_device_id'").get()
+  const host = req.headers['x-forwarded-host'] || req.headers.host
+  const base = `${proto}://${host}`
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'hdhr_device_id'").get()
   res.json({
     discoverUrl: `${base}/discover.json`,
-    lineupUrl:   `${base}/lineup.json`,
-    deviceId:    row?.value || null,
+    lineupUrl: `${base}/lineup.json`,
+    deviceId: row?.value || null,
   })
 })
 
@@ -3929,7 +3929,7 @@ app.get('/stream/:channelId', async (req, res) => {
   const u = req.query.username, p = req.query.password
   if (u && p) {
     const userRow = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(u)
-    const authed  = userRow && await verifyPassword(p, userRow.password)
+    const authed = userRow && await verifyPassword(p, userRow.password)
     if (authed) {
       if (userRow.expires_at && new Date(userRow.expires_at) < new Date()) {
         return res.status(403).send('Account expired')
@@ -4022,7 +4022,7 @@ app.get('/stream-web/:channelId', async (req, res) => {
   const u = req.query.username, p = req.query.password
   if (u && p) {
     const userRow = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(u)
-    const authed  = userRow && await verifyPassword(p, userRow.password)
+    const authed = userRow && await verifyPassword(p, userRow.password)
     if (authed) {
       if (userRow.expires_at && new Date(userRow.expires_at) < new Date()) {
         return res.status(403).send('Account expired')
@@ -4157,8 +4157,8 @@ app.get('/stream-web/:channelId', async (req, res) => {
             ffmpeg.stdin.end()
           }
         },
-        setHeader: () => {}, // No-op for FFmpeg stdin
-        flushHeaders: () => {}, // No-op for FFmpeg stdin
+        setHeader: () => { }, // No-op for FFmpeg stdin
+        flushHeaders: () => { }, // No-op for FFmpeg stdin
         writableEnded: false,
         on: (event, handler) => {
           if (event === 'close') {
@@ -4222,7 +4222,7 @@ app.put('/api/proxy-settings', (req, res) => {
 // ── Stream history ────────────────────────────────────────────────────────────
 app.get('/api/stream-history', (req, res) => {
   const username = req.query.username || null
-  const limit    = Math.min(parseInt(req.query.limit || '200'), 1000)
+  const limit = Math.min(parseInt(req.query.limit || '200'), 1000)
   const rows = username
     ? db.prepare('SELECT * FROM stream_history WHERE username = ? ORDER BY started_at DESC LIMIT ?').all(username, limit)
     : db.prepare('SELECT * FROM stream_history ORDER BY started_at DESC LIMIT ?').all(limit)
@@ -4234,7 +4234,7 @@ app.post('/api/admin/login', (req, res) => {
   const { password } = req.body
   const adminPassword = process.env.ADMIN_PASSWORD || 'admin'
   if (password !== adminPassword) return res.status(401).json({ error: 'Invalid password' })
-  const token     = randomBytes(32).toString('hex')
+  const token = randomBytes(32).toString('hex')
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
   db.prepare('INSERT INTO admin_sessions (token, expires_at) VALUES (?, ?)').run(token, expiresAt)
   res.json({ token, expiresAt })
@@ -4607,15 +4607,15 @@ app.get('/api/backup', (req, res) => {
   const channelsXmlPath = path.join(EPG_DIR, 'channels.xml')
   const guideXmlPath = path.join(EPG_DIR, 'guide.xml')
   if (existsSync(channelsXmlPath)) bundle.files['channels.xml'] = readFileSync(channelsXmlPath, 'base64')
-  if (existsSync(guideXmlPath))    bundle.files['guide.xml']    = readFileSync(guideXmlPath, 'base64')
+  if (existsSync(guideXmlPath)) bundle.files['guide.xml'] = readFileSync(guideXmlPath, 'base64')
   const envPath = path.join(process.cwd(), '.env')
-  if (existsSync(envPath))         bundle.files['.env']         = readFileSync(envPath, 'base64')
+  if (existsSync(envPath)) bundle.files['.env'] = readFileSync(envPath, 'base64')
 
-  const date       = new Date().toISOString().slice(0, 10)
+  const date = new Date().toISOString().slice(0, 10)
   const compressed = gzipSync(Buffer.from(JSON.stringify(bundle)))
 
   res.setHeader('Content-Type', 'application/gzip')
-  res.setHeader('Content-Disposition', `attachment; filename="m3u-manager-backup-${date}.json.gz"`)
+  res.setHeader('Content-Disposition', `attachment; filename="m3u4prox-backup-${date}.json.gz"`)
   res.setHeader('Content-Length', compressed.length)
   res.end(compressed)
 })
@@ -4746,12 +4746,12 @@ app.get('/api/diagnostics/speedtest', async (req, res) => {
       TEST_URL,
     ])
     const [sizeStr, statusStr] = stdout.trim().split(' ')
-    const bytes   = Number(sizeStr)
-    const status  = Number(statusStr)
+    const bytes = Number(sizeStr)
+    const status = Number(statusStr)
     if (status !== 200) throw new Error(`HTTP ${status}`)
     const elapsed = (Date.now() - start) / 1000
-    const mbps    = ((bytes * 8) / elapsed / 1_000_000).toFixed(2)
-    const mbDown  = (bytes / 1_000_000).toFixed(2)
+    const mbps = ((bytes * 8) / elapsed / 1_000_000).toFixed(2)
+    const mbDown = (bytes / 1_000_000).toFixed(2)
     res.json({ mbps: Number(mbps), bytes, mb: Number(mbDown), elapsed: elapsed.toFixed(2) })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -4787,9 +4787,9 @@ app.get('/api/diagnostics/vpn', async (req, res) => {
       exec('ip', ['addr', 'show', 'tun0']).then(r => r.stdout).catch(() => null),
     ])
     res.json({
-      vpnActive:      tun0 !== null,
-      defaultViaTun:  routes.includes('tun0'),
-      tun0:           tun0 || null,
+      vpnActive: tun0 !== null,
+      defaultViaTun: routes.includes('tun0'),
+      tun0: tun0 || null,
       routes,
     })
   } catch (e) {
@@ -4816,7 +4816,7 @@ function cleanupOnStartup() {
       if (files.length > 0) {
         console.log(`[cleanup] Removing ${files.length} temp files from previous runs`)
         for (const file of files) {
-          try { unlinkSync(path.join(tmpDir, file)) } catch {}
+          try { unlinkSync(path.join(tmpDir, file)) } catch { }
         }
       }
     } catch (err) {

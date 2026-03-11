@@ -85,7 +85,7 @@ export function generatePlaylistGuideXml(playlistId) {
   // Build XML
   const xml = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<tv generator-info-name="m3u-manager">',
+    '<tv generator-info-name="m3u4prox">',
     ...channelsXml,
     ...programmesXml,
     '</tv>'

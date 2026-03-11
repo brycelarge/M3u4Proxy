@@ -222,6 +222,49 @@ export async function refreshSourceCache(sourceId) {
     `).run(source.id, content, channelCount)
     db.prepare("UPDATE sources SET last_fetched = datetime('now') WHERE id = ?").run(source.id)
     console.log(`[source] Refreshed EPG "${source.name}" — ${channelCount} channels`)
+
+    // Extract all programmes and insert into epg_programmes for fast lookup
+    const { parseProgBlock } = await import('../epgEnrich.js')
+    db.transaction(() => {
+      db.prepare('DELETE FROM epg_programmes WHERE source_id = ?').run(source.id)
+      
+      const insertProg = db.prepare(`
+        INSERT INTO epg_programmes (source_id, channel_id, start, stop, title, desc, icon, episode_num, raw)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      
+      let currentPos = 0
+      let progCount = 0
+      while (true) {
+        const startIdx = content.indexOf('<programme ', currentPos)
+        if (startIdx === -1) break
+        
+        const endIdx = content.indexOf('</programme>', startIdx)
+        if (endIdx === -1) break
+        
+        currentPos = endIdx + 12
+        
+        const raw = content.substring(startIdx, currentPos)
+        const prog = parseProgBlock(raw)
+        
+        if (prog && prog.channel) {
+          insertProg.run(
+            source.id,
+            prog.channel,
+            prog.start || '',
+            prog.stop || '',
+            prog.title || null,
+            prog.desc || null,
+            prog.icon || null,
+            prog.episode || null,
+            raw
+          )
+          progCount++
+        }
+      }
+      console.log(`[source] Parsed and stored ${progCount} programmes into epg_programmes`)
+    })()
+
     invalidatePlaylistsForSource(source.id)
 
     // Clear channel cache to prevent stale group/channel data

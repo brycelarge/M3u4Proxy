@@ -124,14 +124,29 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
   // Get TMDB enrichment data
   const { showMap, epMap } = getEnrichmentMaps()
 
-  // From cache
-  for (const row of cacheRows) {
-    const progRe = /<programme\b[^>]*channel="([^"]*)"[^>]*>[\s\S]*?<\/programme>/g
-    let m
-    while ((m = progRe.exec(row.content)) !== null) {
-      const channelId = m[1]
-      if (wantedIds.has(channelId)) {
-        let progContent = m[0]
+  // From database instead of scanning giant blobs
+  if (relevantSourceIds && relevantSourceIds.length > 0 && Array.from(wantedIds).length > 0) {
+    const idsParams = Array.from(wantedIds).map(() => '?').join(',')
+    const srcParams = relevantSourceIds.map(() => '?').join(',')
+
+    // Chunk wantedIds to avoid SQLite limit on variables if there are many channels
+    const chunkSize = 500;
+    const wantedIdsArr = Array.from(wantedIds);
+
+    for (let i = 0; i < wantedIdsArr.length; i += chunkSize) {
+      const chunk = wantedIdsArr.slice(i, i + chunkSize);
+      const chunkParams = chunk.map(() => '?').join(',');
+
+      const rows = db.prepare(`
+        SELECT channel_id, raw
+        FROM epg_programmes
+        WHERE source_id IN (${srcParams})
+          AND channel_id IN (${chunkParams})
+      `).all(...relevantSourceIds, ...chunk);
+
+      for (const row of rows) {
+        const channelId = row.channel_id;
+        let progContent = row.raw;
 
         // Replace channel ID with mapped epg_id if needed
         const targetEpgId = idToEpgId[channelId]
@@ -209,14 +224,26 @@ export function generateXmltv(db, mappedChannels, cacheRows, hostUrl) {
       }
     }
   }
+  timer('programmes')
 
   const out = [
     `<?xml version="1.0" encoding="UTF-8"?>`,
-    `<tv generator-info-name="m3u-manager">`,
+    `<tv generator-info-name="m3u4prox">`,
     ...channels_xml,
     ...programmes_xml,
     `</tv>`,
   ].join('\n')
+
+  timer('serialize')
+
+  if (debug) {
+    timer.flush({
+      playlistId: opts.playlistId ?? null,
+      channels: mappedChannels.length,
+      programmes: programmes_xml.length,
+      cacheRows: cacheRows.length,
+    })
+  }
 
   return out
 }

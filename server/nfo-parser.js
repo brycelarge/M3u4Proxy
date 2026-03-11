@@ -100,7 +100,7 @@ export function findNfoForChannel(channelId) {
   console.log(`[nfo] Searching for channel ${channelId} in ${STRM_BASE_DIR}`)
 
   // Get channel info from database to match by name if metadata files don't exist
-  const dbPath = process.env.DB_PATH || join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'db', 'm3u-manager.db')
+  const dbPath = process.env.DB_PATH || join(process.env.DATA_DIR || join(process.cwd(), 'data'), 'db', 'm3u4prox.db')
   mkdirSync(dirname(dbPath), { recursive: true })
   const db = new Database(dbPath)
   const channel = db.prepare('SELECT tvg_name, group_title FROM playlist_channels WHERE id = ?').get(channelId)
@@ -160,7 +160,7 @@ export function findNfoForChannel(channelId) {
           if (existsSync(movieNfoPath)) {
             const channelName = channel.tvg_name.replace(/\s*\(\d{4}\)/, '').trim()
             if (dirName.toLowerCase().includes(channelName.toLowerCase()) ||
-                channelName.toLowerCase().includes(dirName.toLowerCase())) {
+              channelName.toLowerCase().includes(dirName.toLowerCase())) {
               console.log(`[nfo] Found NFO by directory match: ${movieNfoPath}`)
               return parseNfoFile(movieNfoPath)
             }
@@ -174,7 +174,7 @@ export function findNfoForChannel(channelId) {
             // Extract series name from channel name (before S01E01 pattern)
             const seriesName = channel.tvg_name.replace(/\s*S\d{2}E\d{2}.*$/, '').replace(/\s*\(\d{4}\)/, '').trim()
             if (dirName.toLowerCase().includes(seriesName.toLowerCase()) ||
-                seriesName.toLowerCase().includes(dirName.toLowerCase())) {
+              seriesName.toLowerCase().includes(dirName.toLowerCase())) {
               console.log(`[nfo] Found NFO by directory match: ${tvshowNfoPath}`)
               return parseNfoFile(tvshowNfoPath)
             }
@@ -232,8 +232,8 @@ export function findNfoByTitle(title) {
 
         // Match directory name with title (skip if it's a season folder like "Season 01")
         if (!dirName.match(/^Season\s+\d+$/i) &&
-            (normalizedDirName.includes(normalizedSearchTitle) ||
-             normalizedSearchTitle.includes(normalizedDirName))) {
+          (normalizedDirName.includes(normalizedSearchTitle) ||
+            normalizedSearchTitle.includes(normalizedDirName))) {
           const nfoPath = existsSync(movieNfoPath) ? movieNfoPath : tvshowNfoPath
           console.log(`[nfo] Found NFO by title match: ${nfoPath}`)
           return parseNfoFile(nfoPath)
@@ -250,7 +250,7 @@ export function findNfoByTitle(title) {
 
           // Match NFO filename with title
           if (normalizedNfoName.includes(normalizedSearchTitle) ||
-              normalizedSearchTitle.includes(normalizedNfoName)) {
+            normalizedSearchTitle.includes(normalizedNfoName)) {
             const nfoPath = join(dirPath, entry.name)
             console.log(`[nfo] Found episode NFO by title match: ${nfoPath}`)
             return parseNfoFile(nfoPath)

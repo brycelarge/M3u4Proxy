@@ -82,7 +82,7 @@ async function downloadBackup() {
     const a = document.createElement('a')
     a.href = url
     const date = new Date().toISOString().slice(0, 10)
-    a.download = `m3u-manager-backup-${date}.json.gz`
+    a.download = `m3u4prox-backup-${date}.json.gz`
     document.body.appendChild(a)
     a.click()
     window.URL.revokeObjectURL(url)

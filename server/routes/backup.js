@@ -75,7 +75,7 @@ router.get('/backup', (req, res) => {
   const compressed = gzipSync(Buffer.from(JSON.stringify(bundle)))
 
   res.setHeader('Content-Type', 'application/gzip')
-  res.setHeader('Content-Disposition', `attachment; filename="m3u-manager-backup-${date}.json.gz"`)
+  res.setHeader('Content-Disposition', `attachment; filename="m3u4prox-backup-${date}.json.gz"`)
   res.setHeader('Content-Length', compressed.length)
   res.end(compressed)
 })
