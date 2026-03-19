@@ -15,6 +15,7 @@ dist-ssr
 # Runtime data (DB, EPG sites, generated files)
 data/
 .env
+.rsync-exclude
 
 # Editor directories and files
 .vscode/*
@@ -26,3 +27,4 @@ data/
 *.njsproj
 *.sln
 *.sw?
+.sisyphus

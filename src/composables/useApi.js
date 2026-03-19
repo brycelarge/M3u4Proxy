@@ -103,6 +103,7 @@ export const api = {
   // Streams
   getStreams:           ()           => request('GET',    '/streams'),
   killStream:          (channelId)  => request('DELETE', `/streams/${channelId}`),
+  getStreamStats:      (period)     => request('GET',    `/stream-stats${period ? `?period=${period}` : ''}`),
   getPlaylistM3uUrl:   (id)         => `/api/playlists/${id}/m3u`,
 
   // Settings

@@ -1,11 +1,56 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../composables/useApi.js'
+import { Bar } from 'vue-chartjs'
+import {
+  Chart as ChartJS,
+  BarElement,
+  CategoryScale,
+  LinearScale,
+  Title,
+  Tooltip,
+  Legend,
+} from 'chart.js'
+
+ChartJS.register(BarElement, CategoryScale, LinearScale, Title, Tooltip, Legend)
 
 const streams  = ref([])
 const sources  = ref([])
 const error    = ref('')
 let   interval = null
+
+// Tab state
+const activeTab = ref('streams')  // 'streams' | 'reports'
+
+// Reports state
+const statsPeriod = ref('day')  // 'day' | 'week' | 'month'
+const statsData = ref([])
+const statsLoading = ref(false)
+
+async function loadStats() {
+  statsLoading.value = true
+  try {
+    statsData.value = await api.getStreamStats(statsPeriod.value)
+  } catch (e) {
+    console.error('Failed to load stats:', e)
+    statsData.value = []
+  } finally {
+    statsLoading.value = false
+  }
+}
+
+// Watch period changes to reload stats
+watch(statsPeriod, () => {
+  if (activeTab.value === 'reports') loadStats()
+})
+
+// Load stats when switching to reports tab
+function switchTab(tab) {
+  activeTab.value = tab
+  if (tab === 'reports' && statsData.value.length === 0) {
+    loadStats()
+  }
+}
 
 async function load() {
   try {
@@ -83,6 +128,71 @@ const grouped = computed(() => {
   return [...groups.values()].sort((a, b) => b.streams.length - a.streams.length)
 })
 
+function fmtBytes(bytes) {
+  if (bytes === 0) return '0 B'
+  if (bytes < 1024)        return `${bytes} B`
+  if (bytes < 1024 ** 2)   return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3)   return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  if (bytes < 1024 ** 4)   return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  return `${(bytes / 1024 ** 4).toFixed(2)} TB`
+}
+
+const chartData = computed(() => {
+  const labels = statsData.value.map(row => row.date || row.week || row.month || '')
+  return {
+    labels,
+    datasets: [
+      {
+        label: 'From Source (In)',
+        data: statsData.value.map(row => row.bytes_in || 0),
+        backgroundColor: 'rgba(96, 165, 250, 0.7)',   // blue-400
+        borderColor: 'rgba(96, 165, 250, 1)',
+        borderWidth: 1,
+        stack: 'bandwidth',
+      },
+      {
+        label: 'To Clients (Out)',
+        data: statsData.value.map(row => row.bytes_out || 0),
+        backgroundColor: 'rgba(52, 211, 153, 0.7)',   // emerald-400
+        borderColor: 'rgba(52, 211, 153, 1)',
+        borderWidth: 1,
+        stack: 'bandwidth',
+      },
+    ],
+  }
+})
+
+const chartOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: false,
+  plugins: {
+    legend: {
+      labels: { color: '#94a3b8' },  // slate-400
+    },
+    tooltip: {
+      callbacks: {
+        label: (ctx) => `${ctx.dataset.label}: ${fmtBytes(ctx.raw)}`,
+      },
+    },
+  },
+  scales: {
+    x: {
+      stacked: true,
+      ticks: { color: '#64748b' },  // slate-500
+      grid: { color: '#1e293b' },   // slate-800
+    },
+    y: {
+      stacked: true,
+      ticks: {
+        color: '#64748b',
+        callback: (value) => fmtBytes(value),
+      },
+      grid: { color: '#1e293b' },
+    },
+  },
+}
+
 onMounted(() => {
   load()
   interval = setInterval(load, 3000)
@@ -95,8 +205,8 @@ onUnmounted(() => clearInterval(interval))
   <div class="p-3 sm:p-6 max-w-6xl mx-auto">
     <div class="flex items-center justify-between gap-3 mb-4 sm:mb-6 flex-wrap">
       <div>
-        <h1 class="text-lg font-bold text-slate-100">Active Streams</h1>
-        <p class="text-xs text-slate-500 mt-0.5">Live upstream connections · refreshes every 3s</p>
+        <h1 class="text-lg font-bold text-slate-100">Streams</h1>
+        <p class="text-xs text-slate-500 mt-0.5">Monitor active streams and view bandwidth history</p>
       </div>
       <!-- Totals summary -->
       <div v-if="streams.length" class="flex items-center gap-4 text-xs">
@@ -129,18 +239,43 @@ onUnmounted(() => clearInterval(interval))
       </span>
     </div>
 
-    <p v-if="error" class="text-xs text-red-400 mb-4">⚠ {{ error }}</p>
-
-    <!-- Empty state -->
-    <div v-if="!streams.length && !grouped.length" class="text-center py-20 text-slate-500">
-      <p class="text-5xl mb-4">📡</p>
-      <p class="text-sm font-medium text-slate-400">No active streams</p>
-      <p class="text-xs mt-1">Streams appear here when clients connect via the proxy M3U</p>
+    <!-- Tab switcher -->
+    <div class="flex gap-1 mb-4 bg-[#12141e] rounded-lg p-1 w-fit">
+      <button
+        data-testid="tab-streams"
+        @click="switchTab('streams')"
+        :class="[
+          'px-4 py-1.5 text-xs font-medium rounded-md transition-colors',
+          activeTab === 'streams'
+            ? 'bg-indigo-600 text-white'
+            : 'text-slate-400 hover:text-slate-200'
+        ]"
+      >Active Streams</button>
+      <button
+        data-testid="tab-reports"
+        @click="switchTab('reports')"
+        :class="[
+          'px-4 py-1.5 text-xs font-medium rounded-md transition-colors',
+          activeTab === 'reports'
+            ? 'bg-indigo-600 text-white'
+            : 'text-slate-400 hover:text-slate-200'
+        ]"
+      >Reports</button>
     </div>
 
-    <!-- Per-source groups -->
-    <div class="space-y-6">
-      <div v-for="group in grouped" :key="group.source.id ?? 'unknown'">
+    <p v-if="error" class="text-xs text-red-400 mb-4">⚠ {{ error }}</p>
+
+    <div v-if="activeTab === 'streams'">
+      <!-- Empty state -->
+      <div v-if="!streams.length && !grouped.length" class="text-center py-20 text-slate-500">
+        <p class="text-5xl mb-4">📡</p>
+        <p class="text-sm font-medium text-slate-400">No active streams</p>
+        <p class="text-xs mt-1">Streams appear here when clients connect via the proxy M3U</p>
+      </div>
+
+      <!-- Per-source groups -->
+      <div class="space-y-6">
+        <div v-for="group in grouped" :key="group.source.id ?? 'unknown'">
 
         <!-- Source header + tuner slot SVG -->
         <div class="flex items-center gap-4 mb-3">
@@ -250,12 +385,55 @@ onUnmounted(() => clearInterval(interval))
           </div>
 
           <!-- Empty slots placeholder when source has limit but no streams -->
-          <div
-            v-if="group.streams.length === 0 && group.source.max_streams > 0"
-            class="text-xs text-slate-700 px-4 py-3 bg-[#1a1d27] border border-[#2e3250] rounded-xl"
-          >All {{ group.source.max_streams }} tuner slots available</div>
-        </div>
+            <div
+              v-if="group.streams.length === 0 && group.source.max_streams > 0"
+              class="text-xs text-slate-700 px-4 py-3 bg-[#1a1d27] border border-[#2e3250] rounded-xl"
+            >All {{ group.source.max_streams }} tuner slots available</div>
+          </div>
 
+        </div>
+      </div>
+    </div>
+
+    <!-- Reports Tab -->
+    <div v-if="activeTab === 'reports'">
+      <!-- Period toggle -->
+      <div class="flex items-center gap-2 mb-6">
+        <span class="text-xs text-slate-500">Period:</span>
+        <div class="flex gap-1 bg-[#12141e] rounded-lg p-1">
+          <button
+            v-for="p in ['day', 'week', 'month']"
+            :key="p"
+            :data-testid="`period-${p}`"
+            @click="statsPeriod = p"
+            :class="[
+              'px-3 py-1 text-xs font-medium rounded-md capitalize transition-colors',
+              statsPeriod === p
+                ? 'bg-indigo-600 text-white'
+                : 'text-slate-400 hover:text-slate-200'
+            ]"
+          >{{ p === 'day' ? 'Last 7 Days' : p === 'week' ? 'Last 4 Weeks' : 'Last 12 Months' }}</button>
+        </div>
+      </div>
+
+      <!-- Loading state -->
+      <div v-if="statsLoading" class="flex items-center justify-center py-20 text-slate-500 text-sm">
+        Loading...
+      </div>
+
+      <!-- Empty state -->
+      <div v-else-if="!statsData.length" class="text-center py-20 text-slate-500">
+        <p class="text-4xl mb-4">📊</p>
+        <p class="text-sm font-medium text-slate-400">No data available</p>
+        <p class="text-xs mt-1">Bandwidth data will appear here once streams have been active</p>
+      </div>
+
+      <!-- Chart -->
+      <div v-else class="bg-[#1a1d27] border border-[#2e3250] rounded-xl p-4">
+        <h2 class="text-sm font-semibold text-slate-300 mb-4">Bandwidth Transfer</h2>
+        <div data-testid="stats-chart" style="height: 320px; position: relative;">
+          <Bar :data="chartData" :options="chartOptions" />
+        </div>
       </div>
     </div>
   </div>

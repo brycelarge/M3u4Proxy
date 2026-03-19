@@ -7,6 +7,7 @@ import os from 'node:os'
 
 import db from './db.js'
 import { runMigrations } from './migrate.js'
+import { startStatsFlusher } from './stats-flusher.js'
 import { registerHdhrRoutes, startAllDeviceServers } from './hdhr.js'
 import { registerXtreamRoutes } from './xtream.js'
 import { startContentUpdateScheduler, startEpgGrabCron, startEnrichCron } from './services/scheduler.js'
@@ -28,6 +29,7 @@ import sourceChannelsRoutes from './routes/source-channels.js'
 import playlistChannelsRoutes from './routes/playlist-channels.js'
 import strmNfoRoutes from './routes/strm-nfo.js'
 import portalRoutes from './routes/portal.js'
+import streamStatsRoutes from './routes/stream-stats.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -49,6 +51,7 @@ app.use('/api', epgRoutes)
 app.use('/api', settingsRoutes)
 app.use('/api/composite-streams', compositeRoutes)
 app.use('/api/streams', streamsRoutes) // This mounts /api/streams endpoints
+app.use('/api/stream-stats', streamStatsRoutes)
 app.use('/api', backupRoutes)
 app.use('/api', hdhrVirtualDevicesRoutes)
 app.use('/api', diagnosticsRoutes)
@@ -73,6 +76,7 @@ app.get('/guide.xml', async (req, res) => {
 
 // Run migrations on startup
 runMigrations(db)
+startStatsFlusher()
 
 // Start device servers
 startAllDeviceServers(db)

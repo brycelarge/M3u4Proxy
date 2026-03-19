@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import db from './db.js'
 import { getBufferSeconds } from './streamer.js'
 import { getSettingValue } from './settings-cache.js'
+import { flushSession } from './stats-flusher.js'
 
 const MAX_RECONNECTS = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
@@ -107,6 +108,8 @@ class FfmpegSession extends EventEmitter {
     this.startedAt = new Date()
     this.bytesIn = 0
     this.bytesOut = 0
+    this._lastFlushedBytesIn = 0
+    this._lastFlushedBytesOut = 0
     this.reconnects = 0
     this._lastBytes = 0
     this._lastTick = Date.now()
@@ -154,6 +157,7 @@ class FfmpegSession extends EventEmitter {
       this.process = null
     }
 
+    flushSession(this)
     sessions.delete(this.channelId)
 
     if (this.username) {

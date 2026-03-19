@@ -9,6 +9,7 @@
 import { EventEmitter } from 'node:events'
 import db from './db.js'
 import { getSettingValue } from './settings-cache.js'
+import { flushSession } from './stats-flusher.js'
 
 const MAX_RECONNECTS    = parseInt(process.env.STREAM_MAX_RECONNECTS || '5')
 const RECONNECT_DELAY   = parseInt(process.env.STREAM_RECONNECT_DELAY || '2000')
@@ -64,6 +65,8 @@ class Session extends EventEmitter {
     this.startedAt    = new Date()
     this.bytesIn      = 0
     this.bytesOut     = 0
+    this._lastFlushedBytesIn = 0
+    this._lastFlushedBytesOut = 0
     this.reconnects   = 0
     this._lastBytes   = 0
     this._lastTick    = Date.now()
@@ -104,6 +107,7 @@ class Session extends EventEmitter {
     if (this.dead) return
     this.dead = true
     this.abortCtrl.abort()
+    flushSession(this)
     sessions.delete(this.channelId)
     // Record stream history if we have a username
     if (this.username) {

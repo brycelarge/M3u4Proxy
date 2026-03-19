@@ -8,6 +8,7 @@
  */
 
 import { EventEmitter } from 'node:events'
+import { flushSession } from './stats-flusher.js'
 
 const GRACE_PERIOD_MS = 500 // Keep connection alive 0.5s after last client disconnects
 
@@ -25,6 +26,8 @@ class VodSession extends EventEmitter {
     this.clients = new Set()
     this.startedAt = new Date()
     this.bytesOut = 0
+    this._lastFlushedBytesIn = 0
+    this._lastFlushedBytesOut = 0
     this.dead = false
     this.graceTimer = null
   }
@@ -68,6 +71,7 @@ class VodSession extends EventEmitter {
       this.graceTimer = null
     }
 
+    flushSession(this)
     vodSessions.delete(this.channelId)
     this.emit('dead')
   }
