@@ -78,7 +78,10 @@ export async function streamToXmltvCache(playlistId, key, generator, compress = 
     }
 
     function cleanupTemp() {
-      try { unlinkSync(tmpPath) } catch {}
+      try { unlinkSync(tmpPath) } catch (err) {
+        // Temp file may not exist, which is fine
+        if (err.code !== 'ENOENT') console.error('[xmltvCache] Error cleaning up temp file:', err.message)
+      }
     }
 
     writeStream.on('error', (err) => {
@@ -140,7 +143,10 @@ export function getPlaylistXmltvCacheMeta(playlistId) {
 }
 
 function deleteFileSafe(filePath) {
-  try { unlinkSync(filePath) } catch {}
+  try { unlinkSync(filePath) } catch (err) {
+    // File may not exist, which is fine
+    if (err.code !== 'ENOENT') console.error('[xmltvCache] Error deleting file:', err.message)
+  }
 }
 
 export function invalidatePlaylistXmltvCache(playlistId) {
