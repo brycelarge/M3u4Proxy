@@ -27,40 +27,45 @@ function normalizeCategory(groupTitle) {
   return null
 }
 
-export function generateXmltv(db, mappedChannels, relevantSourceIds, hostUrl) {
-  // Build channel XML from playlist
-  const channels_xml = mappedChannels.map(ch => {
-    const displayName = ch.tvg_name || ch.name || 'Unknown'
-    const channelNumber = Number.isFinite(Number(ch.sort_order)) && Number(ch.sort_order) > 0
-      ? String(ch.sort_order)
-      : ''
-    const logo = ch.custom_logo || ch.tvg_logo || ''
-    const groupTitle = ch.group_title || ''
-    const channelId = ch.epg_id
+function buildChannelXml(ch, hostUrl) {
+  const displayName = ch.tvg_name || ch.name || 'Unknown'
+  const channelNumber = Number.isFinite(Number(ch.sort_order)) && Number(ch.sort_order) > 0
+    ? String(ch.sort_order)
+    : ''
+  const logo = ch.custom_logo || ch.tvg_logo || ''
+  const groupTitle = ch.group_title || ''
+  const channelId = ch.epg_id
 
-    let xml = `  <channel id="${escapeXml(channelId)}">`
-    xml += `\n    <display-name>${escapeXml(displayName)}</display-name>`
-    if (channelNumber) {
-      xml += `\n    <display-name>${escapeXml(`${channelNumber} ${displayName}`)}</display-name>`
-      xml += `\n    <channel-number>${escapeXml(channelNumber)}</channel-number>`
+  let xml = `  <channel id="${escapeXml(channelId)}">`
+  xml += `\n    <display-name>${escapeXml(displayName)}</display-name>`
+  if (channelNumber) {
+    xml += `\n    <display-name>${escapeXml(`${channelNumber} ${displayName}`)}</display-name>`
+    xml += `\n    <channel-number>${escapeXml(channelNumber)}</channel-number>`
+  }
+  if (logo) {
+    const proxyLogoUrl = `${hostUrl}/api/logo?url=${encodeURIComponent(logo)}`
+    xml += `\n    <icon src="${escapeXml(proxyLogoUrl)}" />`
+  }
+  if (groupTitle) {
+    xml += `\n    <category>${escapeXml(groupTitle)}</category>`
+    const normalizedCategory = normalizeCategory(groupTitle)
+    if (normalizedCategory && normalizedCategory.toLowerCase() !== groupTitle.trim().toLowerCase()) {
+      xml += `\n    <category>${escapeXml(normalizedCategory)}</category>`
     }
-    if (logo) {
-      const proxyLogoUrl = `${hostUrl}/api/logo?url=${encodeURIComponent(logo)}`
-      xml += `\n    <icon src="${escapeXml(proxyLogoUrl)}" />`
-    }
-    if (groupTitle) {
-      xml += `\n    <category>${escapeXml(groupTitle)}</category>`
-      const normalizedCategory = normalizeCategory(groupTitle)
-      if (normalizedCategory && normalizedCategory.toLowerCase() !== groupTitle.trim().toLowerCase()) {
-        xml += `\n    <category>${escapeXml(normalizedCategory)}</category>`
-      }
-    }
+  }
 
-    xml += `\n  </channel>`
-    return xml
-  })
+  xml += `\n  </channel>`
+  return xml
+}
 
-  const programmes_xml = []
+export async function* generateXmltv(db, mappedChannels, relevantSourceIds, hostUrl) {
+  yield `<?xml version="1.0" encoding="UTF-8"?>\n`
+  yield `<tv generator-info-name="m3u4prox">\n`
+
+  // Yield channel XML
+  for (const ch of mappedChannels) {
+    yield buildChannelXml(ch, hostUrl) + '\n'
+  }
 
   // Load EPG mappings to map source_tvg_id -> target_tvg_id
   const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings').all()
@@ -110,26 +115,26 @@ export function generateXmltv(db, mappedChannels, relevantSourceIds, hostUrl) {
   // Query epg_programmes directly — only rows for wanted channel IDs, no blob scanning
   if (relevantSourceIds && relevantSourceIds.length > 0 && wantedIds.size > 0) {
     const t0 = Date.now()
-    // Only build enrichment maps if there are programmes to enrich
     const { showMap, epMap } = getEnrichmentMaps()
     console.log(`[xmltv] getEnrichmentMaps: ${Date.now() - t0}ms (${showMap.size} shows)`)
 
     const srcParams = relevantSourceIds.map(() => '?').join(',')
     const wantedIdsArr = Array.from(wantedIds)
     const chunkSize = 500
+    let rowCount = 0
 
     for (let i = 0; i < wantedIdsArr.length; i += chunkSize) {
       const chunk = wantedIdsArr.slice(i, i + chunkSize)
       const chunkParams = chunk.map(() => '?').join(',')
 
-      const rows = db.prepare(`
+      const stmt = db.prepare(`
         SELECT channel_id, raw
         FROM epg_programmes
         WHERE source_id IN (${srcParams})
           AND channel_id IN (${chunkParams})
-      `).all(...relevantSourceIds, ...chunk)
+      `)
 
-      for (const row of rows) {
+      for (const row of stmt.iterate(...relevantSourceIds, ...chunk)) {
         const channelId = row.channel_id
         let progContent = row.raw
 
@@ -191,16 +196,15 @@ export function generateXmltv(db, mappedChannels, relevantSourceIds, hostUrl) {
           }
         }
 
-        programmes_xml.push(progContent)
+        yield progContent + '\n'
+
+        rowCount++
+        if (rowCount % 100 === 0) {
+          await new Promise(resolve => setImmediate(resolve))
+        }
       }
     }
   }
 
-  return [
-    `<?xml version="1.0" encoding="UTF-8"?>`,
-    `<tv generator-info-name="m3u4prox">`,
-    ...channels_xml,
-    ...programmes_xml,
-    `</tv>`,
-  ].join('\n')
+  yield `</tv>\n`
 }
