@@ -27,6 +27,7 @@ import { getEnrichmentMaps, parseProgBlock, applyEnrichment } from './epgEnrich.
 import { findNfoForChannel } from './nfo-parser.js'
 import { getNfoFromIndex } from './nfo-index.js'
 import { generateXmltv } from './services/xmltv.js'
+import { streamToXmltvCache, getPlaylistXmltvCachePath } from './services/xmltvCache.js'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getSetting(key, fallback = null) {
@@ -188,10 +189,39 @@ function getMappedChannelsForPlaylistIds(playlistIds) {
     .sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id))
 }
 
-function buildUserXmltv(user, baseUrl) {
+async function buildUserXmltv(user, baseUrl) {
   const mappedChannels = getMappedChannelsForPlaylistIds(getUserLivePlaylistIds(user))
-  const cacheRows = db.prepare('SELECT content FROM epg_cache WHERE content IS NOT NULL').all()
-  return generateXmltv(db, mappedChannels, cacheRows, baseUrl)
+  
+  // Get relevant source IDs from epg_programmes for these channels' EPG IDs
+  const epgIds = mappedChannels.map(ch => ch.epg_id).filter(Boolean)
+  if (!epgIds.length) return null
+  
+  // Query which sources have programmes for these EPG IDs
+  const idParams = epgIds.map(() => '?').join(',')
+  const relevantSourceIds = db.prepare(`
+    SELECT DISTINCT source_id FROM epg_programmes 
+    WHERE channel_id IN (${idParams})
+  `).all(...epgIds).map(r => r.source_id)
+  
+  if (!relevantSourceIds.length) return null
+  
+  // Generate cache key from user id + channel count + source ids
+  const crypto = await import('node:crypto')
+  const cachePayload = JSON.stringify({
+    userId: user.id,
+    channelCount: mappedChannels.length,
+    epgIds: epgIds.sort(),
+    sourceIds: relevantSourceIds.sort()
+  })
+  const cacheKey = crypto.createHash('sha1').update(cachePayload).digest('hex')
+  
+  // Check for cached file
+  const cachedPath = getPlaylistXmltvCachePath(`user_${user.id}`, cacheKey, false)
+  if (cachedPath) return cachedPath
+  
+  // Generate and stream to cache
+  const generator = generateXmltv(db, mappedChannels, relevantSourceIds, baseUrl)
+  return await streamToXmltvCache(`user_${user.id}`, cacheKey, generator, false, relevantSourceIds)
 }
 
 function getTargetEpgId(channel, epgMap) {
@@ -1011,7 +1041,9 @@ export function registerXtreamRoutes(app) {
     const user = await lookupUser(u, p)
     if (!user) return res.status(401).send('Unauthorized')
     res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-    res.send(buildUserXmltv(user, getBaseUrl(req)))
+    const cachePath = await buildUserXmltv(user, getBaseUrl(req))
+    if (!cachePath) return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u4prox"></tv>`)
+    res.sendFile(cachePath)
   })
 
   app.get('/xmltv.php', async (req, res) => {
@@ -1019,7 +1051,9 @@ export function registerXtreamRoutes(app) {
     const user = await lookupUser(u, p)
     if (!user) return res.status(401).send('Unauthorized')
     res.setHeader('Content-Type', 'application/xml; charset=utf-8')
-    res.send(buildUserXmltv(user, getBaseUrl(req)))
+    const cachePath = await buildUserXmltv(user, getBaseUrl(req))
+    if (!cachePath) return res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="m3u4prox"></tv>`)
+    res.sendFile(cachePath)
   })
 
   // ── API: server info for Settings page ───────────────────────────────────

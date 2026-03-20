@@ -10,6 +10,8 @@ import {
   setPlaylistXmltvCache,
   getPlaylistXmltvCacheMeta,
   invalidatePlaylistXmltvCache,
+  getPlaylistXmltvCachePath,
+  streamToXmltvCache,
 } from '../services/xmltvCache.js'
 
 const router = express.Router()
@@ -645,37 +647,38 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
   const hostIp = process.env.HOST_IP
   const baseUrl = hostIp ? `${proto}://${hostIp}:${port}` : `${proto}://${host}`
   const cacheKey = buildPlaylistXmltvSignature(playlist.id, mappedChannels, epgMappings, cacheRows)
-  const cached = getPlaylistXmltvCache(playlist.id, cacheKey, compress)
-
-  if (cached) {
+  
+  // Check for cached file on disk
+  const cachedPath = getPlaylistXmltvCachePath(playlist.id, cacheKey, compress)
+  if (cachedPath) {
     const meta = getPlaylistXmltvCacheMeta(playlist.id)
     res.setHeader('X-XMLTV-Cache', 'HIT')
     res.setHeader('X-XMLTV-Sources', String(meta?.sourceIds?.length || 0))
     if (compress) res.setHeader('Content-Encoding', 'gzip')
-    return res.send(cached)
+    return res.sendFile(cachedPath)
   }
 
+  // Generate and stream to cache
   const t2 = Date.now()
   const { generateXmltv } = await import('../services/xmltv.js')
-  const out = generateXmltv(db, mappedChannels, relevantSourceIds, baseUrl)
+  const generator = generateXmltv(db, mappedChannels, relevantSourceIds, baseUrl)
+  
+  // Stream to disk cache (with gzip if compress=true)
+  const cachePath = await streamToXmltvCache(
+    playlist.id,
+    cacheKey,
+    generator,
+    compress,
+    relevantSourceIds
+  )
+  
   const t3 = Date.now()
-  console.log(`[xmltv] generateXmltv: ${t3 - t2}ms, total: ${t3 - t0}ms`)
-  let compressed = null
-
-  if (compress) {
-    const { gzipSync } = await import('node:zlib')
-    compressed = gzipSync(Buffer.from(out))
-    res.setHeader('Content-Encoding', 'gzip')
-    setPlaylistXmltvCache(playlist.id, cacheKey, out, compressed, cacheRows.map(r => r.source_id))
-    res.setHeader('X-XMLTV-Cache', 'MISS')
-    res.setHeader('X-XMLTV-Sources', String(cacheRows.length))
-    res.send(compressed)
-  } else {
-    setPlaylistXmltvCache(playlist.id, cacheKey, out, compressed, cacheRows.map(r => r.source_id))
-    res.setHeader('X-XMLTV-Cache', 'MISS')
-    res.setHeader('X-XMLTV-Sources', String(cacheRows.length))
-    res.send(out)
-  }
+  console.log(`[xmltv] streamToXmltvCache: ${t3 - t2}ms, total: ${t3 - t0}ms`)
+  
+  res.setHeader('X-XMLTV-Cache', 'MISS')
+  res.setHeader('X-XMLTV-Sources', String(relevantSourceIds.length))
+  if (compress) res.setHeader('Content-Encoding', 'gzip')
+  res.sendFile(cachePath)
 })
 
 export default router
