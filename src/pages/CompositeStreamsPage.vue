@@ -4,6 +4,7 @@ import { api } from '../composables/useApi.js'
 import CompositeStreamEditor from '../components/CompositeStreamEditor.vue'
 
 const streams = ref([])
+const playlists = ref([])
 const loading = ref(true)
 const error = ref('')
 const showEditor = ref(false)
@@ -14,12 +15,14 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [streamsData, sessionsData] = await Promise.all([
+    const [streamsData, sessionsData, playlistsData] = await Promise.all([
       api.getCompositeStreams(),
-      api.getActiveSessions()
+      api.getActiveSessions(),
+      api.getPlaylists()
     ])
     streams.value = streamsData
     activeSessions.value = sessionsData
+    playlists.value = playlistsData
   } catch (e) {
     error.value = e.message
   } finally {
@@ -50,10 +53,7 @@ async function deleteStream(stream) {
 
 async function toggleActive(stream) {
   try {
-    await api.updateCompositeStream(stream.id, {
-      ...stream,
-      active: stream.active ? 0 : 1
-    })
+    await api.updateCompositeStream(stream.id, { active: stream.active ? 0 : 1 })
     await load()
   } catch (e) {
     alert(`Failed to update: ${e.message}`)
@@ -71,6 +71,11 @@ async function stopSession(compositeId) {
 
 function getSessionStatus(compositeId) {
   return activeSessions.value.find(s => s.compositeId === compositeId)
+}
+
+function getPlaylistName(playlistId) {
+  const p = playlists.value.find(pl => pl.id === playlistId)
+  return p ? p.name : null
 }
 
 function onEditorClose() {
@@ -170,6 +175,11 @@ onMounted(() => {
 
             <div class="flex items-center gap-4 text-xs text-slate-500">
               <span>{{ stream.source_count }} sources</span>
+              <span>•</span>
+              <span v-if="getPlaylistName(stream.playlist_id)" class="text-indigo-400">
+                {{ getPlaylistName(stream.playlist_id) }}
+              </span>
+              <span v-else class="text-slate-600">No playlist</span>
               <span>•</span>
               <span>Created {{ new Date(stream.created_at).toLocaleDateString() }}</span>
               <span v-if="stream.updated_at !== stream.created_at">

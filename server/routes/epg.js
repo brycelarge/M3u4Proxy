@@ -73,43 +73,23 @@ function getEpgList() {
 
   const epgList = []
   const epgSeen = new Set()
+  const channelRegex = /<channel[^>]*>(.*?)<\/channel>/gs
   for (const cacheRow of fullRows) {
     if (!cacheRow.content) continue
-    let currentId = null, currentName = null, currentIcon = ''
-    for (const line of cacheRow.content.split('\n')) {
-      const trimmed = line.trim()
-      if (!currentId) {
-        const idMatch = trimmed.match(/<channel\s[^>]*id="([^"]*)"/)
-        if (idMatch) {
-          currentId = idMatch[1]; currentName = null; currentIcon = ''
-          const nameMatch = trimmed.match(/<display-name[^>]*>([^<]+)<\/display-name>/)
-          if (nameMatch) currentName = nameMatch[1].trim()
-          const iconMatch = trimmed.match(/<icon\s[^>]*src="([^"]*)"/)
-          if (iconMatch) currentIcon = iconMatch[1]
-          if (trimmed.includes('</channel>')) {
-            if (currentId && currentName && !epgSeen.has(currentId)) {
-              epgSeen.add(currentId)
-              epgList.push({ id: currentId, name: currentName, icon: currentIcon, source_name: cacheRow.source_name, source_id: cacheRow.source_id })
-            }
-            currentId = null; currentName = null; currentIcon = ''
-          }
-        }
-      } else {
-        if (!currentName) {
-          const nameMatch = trimmed.match(/<display-name[^>]*>([^<]+)<\/display-name>/)
-          if (nameMatch) currentName = nameMatch[1].trim()
-        }
-        if (!currentIcon) {
-          const iconMatch = trimmed.match(/<icon\s[^>]*src="([^"]*)"/)
-          if (iconMatch) currentIcon = iconMatch[1]
-        }
-        if (trimmed.includes('</channel>')) {
-          if (currentId && currentName && !epgSeen.has(currentId)) {
-            epgSeen.add(currentId)
-            epgList.push({ id: currentId, name: currentName, icon: currentIcon, source_name: cacheRow.source_name, source_id: cacheRow.source_id })
-          }
-          currentId = null; currentName = null; currentIcon = ''
-        }
+    for (const match of cacheRow.content.matchAll(channelRegex)) {
+      const block = match[0]
+      const inner = match[1]
+      const idMatch = block.match(/id="([^"]*)"/)
+      if (!idMatch) continue
+      const currentId = idMatch[1]
+      if (epgSeen.has(currentId)) continue
+      const nameMatch = inner.match(/<display-name[^>]*>([^<]+)<\/display-name>/)
+      const currentName = nameMatch ? nameMatch[1].trim() : ''
+      const iconMatch = inner.match(/<icon\s[^>]*src="([^"]*)"/)
+      const currentIcon = iconMatch ? iconMatch[1] : ''
+      if (currentId && currentName) {
+        epgSeen.add(currentId)
+        epgList.push({ id: currentId, name: currentName, icon: currentIcon, source_name: cacheRow.source_name, source_id: cacheRow.source_id })
       }
     }
   }
@@ -726,36 +706,40 @@ router.get('/epg/search-cached', (req, res) => {
   const rows = source_id ? db.prepare(sql).all(source_id) : db.prepare(sql).all()
 
   const results = []
+  const channelRegex = /<channel[^>]*>(.*?)<\/channel>/gs
   for (const row of rows) {
     const sourceName = db.prepare('SELECT name FROM sources WHERE id = ?').get(row.source_id)?.name || 'Unknown'
-    const matches = []
-    const lines = row.content.split('\n')
-    let currentId = null
-    let currentName = null
-    let currentIcon = ''
+    for (const match of row.content.matchAll(channelRegex)) {
+      const block = match[0]
+      const inner = match[1]
+      const idMatch = block.match(/id="([^"]*)"/)
+      if (!idMatch) continue
+      const currentId = idMatch[1]
+      const nameMatch = inner.match(/<display-name[^>]*>([^<]+)<\/display-name>/)
+      const currentName = nameMatch ? nameMatch[1].trim() : ''
+      const iconMatch = inner.match(/<icon\s[^>]*src="([^"]*)"/)
+      const currentIcon = iconMatch ? iconMatch[1] : ''
+      const qLower = q.toLowerCase()
+      const nameLower = currentName.toLowerCase()
+      const idLower = currentId.toLowerCase()
 
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith('<channel')) {
-        const idMatch = trimmed.match(/id="([^"]*)"/)
-        if (idMatch) currentId = idMatch[1]
-      } else if (trimmed.startsWith('<display-name')) {
-        const nameMatch = trimmed.match(/>([^<]*)<\//)
-        if (nameMatch) currentName = nameMatch[1]
-      } else if (trimmed.startsWith('<icon')) {
-        const iconMatch = trimmed.match(/src="([^"]*)"/)
-        if (iconMatch) currentIcon = iconMatch[1]
-      } else if (trimmed === '</channel>') {
-        if (currentId && currentName && currentName.toLowerCase().includes(q.toLowerCase())) {
-          results.push({
-            id: currentId,
-            name: currentName,
-            logo: currentIcon,
-            source_id: row.source_id,
-            source_name: sourceName
-          })
-        }
-        currentId = null; currentName = null; currentIcon = ''
+      // Build search variants: raw, prefix-stripped, space-stripped
+      const variants = [qLower]
+      const stripped = qLower.replace(/^(us|usa|uk|ca|au|fr|de|es|it|nl):\s*/i, '').trim()
+      if (stripped && stripped !== qLower) variants.push(stripped)
+      const noSpaces = qLower.replace(/\s+/g, '')
+      if (noSpaces !== qLower) variants.push(noSpaces)
+
+      const isMatch = variants.some(v => nameLower.includes(v) || idLower.includes(v))
+
+      if (currentId && currentName && isMatch) {
+        results.push({
+          id: currentId,
+          name: currentName,
+          logo: currentIcon,
+          source_id: row.source_id,
+          source_name: sourceName
+        })
       }
     }
   }

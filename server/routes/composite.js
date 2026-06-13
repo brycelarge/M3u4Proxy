@@ -94,15 +94,29 @@ router.put('/:id', (req, res) => {
 
   try {
     const update = db.transaction(() => {
-      const fields = ['name = ?', 'description = ?', 'layout_config = ?', 'audio_config = ?', 'active = ?']
-      const values = [
-        name,
-        description || '',
-        JSON.stringify(layout_config),
-        JSON.stringify(audio_config || {}),
-        active !== undefined ? (active ? 1 : 0) : 1,
-      ]
+      const fields = []
+      const values = []
 
+      if (name !== undefined) {
+        fields.push('name = ?')
+        values.push(name)
+      }
+      if (description !== undefined) {
+        fields.push('description = ?')
+        values.push(description)
+      }
+      if (layout_config !== undefined) {
+        fields.push('layout_config = ?')
+        values.push(JSON.stringify(layout_config))
+      }
+      if (audio_config !== undefined) {
+        fields.push('audio_config = ?')
+        values.push(JSON.stringify(audio_config))
+      }
+      if (active !== undefined) {
+        fields.push('active = ?')
+        values.push(active ? 1 : 0)
+      }
       if (playlist_id !== undefined) {
         fields.push('playlist_id = ?')
         values.push(playlist_id || null)
@@ -112,11 +126,13 @@ router.put('/:id', (req, res) => {
         values.push(sort_order || 0)
       }
 
-      db.prepare(`
-        UPDATE composite_streams
-        SET ${fields.join(', ')}, updated_at = datetime('now')
-        WHERE id = ?
-      `).run(...values, compositeId)
+      if (fields.length > 0) {
+        db.prepare(`
+          UPDATE composite_streams
+          SET ${fields.join(', ')}, updated_at = datetime('now')
+          WHERE id = ?
+        `).run(...values, compositeId)
+      }
 
       if (sources) {
         db.prepare('DELETE FROM composite_stream_sources WHERE composite_stream_id = ?').run(compositeId)
