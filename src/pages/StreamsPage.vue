@@ -349,6 +349,10 @@ onUnmounted(() => clearInterval(interval))
               <p class="font-semibold text-sm text-slate-100 truncate">{{ s.channelName }}</p>
               <div class="flex flex-wrap gap-2 mt-0.5 text-xs text-slate-500">
                 <span><span class="text-slate-300 font-medium">{{ s.clients }}</span> {{ s.clients === 1 ? 'client' : 'clients' }}</span>
+                <template v-if="s.isCompositeSource">
+                  <span class="text-slate-700">·</span>
+                  <span class="text-indigo-400 font-medium" title="Feeding a composite stream">🔀 Composite</span>
+                </template>
                 <template v-if="s.clients > 1">
                   <span class="text-slate-700">·</span>
                   <span class="text-green-400 font-medium" title="Multiple clients sharing one upstream connection">🔗 Shared</span>
@@ -379,9 +383,15 @@ onUnmounted(() => clearInterval(interval))
 
             <!-- Kill -->
             <button
+              v-if="!s.isCompositeSource"
               @click="kill(s.channelId)"
               class="px-2.5 py-1.5 text-xs bg-[#22263a] border border-red-900/50 rounded-lg hover:border-red-500 text-red-400 transition-colors shrink-0"
             >✕</button>
+            <span
+              v-else
+              class="px-2.5 py-1.5 text-xs bg-[#22263a] border border-indigo-900/50 rounded-lg text-indigo-400 shrink-0 cursor-default"
+              title="Managed by composite stream"
+            >🔀</span>
           </div>
 
           <!-- Empty slots placeholder when source has limit but no streams -->

@@ -53,7 +53,7 @@ function getRollingBufferSize() {
 const sessions = new Map()
 
 class Session extends EventEmitter {
-  constructor(channelId, upstreamUrl, channelName, sourceId, username) {
+  constructor(channelId, upstreamUrl, channelName, sourceId, username, internalForComposite = null) {
     super()
     this.setMaxListeners(200)
     this.channelId    = channelId
@@ -61,6 +61,7 @@ class Session extends EventEmitter {
     this.channelName  = channelName
     this.sourceId     = sourceId
     this.username     = username || null
+    this.internalForComposite = internalForComposite || null
     this.clients      = new Set()
     this.startedAt    = new Date()
     this.bytesIn      = 0
@@ -313,7 +314,7 @@ async function pump(session) {
 }
 
 // ── Start or join a stream session ────────────────────────────────────────────
-export async function connectClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null) {
+export async function connectClient(channelId, upstreamUrl, channelName, res, sourceId = null, username = null, internalForComposite = null) {
   // Check if response is already sent
   if (res.headersSent) {
     throw new Error('Response headers already sent')
@@ -371,7 +372,7 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
   const bufferSecs = getBufferSeconds()
   console.log(`[buffer-stream] Starting m3u4prox buffer for "${channelName}" (buffer: ${bufferSecs}s)`)
 
-  const session = new Session(channelId, upstreamUrl, channelName, sourceId, username)
+  const session = new Session(channelId, upstreamUrl, channelName, sourceId, username, internalForComposite)
   sessions.set(channelId, session)
 
   // Set streaming headers
@@ -405,17 +406,18 @@ export async function connectClient(channelId, upstreamUrl, channelName, res, so
 // ── Stats ─────────────────────────────────────────────────────────────────────
 export function getActiveSessions() {
   return [...sessions.values()].map(s => ({
-    channelId:   s.channelId,
-    channelName: s.channelName,
-    sourceId:    s.sourceId,
-    username:    s.username,
-    clients:     s.clients.size,
-    startedAt:   s.startedAt,
-    bytesIn:     s.bytesIn,
-    bytesOut:    s.bytesOut,
-    bitrate:     s.bitrate,
-    reconnects:  s.reconnects,
-    upstreamUrl: s.upstreamUrl,
+    channelId:          s.channelId,
+    channelName:        s.channelName,
+    sourceId:           s.sourceId,
+    username:           s.username,
+    clients:            s.clients.size,
+    startedAt:          s.startedAt,
+    bytesIn:            s.bytesIn,
+    bytesOut:           s.bytesOut,
+    bitrate:            s.bitrate,
+    reconnects:         s.reconnects,
+    upstreamUrl:        s.upstreamUrl,
+    isCompositeSource:  !!s.internalForComposite,
   }))
 }
 

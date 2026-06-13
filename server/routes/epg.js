@@ -938,6 +938,42 @@ router.get('/epg/guide-grid', async (req, res) => {
     ch.programmes.sort((a, b) => new Date(a.start) - new Date(b.start))
   }
 
+  // Append composite streams assigned to this playlist
+  const composites = db.prepare(`
+    SELECT id, name, sort_order
+    FROM composite_streams
+    WHERE playlist_id = ? AND active = 1
+    ORDER BY sort_order
+  `).all(activePlaylistId)
+
+  for (const c of composites) {
+    const epgId = `composite-${c.id}`
+    const programmes = []
+    // Generate 1-hour fake blocks covering the visible window
+    const blockStart = new Date(from)
+    blockStart.setMinutes(0, 0, 0)
+    while (blockStart < to) {
+      const blockStop = new Date(blockStart.getTime() + 60 * 60 * 1000)
+      programmes.push({
+        channel: epgId,
+        title: c.name,
+        start: blockStart.toISOString(),
+        stop: blockStop.toISOString(),
+        desc: 'Composite stream',
+      })
+      blockStart.setTime(blockStop.getTime())
+    }
+
+    channelList.push({
+      id: epgId,
+      name: c.name,
+      icon: null,
+      url: `/composite-stream/${c.id}/playlist.m3u8`,
+      channelId: `composite-${c.id}`,
+      programmes,
+    })
+  }
+
   res.json({ channels: channelList, from: from.toISOString(), to: to.toISOString() })
 })
 

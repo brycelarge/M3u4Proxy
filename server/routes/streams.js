@@ -284,6 +284,8 @@ router.get('/composite-stream/:id/playlist.m3u8', async (req, res) => {
     const compositeId = parseInt(req.params.id)
     const session = await getCompositeSession(compositeId, db, req.username)
 
+    session.trackViewer(req.ip)
+
     const playlistPath = join(session.outputPath, 'playlist.m3u8')
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl')
     res.sendFile(playlistPath)
@@ -298,6 +300,8 @@ router.get('/composite-stream/:id/:segment', async (req, res) => {
   try {
     const compositeId = parseInt(req.params.id)
     const session = await getCompositeSession(compositeId, db, req.username)
+
+    session.trackViewer(req.ip)
 
     const segmentPath = join(session.outputPath, req.params.segment)
     res.setHeader('Content-Type', 'video/mp2t')
@@ -330,7 +334,7 @@ router.get('/internal-stream/composite-:compositeId-:role', async (req, res) => 
     console.log(`[internal-stream] Connecting to channel ${source.channel_id} (${source.tvg_name})`)
     console.log(`[internal-stream] URL: ${source.url}`)
 
-    await connectClient(source.channel_id, source.url, source.tvg_name, res, source.source_id, req.username)
+    await connectClient(source.channel_id, source.url, source.tvg_name, res, source.source_id, req.username, compositeId)
   } catch (error) {
     console.error(`[internal-stream] Failed for composite-${compositeId}-${role}:`, error.message)
     console.error(`[internal-stream] Stack:`, error.stack)

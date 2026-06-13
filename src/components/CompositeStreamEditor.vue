@@ -13,12 +13,15 @@ const form = ref({
   description: '',
   layout_config: {},
   audio_config: {},
-  sources: []
+  sources: [],
+  playlist_id: null,
+  sort_order: 0
 })
 
 const presets = ref({})
 const selectedPreset = ref('main-pip-right')
 const channels = ref([])
+const playlists = ref([])
 const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -30,16 +33,16 @@ onMounted(async () => {
   loading.value = true
   error.value = ''
   try {
-    // Get composite playlists and their channels
+    // Get playlists for assignment dropdown
     const allPlaylists = await api.getPlaylists()
-    const compositePlaylists = allPlaylists.filter(p => p.playlist_type === 'composite')
+    playlists.value = allPlaylists.filter(p => p.playlist_type !== 'composite' && p.playlist_type !== 'vod')
 
     // Load layout presets first
     presets.value = await api.getLayoutPresets()
 
-    // Load channels from all composite playlists
-    if (compositePlaylists.length > 0) {
-      const channelPromises = compositePlaylists.map(p => api.getPlaylistChannels(p.id))
+    // Load channels from all regular playlists
+    if (playlists.value.length > 0) {
+      const channelPromises = playlists.value.map(p => api.getPlaylistChannels(p.id))
       const channelArrays = await Promise.all(channelPromises)
 
       // Flatten and dedupe channels by ID
@@ -60,6 +63,8 @@ onMounted(async () => {
         description: streamData.description || '',
         layout_config: JSON.parse(streamData.layout_config),
         audio_config: JSON.parse(streamData.audio_config),
+        playlist_id: streamData.playlist_id || null,
+        sort_order: streamData.sort_order || 0,
         sources: streamData.sources.map(s => ({
           channelId: s.source_channel_id,
           role: s.role,
@@ -178,6 +183,8 @@ async function save() {
       description: form.value.description,
       layout_config: form.value.layout_config,
       audio_config: form.value.audio_config,
+      playlist_id: form.value.playlist_id,
+      sort_order: form.value.sort_order,
       sources: form.value.sources.filter(s => s.channelId).map(s => ({
         channelId: s.channelId,
         role: s.role,
@@ -266,6 +273,29 @@ const filteredChannels = computed(() => {
               rows="2"
               class="w-full bg-[#13151f] border border-[#2e3250] rounded-lg px-4 py-2 text-slate-200 placeholder-slate-600 focus:border-indigo-500 focus:outline-none resize-none"
             ></textarea>
+          </div>
+
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-slate-300 mb-2">Playlist</label>
+              <select
+                v-model="form.playlist_id"
+                class="w-full bg-[#13151f] border border-[#2e3250] rounded-lg px-4 py-2 text-slate-200 focus:border-indigo-500 focus:outline-none"
+              >
+                <option :value="null">— None —</option>
+                <option v-for="p in playlists" :key="p.id" :value="p.id">{{ p.name }}</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-300 mb-2">Channel Number</label>
+              <input
+                v-model.number="form.sort_order"
+                type="number"
+                min="0"
+                placeholder="0"
+                class="w-full bg-[#13151f] border border-[#2e3250] rounded-lg px-4 py-2 text-slate-200 placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
           </div>
         </div>
 

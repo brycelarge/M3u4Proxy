@@ -550,6 +550,27 @@ router.get('/playlists/:id/m3u', async (req, res) => {
     channels = [...channels].sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
   }
 
+  // Append composite streams assigned to this playlist
+  const composites = db.prepare(`
+    SELECT id, name, sort_order
+    FROM composite_streams
+    WHERE playlist_id = ? AND active = 1
+    ORDER BY sort_order
+  `).all(playlist.id)
+
+  for (const c of composites) {
+    channels.push({
+      id: c.id,
+      tvg_id: `composite-${c.id}`,
+      tvg_name: c.name,
+      tvg_logo: '',
+      group_title: 'Composite',
+      sort_order: c.sort_order || (channels.length + 1),
+      is_composite: true,
+      url: ''
+    })
+  }
+
   const proto = req.headers['x-forwarded-proto'] || req.protocol
   const host = req.headers['x-forwarded-host'] || req.headers.host
   const baseUrl = `${proto}://${host}`
@@ -570,7 +591,6 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
   const t0 = Date.now()
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id)
   if (!playlist) return res.status(404).json({ error: 'Playlist not found' })
-  if (playlist.playlist_type === 'composite') return res.status(400).json({ error: 'XMLTV not available for composite playlists' })
 
   // Get all channels — no OR-join on epg_mappings (slow). Apply EPG mapping in JS.
   const allChannels = db.prepare(`
@@ -607,6 +627,29 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
     } else {
       ch.epg_id = ch.tvg_id || ''
     }
+  }
+
+  // Append composite streams for this playlist
+  const composites = db.prepare(`
+    SELECT id, name, sort_order
+    FROM composite_streams
+    WHERE playlist_id = ? AND active = 1
+    ORDER BY sort_order
+  `).all(playlist.id)
+
+  for (const c of composites) {
+    allChannels.push({
+      id: c.id,
+      tvg_id: `composite-${c.id}`,
+      epg_id: `composite-${c.id}`,
+      tvg_name: c.name,
+      tvg_logo: '',
+      group_title: 'Composite',
+      sort_order: c.sort_order || (allChannels.length + 1),
+      is_composite: true,
+      url: '',
+      normalized_name: null
+    })
   }
 
   const t1 = Date.now()
@@ -647,7 +690,7 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
   const hostIp = process.env.HOST_IP
   const baseUrl = hostIp ? `${proto}://${hostIp}:${port}` : `${proto}://${host}`
   const cacheKey = buildPlaylistXmltvSignature(playlist.id, mappedChannels, epgMappings, cacheRows)
-  
+
   // Check for cached file on disk
   const cachedPath = getPlaylistXmltvCachePath(playlist.id, cacheKey, compress)
   if (cachedPath) {
@@ -662,7 +705,7 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
   const t2 = Date.now()
   const { generateXmltv } = await import('../services/xmltv.js')
   const generator = generateXmltv(db, mappedChannels, relevantSourceIds, baseUrl)
-  
+
   // Stream to disk cache (with gzip if compress=true)
   const cachePath = await streamToXmltvCache(
     playlist.id,
@@ -671,10 +714,10 @@ router.get('/playlists/:id/xmltv', async (req, res) => {
     compress,
     relevantSourceIds
   )
-  
+
   const t3 = Date.now()
   console.log(`[xmltv] streamToXmltvCache: ${t3 - t2}ms, total: ${t3 - t0}ms`)
-  
+
   res.setHeader('X-XMLTV-Cache', 'MISS')
   res.setHeader('X-XMLTV-Sources', String(relevantSourceIds.length))
   if (compress) res.setHeader('Content-Encoding', 'gzip')

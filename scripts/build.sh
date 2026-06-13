@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
     echo "Usage: $(basename "$0") [options]"
     echo "Options:"
-    echo "  -r REPO       Docker repository (default: ghcr.io/brycelarge/tuliprox-vpn)"
+    echo "  -r REPO       Docker repository (default: ghcr.io/brycelarge/M3u4Proxy)"
     echo "  -p            Push images after build"
     echo "  -l            Build/push :latest (master)"
     echo "  -n            Build/push :next (develop)"
@@ -21,7 +21,7 @@ log() {
 
 trap 'log "Error on line $LINENO"' ERR
 
-DOCKER_REPO="ghcr.io/brycelarge/m3u4proxy"
+DOCKER_REPO="ghcr.io/brycelarge/M3u4Proxy"
 PUSH=false
 BUILD_LATEST=false
 BUILD_NEXT=false

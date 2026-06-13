@@ -1,4 +1,9 @@
-.git
-node_modules
-.env
 data/
+node_modules/
+.git/
+dist/
+*.log
+.DS_Store
+.env.local
+.env
+docker-compose.yml

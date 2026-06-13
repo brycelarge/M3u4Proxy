@@ -43,7 +43,7 @@ router.get('/:id', (req, res) => {
 
 // Create composite stream
 router.post('/', (req, res) => {
-  const { name, description, layout_config, audio_config, sources } = req.body
+  const { name, description, layout_config, audio_config, sources, playlist_id, sort_order } = req.body
 
   if (!name || !layout_config || !sources || sources.length === 0) {
     return res.status(400).json({ error: 'Missing required fields' })
@@ -52,9 +52,9 @@ router.post('/', (req, res) => {
   try {
     const insert = db.transaction(() => {
       const result = db.prepare(`
-        INSERT INTO composite_streams (name, description, layout_config, audio_config)
-        VALUES (?, ?, ?, ?)
-      `).run(name, description || '', JSON.stringify(layout_config), JSON.stringify(audio_config || {}))
+        INSERT INTO composite_streams (name, description, layout_config, audio_config, playlist_id, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(name, description || '', JSON.stringify(layout_config), JSON.stringify(audio_config || {}), playlist_id || null, sort_order || 0)
 
       const compositeId = result.lastInsertRowid
 
@@ -89,23 +89,34 @@ router.post('/', (req, res) => {
 
 // Update composite stream
 router.put('/:id', (req, res) => {
-  const { name, description, layout_config, audio_config, sources, active } = req.body
+  const { name, description, layout_config, audio_config, sources, active, playlist_id, sort_order } = req.body
   const compositeId = req.params.id
 
   try {
     const update = db.transaction(() => {
-      db.prepare(`
-        UPDATE composite_streams
-        SET name = ?, description = ?, layout_config = ?, audio_config = ?, active = ?, updated_at = datetime('now')
-        WHERE id = ?
-      `).run(
+      const fields = ['name = ?', 'description = ?', 'layout_config = ?', 'audio_config = ?', 'active = ?']
+      const values = [
         name,
         description || '',
         JSON.stringify(layout_config),
         JSON.stringify(audio_config || {}),
         active !== undefined ? (active ? 1 : 0) : 1,
-        compositeId
-      )
+      ]
+
+      if (playlist_id !== undefined) {
+        fields.push('playlist_id = ?')
+        values.push(playlist_id || null)
+      }
+      if (sort_order !== undefined) {
+        fields.push('sort_order = ?')
+        values.push(sort_order || 0)
+      }
+
+      db.prepare(`
+        UPDATE composite_streams
+        SET ${fields.join(', ')}, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(...values, compositeId)
 
       if (sources) {
         db.prepare('DELETE FROM composite_stream_sources WHERE composite_stream_id = ?').run(compositeId)

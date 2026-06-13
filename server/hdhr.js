@@ -67,7 +67,30 @@ function getPlaylistChannels(playlistId) {
   })
 
   // Sort by channel number (sort_order) after deduplication
-  return channels.sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
+  channels.sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
+
+  // Append composite streams assigned to this playlist
+  const composites = db.prepare(`
+    SELECT id, name, sort_order
+    FROM composite_streams
+    WHERE playlist_id = ? AND active = 1
+    ORDER BY sort_order
+  `).all(playlistId)
+
+  for (const c of composites) {
+    channels.push({
+      id: c.id,
+      tvg_id: `composite-${c.id}`,
+      tvg_name: c.name,
+      tvg_logo: '',
+      group_title: 'Composite',
+      sort_order: c.sort_order || (channels.length + 1),
+      is_composite: true,
+      url: ''
+    })
+  }
+
+  return channels
 }
 
 // Stable 8-char device ID derived from playlist ID — same across restarts
@@ -133,7 +156,9 @@ function buildLineupJson(base, playlistId) {
     const entry = {
       GuideNumber: ch.sort_order > 0 ? String(ch.sort_order) : String(idx + 1),
       GuideName: ch.tvg_name,
-      URL: `${base}/stream/${ch.id}`,
+      URL: ch.is_composite
+        ? `${base}/composite-stream/${ch.id}/playlist.m3u8`
+        : `${base}/stream/${ch.id}`,
       HD: 1,
       Favorite: 0,
     }
@@ -153,7 +178,10 @@ function buildLineupM3u(base, playlistId) {
     const logo = ch.tvg_logo ? ` tvg-logo="${base}/api/logo?url=${encodeURIComponent(ch.tvg_logo)}"` : ''
     const group = ch.group_title ? ` group-title="${ch.group_title}"` : ''
     lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${ch.tvg_name}" tvg-chno="${chno}"${logo}${group},${ch.tvg_name}`)
-    lines.push(`${base}/stream/${ch.id}`)
+    lines.push(ch.is_composite
+      ? `${base}/composite-stream/${ch.id}/playlist.m3u8`
+      : `${base}/stream/${ch.id}`
+    )
   })
   return lines.join('\n')
 }

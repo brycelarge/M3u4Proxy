@@ -162,7 +162,7 @@ onMounted(() => {
                 class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 border border-indigo-500/20 flex items-center gap-1"
               >
                 <span class="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse"></span>
-                Streaming ({{ getSessionStatus(stream.id).clients }} viewers)
+                Streaming ({{ getSessionStatus(stream.id).hlsViewers || 0 }} viewers)
               </span>
             </div>
 

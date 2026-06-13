@@ -67,6 +67,24 @@ export async function* generateXmltv(db, mappedChannels, relevantSourceIds, host
     yield buildChannelXml(ch, hostUrl) + '\n'
   }
 
+  // Generate fake rolling EPG for composite streams
+  const now = new Date()
+  now.setMinutes(0, 0, 0)
+  for (const ch of mappedChannels) {
+    if (!ch.is_composite) continue
+    const channelId = escapeXml(ch.epg_id)
+    // 24h rolling, 1-hour blocks
+    for (let h = -1; h < 24; h++) {
+      const start = new Date(now.getTime() + h * 60 * 60 * 1000)
+      const stop = new Date(start.getTime() + 60 * 60 * 1000)
+      const fmt = (d) =>
+        `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')} +0000`
+      yield `  <programme start="${fmt(start)}" stop="${fmt(stop)}" channel="${channelId}">\n`
+      yield `    <title>${escapeXml(ch.tvg_name || 'Composite Stream')}</title>\n`
+      yield `  </programme>\n`
+    }
+  }
+
   // Load EPG mappings to map source_tvg_id -> target_tvg_id
   const epgMappings = db.prepare('SELECT source_tvg_id, target_tvg_id FROM epg_mappings').all()
   const sourceToTargetMap = {}

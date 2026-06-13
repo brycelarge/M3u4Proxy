@@ -55,11 +55,13 @@ export class CompositeSession extends EventEmitter {
     this.sourceSessions = new Map() // role -> session info
     this.ffmpegProcess = null
     this.clients = new Set()
+    this.hlsViewers = new Map() // clientId -> lastSeenTimestamp
+    this._hlsViewerCleanup = null
     this.outputPath = join(process.env.TRANSCODE_DIR || '/transcode', 'composite-streams', `${compositeId}`)
     this.dead = false
     this.startTime = null
     this.lastActivity = Date.now()
-    this.internalStreamPort = 3005 // Same as main app
+    this.internalStreamPort = process.env.PORT || 3005
   }
 
   async start() {
@@ -102,15 +104,15 @@ export class CompositeSession extends EventEmitter {
       throw new Error('No source channels configured')
     }
 
-    // Validate source URLs are accessible
+    // Validate source URLs are accessible (skip HEAD, many streams don't support it)
     const unavailableSources = []
     for (const source of sources) {
       try {
         const testResponse = await fetch(source.url, {
-          method: 'HEAD',
+          method: 'GET',
           signal: AbortSignal.timeout(5000)
         })
-        if (!testResponse.ok) {
+        if (!testResponse.ok && testResponse.status !== 405) {
           unavailableSources.push(`${source.tvg_name} (${testResponse.status})`)
         }
       } catch (error) {
@@ -155,43 +157,41 @@ export class CompositeSession extends EventEmitter {
     const videoMap = []
     let filterIndex = 0
 
-    // Build inputs and scale filters
+    const [canvasW, canvasH] = (layoutConfig.resolution || '1920x1080').split('x').map(Number)
+    const sourceArray = Array.from(this.sourceSessions.entries())
+
+    // Add blank canvas as lavfi input (index 0)
+    inputs.push('-f', 'lavfi', '-i', `color=c=black:s=${canvasW}x${canvasH}:r=30`)
+
+    // Build source inputs and scale filters (indices 1, 2, ...)
     for (const [role, session] of this.sourceSessions.entries()) {
       inputs.push('-i', session.internalUrl)
 
       const pos = session.position
       if (pos && pos.w && pos.h) {
-        filterParts.push(`[${filterIndex}:v]scale=${pos.w}:${pos.h}[v${filterIndex}]`)
+        filterParts.push(`[${filterIndex + 1}:v]scale=${pos.w}:${pos.h}[v${filterIndex}]`)
       } else {
-        filterParts.push(`[${filterIndex}:v]copy[v${filterIndex}]`)
+        filterParts.push(`[${filterIndex + 1}:v]copy[v${filterIndex}]`)
       }
 
       filterIndex++
     }
 
-    // Build overlay chain
-    let overlayChain = '[v0]'
+    // Overlay all sources onto the base canvas
+    let overlayChain = '[0:v]'
     let overlayIndex = 1
-    const sourceArray = Array.from(this.sourceSessions.entries())
 
-    for (let i = 1; i < sourceArray.length; i++) {
+    for (let i = 0; i < sourceArray.length; i++) {
       const [role, session] = sourceArray[i]
       const pos = session.position
 
       if (i === sourceArray.length - 1) {
-        // Last overlay outputs to [out]
         filterParts.push(`${overlayChain}[v${i}]overlay=${pos.x}:${pos.y}[out]`)
       } else {
-        // Intermediate overlays
         filterParts.push(`${overlayChain}[v${i}]overlay=${pos.x}:${pos.y}[tmp${overlayIndex}]`)
         overlayChain = `[tmp${overlayIndex}]`
         overlayIndex++
       }
-    }
-
-    // If only one source, just use it directly
-    if (sourceArray.length === 1) {
-      filterParts.push('[v0]copy[out]')
     }
 
     const filterComplex = filterParts.join(';')
@@ -199,9 +199,9 @@ export class CompositeSession extends EventEmitter {
     // Video mapping
     videoMap.push('-map', '[out]')
 
-    // Audio mapping
+    // Audio mapping - sources are at indices 1, 2, ...
     for (let i = 0; i < sourceArray.length; i++) {
-      audioMaps.push('-map', `${i}:a?`)
+      audioMaps.push('-map', `${i + 1}:a?`)
     }
 
     // Build complete command
@@ -217,6 +217,7 @@ export class CompositeSession extends EventEmitter {
       '-crf', '23',
       '-maxrate', settings.video_bitrate,
       '-bufsize', `${parseInt(settings.video_bitrate) * 2}k`,
+      '-pix_fmt', 'yuv420p',
       '-c:a', 'aac',
       '-b:a', settings.audio_bitrate,
       '-ac', '2',
@@ -228,8 +229,9 @@ export class CompositeSession extends EventEmitter {
       join(this.outputPath, 'playlist.m3u8')
     ]
 
-    // Add hardware acceleration if configured
-    if (settings.hwaccel && settings.hwaccel !== 'none') {
+    // Add hardware acceleration if configured with a valid specific decoder
+    const validHwaccels = ['cuda', 'vaapi', 'dxva2', 'videotoolbox', 'qsv', 'drm', 'opencl']
+    if (settings.hwaccel && validHwaccels.includes(settings.hwaccel)) {
       cmd.unshift('-hwaccel', settings.hwaccel)
     }
 
@@ -254,9 +256,9 @@ export class CompositeSession extends EventEmitter {
     })
 
     this.ffmpegProcess.stderr.on('data', (data) => {
-      const output = data.toString()
-      if (output.includes('error') || output.includes('Error')) {
-        console.error(`[composite-${this.compositeId}] FFmpeg error:`, output.trim())
+      const output = data.toString().trim()
+      if (output) {
+        console.error(`[composite-${this.compositeId}] FFmpeg:`, output)
       }
     })
 
@@ -276,13 +278,16 @@ export class CompositeSession extends EventEmitter {
     await this.waitForPlaylist()
   }
 
-  async waitForPlaylist(timeout = 10000) {
+  async waitForPlaylist(timeout = 30000) {
     const playlistPath = join(this.outputPath, 'playlist.m3u8')
     const startTime = Date.now()
 
     while (!existsSync(playlistPath)) {
       if (Date.now() - startTime > timeout) {
         throw new Error('Timeout waiting for HLS playlist')
+      }
+      if (this.ffmpegProcess && this.ffmpegProcess.exitCode !== null) {
+        throw new Error(`FFmpeg exited with code ${this.ffmpegProcess.exitCode} before creating playlist`)
       }
       await new Promise(resolve => setTimeout(resolve, 100))
     }
@@ -312,6 +317,28 @@ export class CompositeSession extends EventEmitter {
     console.log(`[composite-${this.compositeId}] Client added: ${clientId} (total: ${this.clients.size})`)
   }
 
+  trackViewer(clientId) {
+    const now = Date.now()
+    const wasEmpty = this.hlsViewers.size === 0
+    this.hlsViewers.set(clientId, now)
+    this.lastActivity = now
+
+    // Start cleanup timer if not running
+    if (!this._hlsViewerCleanup) {
+      this._hlsViewerCleanup = setInterval(() => {
+        if (this.dead) {
+          clearInterval(this._hlsViewerCleanup)
+          this._hlsViewerCleanup = null
+          return
+        }
+        const cutoff = Date.now() - 15000 // 15s TTL
+        for (const [id, ts] of this.hlsViewers) {
+          if (ts < cutoff) this.hlsViewers.delete(id)
+        }
+      }, 5000)
+    }
+  }
+
   removeClient(clientId) {
     this.clients.delete(clientId)
     this.lastActivity = Date.now()
@@ -321,8 +348,8 @@ export class CompositeSession extends EventEmitter {
     if (this.clients.size === 0) {
       const inactivityTimeout = this.getSettings().inactivity_timeout * 1000
       setTimeout(() => {
-        if (this.clients.size === 0 && !this.dead) {
-          console.log(`[composite-${this.compositeId}] No clients, cleaning up`)
+        if (this.clients.size === 0 && this.hlsViewers.size === 0 && !this.dead) {
+          console.log(`[composite-${this.compositeId}] No clients or HLS viewers, cleaning up`)
           this.destroy()
         }
       }, inactivityTimeout)
@@ -334,7 +361,7 @@ export class CompositeSession extends EventEmitter {
       encoding_preset: 'veryfast',
       video_bitrate: '4000k',
       audio_bitrate: '128k',
-      hwaccel: 'auto',
+      hwaccel: 'none',
       inactivity_timeout: 300
     }
 
@@ -379,15 +406,27 @@ export class CompositeSession extends EventEmitter {
     // Remove from sessions map
     compositeSessions.delete(this.compositeId)
 
+    if (this._hlsViewerCleanup) {
+      clearInterval(this._hlsViewerCleanup)
+      this._hlsViewerCleanup = null
+    }
+
     this.emit('destroyed')
     this.removeAllListeners()
   }
 
   getStatus() {
+    // Prune stale HLS viewers before reporting
+    const cutoff = Date.now() - 15000
+    for (const [id, ts] of this.hlsViewers) {
+      if (ts < cutoff) this.hlsViewers.delete(id)
+    }
+
     return {
       compositeId: this.compositeId,
       active: !this.dead && this.ffmpegProcess !== null,
       clients: this.clients.size,
+      hlsViewers: this.hlsViewers.size,
       sources: this.sourceSessions.size,
       uptime: this.startTime ? Date.now() - this.startTime : 0,
       lastActivity: this.lastActivity

@@ -53,7 +53,9 @@ export function buildM3U(channels, epgMap = new Map(), opts = {}) {
     const catchup = catchupSrc
       ? ` catchup="default" catchup-source="${catchupSrc}" catchup-days="${catchupDays}"`
       : ''
-    const streamUrl = baseUrl ? `${baseUrl}/stream/${ch.id}` : ch.url
+    const streamUrl = ch.is_composite
+      ? `${baseUrl}/composite-stream/${ch.id}/playlist.m3u8`
+      : (baseUrl ? `${baseUrl}/stream/${ch.id}` : ch.url)
     lines.push(`#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${displayName}"${chno}${logo}${group}${catchup},${displayName}`)
     lines.push(streamUrl)
   }
