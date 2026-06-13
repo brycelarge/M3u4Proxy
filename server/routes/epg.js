@@ -895,9 +895,21 @@ router.get('/epg/guide-grid', async (req, res) => {
 
   // Filter to channels with EPG data
   const mappedChannels = channels.filter(ch => ch.epg_id && ch.epg_id.trim())
-  if (!mappedChannels.length) return res.json({ channels: [], from: from.toISOString(), to: to.toISOString() })
 
-  // Build channel list
+  // Query composite streams assigned to this playlist
+  const composites = db.prepare(`
+    SELECT id, name, sort_order
+    FROM composite_streams
+    WHERE playlist_id = ? AND active = 1
+    ORDER BY sort_order
+  `).all(activePlaylistId)
+
+  // Early return only if truly nothing to show
+  if (!mappedChannels.length && !composites.length) {
+    return res.json({ channels: [], from: from.toISOString(), to: to.toISOString() })
+  }
+
+  // Build channel list from mapped channels
   const channelList = mappedChannels.map(ch => ({
     id: ch.epg_id,
     name: ch.tvg_name || ch.name || 'Unknown',
@@ -938,14 +950,7 @@ router.get('/epg/guide-grid', async (req, res) => {
     ch.programmes.sort((a, b) => new Date(a.start) - new Date(b.start))
   }
 
-  // Append composite streams assigned to this playlist
-  const composites = db.prepare(`
-    SELECT id, name, sort_order
-    FROM composite_streams
-    WHERE playlist_id = ? AND active = 1
-    ORDER BY sort_order
-  `).all(activePlaylistId)
-
+  // Append composite streams with fake rolling programmes
   for (const c of composites) {
     const epgId = `composite-${c.id}`
     const programmes = []
