@@ -101,25 +101,31 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
   }
 
   try {
-    // Some providers require .ts extension even for VOD files
+    // Provider redirects numeric IDs to hash URLs only when no extension is present
     let fetchUrl = upstreamUrl
-    if (source?.force_ts_extension && !fetchUrl.endsWith('.ts')) {
-      fetchUrl = fetchUrl.replace(/\.(mkv|mp4|avi|m4v)$/i, '.ts')
-      console.log(`[vod] Converting extension to .ts (provider requirement)`)
+    const isForceTs = source?.force_ts_extension === 1 || source?.force_ts_extension === true
+    if (isForceTs) {
+      fetchUrl = upstreamUrl.replace(/\.(mkv|mp4|avi|m4v|ts)$/i, '')
+      console.log(`[vod] Stripping extension for provider redirect`)
     }
 
     const headers = {
-      'User-Agent': req.get('user-agent') || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': '*/*',
-      'Accept-Encoding': 'identity',
       'Connection': 'keep-alive',
+      'Referer': 'https://pia.cx/',
+    }
+    // Only pass Accept-Encoding if client sent it; don't force identity
+    const clientEncoding = req.get('accept-encoding')
+    if (clientEncoding) {
+      headers['Accept-Encoding'] = clientEncoding
     }
 
     if (range) {
       headers['Range'] = range
     }
 
-    console.log(`[vod] Fetching upstream: ${fetchUrl.substring(0, 100)}...`)
+    console.log(`[vod] Fetching upstream: ${fetchUrl.substring(0, 120)}...`)
     console.log(`[vod] Headers:`, JSON.stringify(headers, null, 2))
 
     const upstream = await fetch(fetchUrl, {
@@ -130,7 +136,7 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
 
     if (!upstream.ok) {
       console.error(`[vod] Upstream ${upstream.status} ${upstream.statusText} for "${channelName}"`)
-      console.error(`[vod] URL: ${upstreamUrl}`)
+      console.error(`[vod] URL: ${fetchUrl}`)
       return res.status(upstream.status).send('Upstream error')
     }
 
@@ -144,17 +150,19 @@ export async function connectVodClient(channelId, upstreamUrl, channelName, req,
     const acceptRanges = upstream.headers.get('accept-ranges')
     const contentRange = upstream.headers.get('content-range')
 
-    // Set Content-Type with fallback based on URL extension
-    if (contentType) {
+    // When force_ts_extension is enabled, provider serves MPEG-TS regardless of original extension
+    if (isForceTs) {
+      res.setHeader('Content-Type', 'video/mp2t')
+    } else if (contentType) {
       res.setHeader('Content-Type', contentType)
     } else {
-      // Fallback: detect from URL
-      const url = upstreamUrl.toLowerCase()
-      if (url.includes('.mp4')) res.setHeader('Content-Type', 'video/mp4')
+      // Fallback: detect from the actual fetch URL
+      const url = fetchUrl.toLowerCase()
+      if (url.includes('.ts')) res.setHeader('Content-Type', 'video/mp2t')
+      else if (url.includes('.mp4')) res.setHeader('Content-Type', 'video/mp4')
       else if (url.includes('.mkv')) res.setHeader('Content-Type', 'video/x-matroska')
       else if (url.includes('.avi')) res.setHeader('Content-Type', 'video/x-msvideo')
-      else if (url.includes('.ts')) res.setHeader('Content-Type', 'video/mp2t')
-      else res.setHeader('Content-Type', 'video/mp4') // Default to mp4
+      else res.setHeader('Content-Type', 'video/mp4')
     }
 
     if (contentLength) res.setHeader('Content-Length', contentLength)
