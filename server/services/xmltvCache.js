@@ -64,7 +64,8 @@ export function setPlaylistXmltvCache(playlistId, key, xml, gzip, sourceIds = []
 // Returns the final file path
 export async function streamToXmltvCache(playlistId, key, generator, compress = false, sourceIds = []) {
   const paths = getCachePaths(playlistId, key)
-  const tmpPath = compress ? paths.gzTmp : paths.xmlTmp
+  const tmpBasePath = compress ? paths.gzTmp : paths.xmlTmp
+  const tmpPath = `${tmpBasePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`
   const finalPath = compress ? paths.gz : paths.xml
 
   return new Promise(async (resolve, reject) => {

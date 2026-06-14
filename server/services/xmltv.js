@@ -29,8 +29,8 @@ function normalizeCategory(groupTitle) {
 
 function buildChannelXml(ch, hostUrl) {
   const displayName = ch.tvg_name || ch.name || 'Unknown'
-  const channelNumber = Number.isFinite(Number(ch.sort_order)) && Number(ch.sort_order) > 0
-    ? String(ch.sort_order)
+  const channelNumber = Number.isFinite(Number(ch.sort_order)) && Number(ch.sort_order) >= 0
+    ? String(Number(ch.sort_order) + 1)
     : ''
   const logo = ch.custom_logo || ch.tvg_logo || ''
   const groupTitle = ch.group_title || ''

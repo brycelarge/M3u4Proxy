@@ -50,10 +50,10 @@ function getPlaylistChannels(playlistId) {
     LEFT JOIN sources s ON s.id = COALESCE(pc.source_id, sc.source_id)
     WHERE pc.playlist_id = ?
     ORDER BY
+      pc.sort_order, pc.id,
       sc.normalized_name,
       source_priority ASC,
-      quality_order ASC,
-      pc.sort_order, pc.id
+      quality_order ASC
   `).all(playlistId)
 
   // Deduplicate by normalized_name - keep only the first (best) variant
@@ -67,7 +67,12 @@ function getPlaylistChannels(playlistId) {
   })
 
   // Sort by channel number (sort_order) after deduplication
-  channels.sort((a, b) => (a.sort_order || 9999) - (b.sort_order || 9999))
+  channels.sort((a, b) => {
+    const aOrder = Number.isFinite(Number(a.sort_order)) ? Number(a.sort_order) : 999999
+    const bOrder = Number.isFinite(Number(b.sort_order)) ? Number(b.sort_order) : 999999
+    if (aOrder !== bOrder) return aOrder - bOrder
+    return a.id - b.id
+  })
 
   // Append composite streams assigned to this playlist
   const composites = db.prepare(`
@@ -89,6 +94,13 @@ function getPlaylistChannels(playlistId) {
       url: ''
     })
   }
+
+  channels.sort((a, b) => {
+    const aOrder = Number.isFinite(Number(a.sort_order)) ? Number(a.sort_order) : 999999
+    const bOrder = Number.isFinite(Number(b.sort_order)) ? Number(b.sort_order) : 999999
+    if (aOrder !== bOrder) return aOrder - bOrder
+    return a.id - b.id
+  })
 
   return channels
 }
